@@ -451,6 +451,11 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		fileLength,
 	)
 
+	// In handleMessage function, after messageStore.StoreMessage:
+	if !msg.Info.IsFromMe && content != "" {
+		SendWebhook(sender, content, chatJID, msg.Info.IsFromMe)
+	}
+
 	if err != nil {
 		logger.Warnf("Failed to store message: %v", err)
 	} else {
@@ -641,7 +646,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	}
 
 	// Download the media using whatsmeow client
-	mediaData, err := client.Download(downloader)
+	mediaData, err := client.Download(context.Background(), downloader)
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
 	}
@@ -787,8 +792,8 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 }
 
 func main() {
-	// Set up logger
-	logger := waLog.Stdout("Client", "INFO", true)
+	// Set up logger with DEBUG level for more detailed logging
+	logger := waLog.Stdout("Client", "DEBUG", true)
 	logger.Infof("Starting WhatsApp client...")
 
 	// Create database connection for storing session data
@@ -800,14 +805,14 @@ func main() {
 		return
 	}
 
-	container, err := sqlstore.New("sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
+	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return
 	}
 
 	// Get device store - This contains session information
-	deviceStore, err := container.GetFirstDevice()
+	deviceStore, err := container.GetFirstDevice(context.Background())
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// No device exists, create one
@@ -846,54 +851,111 @@ func main() {
 			handleHistorySync(client, messageStore, v, logger)
 
 		case *events.Connected:
-			logger.Infof("Connected to WhatsApp")
+			logger.Infof("✓ Successfully connected to WhatsApp servers")
 
 		case *events.LoggedOut:
-			logger.Warnf("Device logged out, please scan QR code to log in again")
+			logger.Warnf("⚠️  Device logged out, please scan QR code to log in again")
+
+		case *events.Disconnected:
+			logger.Warnf("⚠️  Disconnected from WhatsApp servers")
+
+		case *events.ConnectFailure:
+			logger.Errorf("❌ Connection failure: %v", v.Reason)
+
+		case *events.StreamError:
+			logger.Errorf("❌ Stream error: %v", v.Code)
+
+		case *events.ClientOutdated:
+			logger.Errorf("❌ Client outdated - please update whatsmeow library")
 		}
 	})
 
 	// Create channel to track connection success
 	connected := make(chan bool, 1)
-
-	// Connect to WhatsApp
-	if client.Store.ID == nil {
-		// No ID stored, this is a new client, need to pair with phone
-		qrChan, _ := client.GetQRChannel(context.Background())
-		err = client.Connect()
-		if err != nil {
-			logger.Errorf("Failed to connect: %v", err)
-			return
-		}
-
-		// Print QR code for pairing with phone
-		for evt := range qrChan {
-			if evt.Event == "code" {
-				fmt.Println("\nScan this QR code with your WhatsApp app:")
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-			} else if evt.Event == "success" {
-				connected <- true
-				break
+	
+	// Add connection retry logic
+	maxRetries := 3
+	var connErr error
+	
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		logger.Infof("Connection attempt %d/%d...", attempt, maxRetries)
+		
+		// Connect to WhatsApp
+		if client.Store.ID == nil {
+			// No ID stored, this is a new client, need to pair with phone
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			
+			qrChan, connErr := client.GetQRChannel(ctx)
+			if connErr != nil {
+				logger.Errorf("Failed to get QR channel: %v", connErr)
+				if attempt == maxRetries {
+					return
+				}
+				time.Sleep(5 * time.Second)
+				continue
 			}
-		}
+			
+			connErr = client.Connect()
+			if connErr != nil {
+				logger.Errorf("Failed to connect (attempt %d): %v", attempt, connErr)
+				if attempt == maxRetries {
+					return
+				}
+				time.Sleep(5 * time.Second)
+				continue
+			}
 
-		// Wait for connection
-		select {
-		case <-connected:
-			fmt.Println("\nSuccessfully connected and authenticated!")
-		case <-time.After(3 * time.Minute):
-			logger.Errorf("Timeout waiting for QR code scan")
-			return
+			// Print QR code for pairing with phone
+			qrCodeShown := false
+			for evt := range qrChan {
+				if evt.Event == "code" {
+					if !qrCodeShown {
+						fmt.Println("\nScan this QR code with your WhatsApp app:")
+						qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+						fmt.Println("\nWaiting for QR code scan...")
+						qrCodeShown = true
+					}
+				} else if evt.Event == "success" {
+					connected <- true
+					break
+				} else if evt.Event == "timeout" {
+					logger.Warnf("QR code timed out")
+					break
+				}
+			}
+
+			// Wait for connection with timeout
+			select {
+			case <-connected:
+				fmt.Println("\nSuccessfully connected and authenticated!")
+				goto connectionSuccess
+			case <-ctx.Done():
+				logger.Errorf("Timeout waiting for QR code scan (attempt %d)", attempt)
+				client.Disconnect()
+				if attempt == maxRetries {
+					return
+				}
+				time.Sleep(10 * time.Second)
+				continue
+			}
+		} else {
+			// Already logged in, just connect
+			connErr = client.Connect()
+			if connErr != nil {
+				logger.Errorf("Failed to connect (attempt %d): %v", attempt, connErr)
+				if attempt == maxRetries {
+					return
+				}
+				time.Sleep(5 * time.Second)
+				continue
+			}
+			connected <- true
+			break
 		}
-	} else {
-		// Already logged in, just connect
-		err = client.Connect()
-		if err != nil {
-			logger.Errorf("Failed to connect: %v", err)
-			return
-		}
-		connected <- true
 	}
+	
+	connectionSuccess:
 
 	// Wait a moment for connection to stabilize
 	time.Sleep(2 * time.Second)
@@ -988,7 +1050,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		logger.Infof("Getting name for contact: %s", chatJID)
 
 		// Just use contact info (full name)
-		contact, err := client.Store.Contacts.GetContact(jid)
+		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
 		if err == nil && contact.FullName != "" {
 			name = contact.FullName
 		} else if sender != "" {
