@@ -50,9 +50,5 @@ func SendWebhook(sender, content, chatJID string, isFromMe bool) {
 	}
 }
 
-// Add this to your handleMessage function in main.go:
-// After storing the message, send webhook if it's not from you and has content
-//
-// if !msg.Info.IsFromMe && content != "" {
-//     SendWebhook(sender, content, chatJID, msg.Info.IsFromMe)
-// }
+// In main.go, handleMessage forwards webhooks for messages with text content.
+// It will forward self-sent messages when the env var FORWARD_SELF=true.

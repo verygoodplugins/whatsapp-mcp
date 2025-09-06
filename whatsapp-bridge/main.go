@@ -31,6 +31,27 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// Whether to forward messages sent by self via webhook.
+// Defaults to true. Override with env FORWARD_SELF=false.
+var forwardSelfMessages = getEnvBool("FORWARD_SELF", true)
+
+// getEnvBool reads a boolean env var with a default.
+// Accepts: 1/true/yes/on and 0/false/no/off (case-insensitive)
+func getEnvBool(key string, def bool) bool {
+    v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+    if v == "" {
+        return def
+    }
+    switch v {
+    case "1", "true", "yes", "on":
+        return true
+    case "0", "false", "no", "off":
+        return false
+    default:
+        return def
+    }
+}
+
 // Message represents a chat message for our client
 type Message struct {
 	Time      time.Time
@@ -434,6 +455,19 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		return
 	}
 
+	// Auto-download media if present
+	if mediaType != "" && url != "" && len(mediaKey) > 0 {
+		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
+		go func() {
+			success, _, _, downloadPath, err := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+			if success && err == nil {
+				logger.Infof("✅ Auto-downloaded media: %s", downloadPath)
+			} else {
+				logger.Warnf("❌ Auto-download failed: %v", err)
+			}
+		}()
+	}
+
 	// Store message in database
 	err = messageStore.StoreMessage(
 		msg.Info.ID,
@@ -451,10 +485,11 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		fileLength,
 	)
 
-	// In handleMessage function, after messageStore.StoreMessage:
-	if !msg.Info.IsFromMe && content != "" {
-		SendWebhook(sender, content, chatJID, msg.Info.IsFromMe)
-	}
+    // Send webhook for incoming messages
+    // Forward self-messages when FORWARD_SELF=true
+    if content != "" && (forwardSelfMessages || !msg.Info.IsFromMe) {
+        SendWebhook(sender, content, chatJID, msg.Info.IsFromMe)
+    }
 
 	if err != nil {
 		logger.Warnf("Failed to store message: %v", err)
@@ -792,9 +827,15 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 }
 
 func main() {
-	// Set up logger with DEBUG level for more detailed logging
-	logger := waLog.Stdout("Client", "DEBUG", true)
-	logger.Infof("Starting WhatsApp client...")
+    // Set up logger with DEBUG level for more detailed logging
+    logger := waLog.Stdout("Client", "DEBUG", true)
+    logger.Infof("Starting WhatsApp client...")
+
+    if forwardSelfMessages {
+        logger.Infof("FORWARD_SELF enabled: forwarding self messages to webhook")
+    } else {
+        logger.Infof("FORWARD_SELF disabled: self messages will NOT be forwarded")
+    }
 
 	// Create database connection for storing session data
 	dbLog := waLog.Stdout("Database", "INFO", true)

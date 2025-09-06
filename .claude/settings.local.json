@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__memory__recall_memory",
+      "Bash(go build:*)",
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(uv pip install:*)",
+      "Bash(uv run:*)",
+      "Read(/Users/jgarturo/Projects/OpenAI/claude-automation-hub/**)",
+      "Read(/Users/jgarturo/Projects/OpenAI/claude-automation-hub/**)",
+      "Read(/Users/jgarturo/Projects/OpenAI/claude-automation-hub/**)",
+      "Read(/Users/jgarturo/Projects/OpenAI/claude-automation-hub/web/**)",
+      "Read(/Users/jgarturo/Projects/OpenAI/claude-automation-hub/web/dashboard/src/**)",
+      "Read(/Users/jgarturo/Projects/OpenAI/claude-automation-hub/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
