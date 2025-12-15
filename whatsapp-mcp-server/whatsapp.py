@@ -131,9 +131,24 @@ def list_messages(
     page: int = 0,
     include_context: bool = True,
     context_before: int = 1,
-    context_after: int = 1
+    context_after: int = 1,
+    sort_by: str = "newest"
 ) -> List[Message]:
-    """Get messages matching the specified criteria with optional context."""
+    """Get messages matching the specified criteria with optional context.
+    
+    Args:
+        after: Optional ISO-8601 formatted string to only return messages after this date
+        before: Optional ISO-8601 formatted string to only return messages before this date
+        sender_phone_number: Optional phone number to filter messages by sender
+        chat_jid: Optional chat JID to filter messages by chat
+        query: Optional search term to filter messages by content
+        limit: Maximum number of messages to return (default 20)
+        page: Page number for pagination (default 0)
+        include_context: Whether to include messages before and after matches (default True)
+        context_before: Number of messages to include before each match (default 1)
+        context_after: Number of messages to include after each match (default 1)
+        sort_by: Sort order - "newest" (default) or "oldest" for chronological ordering
+    """
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
@@ -178,9 +193,10 @@ def list_messages(
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
             
-        # Add pagination
+        # Add sorting and pagination
         offset = page * limit
-        query_parts.append("ORDER BY messages.timestamp DESC")
+        order = "DESC" if sort_by == "newest" else "ASC"
+        query_parts.append(f"ORDER BY messages.timestamp {order}")
         query_parts.append("LIMIT ? OFFSET ?")
         params.extend([limit, offset])
         

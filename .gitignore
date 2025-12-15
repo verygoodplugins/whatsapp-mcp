@@ -2,3 +2,5 @@
 claude_desktop_config.json
 whatsapp.log
 whatsapp-bridge/.DS_Store
+/whatsapp-bridge/node_modules
+/whatsapp-bridge/store

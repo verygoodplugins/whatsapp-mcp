@@ -39,7 +39,8 @@ def list_messages(
     page: int = 0,
     include_context: bool = True,
     context_before: int = 1,
-    context_after: int = 1
+    context_after: int = 1,
+    sort_by: str = "newest"
 ) -> List[Dict[str, Any]]:
     """Get WhatsApp messages matching specified criteria with optional context.
     
@@ -54,6 +55,7 @@ def list_messages(
         include_context: Whether to include messages before and after matches (default True)
         context_before: Number of messages to include before each match (default 1)
         context_after: Number of messages to include after each match (default 1)
+        sort_by: Sort order - "newest" (default) or "oldest" for chronological ordering
     """
     messages = whatsapp_list_messages(
         after=after,
@@ -65,7 +67,8 @@ def list_messages(
         page=page,
         include_context=include_context,
         context_before=context_before,
-        context_after=context_after
+        context_after=context_after,
+        sort_by=sort_by
     )
     return messages
 
