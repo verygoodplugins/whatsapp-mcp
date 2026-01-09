@@ -7,18 +7,18 @@
 
 A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and send WhatsApp messages.
 
-> Originally created by [Luke Harries](https://github.com/lharries/whatsapp-mcp). Maintained by [Very Good Plugins](https://verygoodplugins.com).
+> Originally created by [Luke Harries](https://github.com/lharries/whatsapp-mcp). Maintained by [Very Good Plugins](https://verygoodplugins.com/?utm_source=github).
 
 ## Features
 
-- Search and read personal WhatsApp messages (text, images, videos, documents, audio)
-- Search contacts by name or phone number
-- Send messages to individuals or groups
-- Send media files (images, videos, documents, voice messages)
-- Download media from received messages
-- All messages stored locally in SQLite - only sent to Claude when you allow it
+- **Message Management**: Search and read personal WhatsApp messages (text, images, videos, documents, audio)
+- **Contact Search**: Search contacts by name or phone number with `sender_display` format ("Name (phone)")
+- **Send Messages**: Send text messages to individuals or groups
+- **Media Support**: Send and download images, videos, documents, and voice messages
+- **Webhook Integration**: Forward incoming messages to external services
+- **Local Storage**: All messages stored locally in SQLite - only sent to Claude when you allow it
 
-## Quick Start
+## Installation
 
 ### Prerequisites
 
@@ -28,7 +28,7 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 - Claude Desktop or Cursor
 - FFmpeg (optional, for voice message conversion)
 
-### Installation
+### Quick Start
 
 1. **Clone the repository**
 
@@ -70,56 +70,265 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 
 4. **Restart Claude Desktop**
 
-## Environment Variables
+### Cursor IDE Configuration
+
+Add to your Cursor MCP settings (`~/.cursor/mcp.json`):
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "whatsapp": {
+        "command": "uv",
+        "args": [
+          "--directory",
+          "/path/to/whatsapp-mcp/whatsapp-mcp-server",
+          "run",
+          "main.py"
+        ]
+      }
+    }
+  }
+}
+```
+
+## Tools
+
+Messages include `sender_display` showing "Name (phone)" format for easy identification by agents.
+
+### Contact Operations
+
+#### `search_contacts`
+
+Search contacts by name or phone number.
+
+**Parameters:**
+- `query` (required): Name or phone number to search
+
+**Natural Language Examples:**
+- "Find contacts named John"
+- "Search for phone number 555-1234"
+- "Who has the phone number starting with +1?"
+
+#### `get_contact`
+
+Resolve a phone number to a contact name.
+
+**Parameters:**
+- `phone` (required): Phone number to look up
+
+**Natural Language Examples:**
+- "What's the name for phone number 5551234567?"
+- "Look up who owns this number"
+
+### Message Operations
+
+#### `list_messages`
+
+Get messages with filters, date ranges, and sorting.
+
+**Parameters:**
+- `chat_jid` (optional): Filter by specific chat JID
+- `limit` (optional): Number of messages (default 50, max 500)
+- `before_date` (optional): Messages before this date (YYYY-MM-DD)
+- `after_date` (optional): Messages after this date (YYYY-MM-DD)
+- `sort_by` (optional): "newest" or "oldest" (default "newest")
+
+**Natural Language Examples:**
+- "Show me the last 100 messages from today"
+- "Get messages from the family group chat"
+- "Find messages from last week"
+
+#### `send_message`
+
+Send a text message to a contact or group.
+
+**Parameters:**
+- `recipient` (required): Phone number or group JID
+- `message` (required): Text content to send
+
+**Natural Language Examples:**
+- "Send 'Hello!' to +1234567890"
+- "Message the team group saying 'Meeting at 3pm'"
+
+#### `send_file`
+
+Send a media file (image, video, document).
+
+**Parameters:**
+- `recipient` (required): Phone number or group JID
+- `file_path` (required): Path to the file
+- `caption` (optional): Caption for the media
+
+#### `send_audio_message`
+
+Send a voice message (automatically converts to Opus .ogg format).
+
+**Parameters:**
+- `recipient` (required): Phone number or group JID
+- `file_path` (required): Path to audio file
+
+#### `download_media`
+
+Download media from a received message.
+
+**Parameters:**
+- `message_id` (required): ID of the message with media
+- `chat_jid` (required): JID of the chat containing the message
+
+### Chat Operations
+
+#### `list_chats`
+
+List all chats with metadata.
+
+**Parameters:**
+- `limit` (optional): Number of chats (default 50, max 200)
+
+#### `get_chat`
+
+Get specific chat metadata by JID.
+
+**Parameters:**
+- `jid` (required): Chat JID
+
+#### `get_direct_chat_by_contact`
+
+Find a direct message chat with a contact.
+
+**Parameters:**
+- `phone` (required): Phone number of the contact
+
+#### `get_contact_chats`
+
+List all chats involving a specific contact.
+
+**Parameters:**
+- `phone` (required): Phone number of the contact
+
+#### `get_last_interaction`
+
+Get the last message exchanged with a contact.
+
+**Parameters:**
+- `phone` (required): Phone number of the contact
+
+#### `get_message_context`
+
+Get messages around a specific message for context.
+
+**Parameters:**
+- `message_id` (required): ID of the target message
+- `chat_jid` (required): JID of the chat
+- `before` (optional): Number of messages before (default 5)
+- `after` (optional): Number of messages after (default 5)
+
+## Configuration
 
 Copy `.env.example` to `.env` and configure as needed:
 
 | Variable | Default | Description |
-| -------- | ------- | ----------- |
+|----------|---------|-------------|
 | `WHATSAPP_BRIDGE_PORT` | `8080` | Port for Go bridge REST API |
 | `WEBHOOK_URL` | `http://localhost:8769/whatsapp/webhook` | Webhook for incoming messages |
 | `FORWARD_SELF` | `false` | Forward messages sent by self |
 | `WHATSAPP_DB_PATH` | `../whatsapp-bridge/store/messages.db` | Path to SQLite database |
 | `WHATSAPP_API_URL` | `http://localhost:8080/api` | Go bridge REST API URL |
 
-## MCP Tools
-
-Messages include `sender_display` showing "Name (phone)" format for easy identification by agents.
-
-| Tool | Description |
-| ---- | ----------- |
-| `search_contacts` | Search contacts by name or phone number |
-| `get_contact` | Resolve phone number to contact name |
-| `list_messages` | Get messages with filters, date ranges, and sorting (default 50, max 500) |
-| `list_chats` | List all chats with metadata (default 50, max 200) |
-| `get_chat` | Get specific chat metadata by JID |
-| `get_direct_chat_by_contact` | Find DM with a contact |
-| `get_contact_chats` | List all chats involving a contact |
-| `get_last_interaction` | Get last message with a contact |
-| `get_message_context` | Get messages around a specific message |
-| `send_message` | Send text message |
-| `send_file` | Send media file (image, video, document) |
-| `send_audio_message` | Send voice message (converts to Opus .ogg) |
-| `download_media` | Download media from a message |
-
 ## Architecture
 
-```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  Claude Desktop │ ──► │ Python MCP Server│ ──► │   Go Bridge     │
-│                 │     │   (FastMCP)      │     │  (whatsmeow)    │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
-                               │                        │
-                               ▼                        ▼
-                        ┌──────────────┐         ┌──────────────┐
-                        │   SQLite     │◄────────│  WhatsApp    │
-                        │  messages.db │         │  Web API     │
-                        └──────────────┘         └──────────────┘
+```mermaid
+flowchart TB
+    subgraph Clients["AI Clients"]
+        CD[Claude Desktop]
+        CU[Cursor IDE]
+        CC[Claude Code]
+    end
+
+    subgraph MCP["MCP Layer"]
+        PY[Python MCP Server<br/>FastMCP]
+    end
+
+    subgraph Bridge["WhatsApp Bridge"]
+        GO[Go Bridge<br/>whatsmeow]
+        DB[(SQLite<br/>messages.db)]
+        WH[Webhook Handler]
+    end
+
+    subgraph External["External Services"]
+        WA[WhatsApp Web API]
+        EXT[External Webhook<br/>Receiver]
+    end
+
+    CD & CU & CC -->|MCP Protocol| PY
+    PY -->|REST API| GO
+    PY -->|Read| DB
+    GO -->|Store| DB
+    GO <-->|WebSocket| WA
+    GO -->|Forward Messages| WH
+    WH -->|POST| EXT
 ```
 
-1. **Go Bridge** (`whatsapp-bridge/`): Connects to WhatsApp Web using [whatsmeow](https://github.com/tulir/whatsmeow), handles QR authentication, and stores messages in SQLite.
+### Component Details
 
-2. **Python MCP Server** (`whatsapp-mcp-server/`): Implements the [Model Context Protocol](https://modelcontextprotocol.io/) with 14 tools for Claude to interact with WhatsApp.
+```mermaid
+flowchart LR
+    subgraph GoAPI["Go Bridge REST API"]
+        direction TB
+        SEND["/api/send"]
+        DOWN["/api/download"]
+        TYPE["/api/typing"]
+        HEALTH["/api/health"]
+    end
+
+    subgraph MCPTools["MCP Tools (14 total)"]
+        direction TB
+        CONT["Contact Tools<br/>search_contacts, get_contact"]
+        MSG["Message Tools<br/>list_messages, send_message, etc."]
+        CHAT["Chat Tools<br/>list_chats, get_chat, etc."]
+        MEDIA["Media Tools<br/>send_file, download_media, etc."]
+    end
+
+    MCPTools -->|HTTP Requests| GoAPI
+```
+
+### Data Flow
+
+```mermaid
+sequenceDiagram
+    participant User as User
+    participant Claude as Claude Desktop
+    participant MCP as Python MCP Server
+    participant Bridge as Go Bridge
+    participant WA as WhatsApp
+
+    User->>Claude: "Send 'Hello' to Mom"
+    Claude->>MCP: send_message(recipient, message)
+    MCP->>Bridge: POST /api/send
+    Bridge->>WA: Send via WebSocket
+    WA-->>Bridge: Delivery confirmation
+    Bridge-->>MCP: Success response
+    MCP-->>Claude: Message sent
+    Claude-->>User: "Message sent to Mom"
+```
+
+### Incoming Message Flow
+
+```mermaid
+sequenceDiagram
+    participant WA as WhatsApp
+    participant Bridge as Go Bridge
+    participant DB as SQLite
+    participant WH as Webhook
+    participant EXT as External Service
+
+    WA->>Bridge: New message
+    Bridge->>DB: Store message
+    Bridge->>Bridge: Auto-download media
+    Bridge->>WH: Forward to webhook
+    WH->>EXT: POST with message data
+    Note over EXT: Process incoming message
+```
 
 ## Development
 
@@ -142,6 +351,17 @@ uv run ruff format .
 # Go
 cd whatsapp-bridge
 golangci-lint run
+```
+
+### Building
+
+```bash
+# Go bridge
+cd whatsapp-bridge
+go build -o whatsapp-bridge
+
+# Run the binary
+./whatsapp-bridge
 ```
 
 ## Troubleshooting
@@ -191,8 +411,9 @@ This project is a maintained fork of [lharries/whatsapp-mcp](https://github.com/
 
 We're grateful to Luke for creating the original project!
 
-### Dependencies
+## Links
 
+- [Very Good Plugins](https://verygoodplugins.com/?utm_source=github)
+- [MCP Specification](https://modelcontextprotocol.io/)
 - [whatsmeow](https://github.com/tulir/whatsmeow) - WhatsApp Web API library for Go
 - [FastMCP](https://github.com/jlowin/fastmcp) - Fast Model Context Protocol implementation
-- [Model Context Protocol](https://modelcontextprotocol.io/) - Anthropic's MCP specification

@@ -1,0 +1,76 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.verygoodplugins/whatsapp-mcp",
+  "title": "WhatsApp MCP",
+  "description": "Read, search, and send WhatsApp messages via Claude",
+  "version": "0.1.0",
+  "websiteUrl": "https://verygoodplugins.com/?utm_source=mcp-registry",
+  "repository": {
+    "url": "https://github.com/verygoodplugins/whatsapp-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "whatsapp-mcp-server",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ],
+  "tools": [
+    {
+      "name": "search_contacts",
+      "description": "Search contacts by name or phone number"
+    },
+    {
+      "name": "get_contact",
+      "description": "Resolve phone number to contact name"
+    },
+    {
+      "name": "list_messages",
+      "description": "Get messages with filters, date ranges, and sorting"
+    },
+    {
+      "name": "list_chats",
+      "description": "List all chats with metadata"
+    },
+    {
+      "name": "get_chat",
+      "description": "Get specific chat metadata by JID"
+    },
+    {
+      "name": "get_direct_chat_by_contact",
+      "description": "Find direct message chat with a contact"
+    },
+    {
+      "name": "get_contact_chats",
+      "description": "List all chats involving a contact"
+    },
+    {
+      "name": "get_last_interaction",
+      "description": "Get last message with a contact"
+    },
+    {
+      "name": "get_message_context",
+      "description": "Get messages around a specific message"
+    },
+    {
+      "name": "send_message",
+      "description": "Send text message to contact or group"
+    },
+    {
+      "name": "send_file",
+      "description": "Send media file (image, video, document)"
+    },
+    {
+      "name": "send_audio_message",
+      "description": "Send voice message (auto-converts to Opus)"
+    },
+    {
+      "name": "download_media",
+      "description": "Download media from a received message"
+    }
+  ]
+}

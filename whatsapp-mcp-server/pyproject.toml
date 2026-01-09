@@ -36,6 +36,9 @@ Issues = "https://github.com/verygoodplugins/whatsapp-mcp/issues"
 [tool.setuptools]
 py-modules = ["main", "whatsapp", "audio"]
 
+[tool.mcp]
+name = "io.github.verygoodplugins/whatsapp-mcp"
+
 [tool.ruff]
 line-length = 120
 target-version = "py311"
