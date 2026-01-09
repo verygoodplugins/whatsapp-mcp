@@ -178,12 +178,16 @@ This project is a maintained fork of [lharries/whatsapp-mcp](https://github.com/
 
 **What we changed:**
 
-- Fixed compilation issues from dependency upgrades
-- Added contact name resolution in message responses
-- Improved message querying (date ranges, sorting, larger batches)
-- Fixed linting issues and improved code quality
+- Added `/api/typing` endpoint for typing indicators
+- Added `/api/health` endpoint for connection status
+- Added webhook system for incoming messages (with reply context)
+- Added auto-download of media files
+- Added `get_contact` tool for phone → name resolution
+- Added `sender_display` field showing "Name (phone)" format
+- Improved message querying (sorting, larger batches up to 500)
+- Fixed compilation issues from whatsmeow API changes
+- Fixed media filename consistency (uses message timestamp)
 - Added CI/CD pipeline with GitHub Actions
-- Published to MCP registry
 
 We're grateful to Luke for creating the original project!
 

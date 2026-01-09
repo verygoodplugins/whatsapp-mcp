@@ -9,17 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Contact names included in message responses (not just JIDs)
-- `sort_order` parameter for `list_messages` (newest_first/oldest_first)
-- Increased default and maximum message limits
+**Go Bridge:**
+- `/api/typing` endpoint - Send typing indicators to chats
+- `/api/health` endpoint - Check WhatsApp connection status
+- Webhook system for incoming messages (`webhook.go`)
+  - Configurable via `WEBHOOK_URL` environment variable
+  - Includes quoted message info (reply context)
+  - `FORWARD_SELF` option to include self-sent messages
+- Auto-download of media files when messages arrive
+- Quoted message extraction (reply-to context: ID, sender, content)
+- Connection status checks before API operations
+- HTTP server timeouts for stability (read: 30s, write: 60s, idle: 120s)
+
+**Python MCP Server:**
+- `get_contact` tool - Resolve phone number to contact name
+- `sender_display` field in messages - Shows "Name (phone)" format
+- `sender_phone` field - Extracted phone number from JID
+- Environment variable configuration (`WHATSAPP_DB_PATH`, `WHATSAPP_API_URL`)
+- Test suite with pytest (8 tests)
+- `sort_by` parameter for `list_messages` ("newest" or "oldest")
+- Increased default limits (20 → 50 messages/chats)
+- Maximum limits (500 messages, 200 chats)
+
+**Infrastructure:**
 - CI/CD pipeline with GitHub Actions (lint, build, test)
 - Comprehensive documentation (README, CLAUDE.md)
-- Environment variable examples (.env.example)
-- Python test suite with pytest
+- Environment variable examples (`.env.example`)
 
 ### Fixed
 
-- Go compilation errors from whatsmeow API changes (context.Background() parameters)
+- Go compilation errors from whatsmeow API changes (added `context.Background()`)
+- Media filename consistency - now uses message timestamp instead of download time
 - golangci.yml configuration (removed deprecated linters)
 - Python linting issues (185 errors fixed)
 - Trailing whitespace in SQL queries
@@ -27,12 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Upgraded whatsmeow to latest version (v0.0.0-20260107124630)
-- Modernized Python code style (ruff format)
-- Improved error handling in audio conversion
+- Modernized Python type hints (`Optional[str]` → `str | None`)
+- Improved docstrings with date format examples
+- Media download uses message timestamp for consistent filenames
+- Refactored `send_message` to use unified `recipient` parameter
 
 ### Removed
 
-- Unused package.json from Go bridge (was for wrangler, not needed)
+- Unused `package.json` from Go bridge (was for wrangler, not needed)
+- Compiled binary from git tracking
 
 ---
 
