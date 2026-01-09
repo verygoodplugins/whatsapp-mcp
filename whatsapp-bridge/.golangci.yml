@@ -1,5 +1,3 @@
-version: "2"
-
 # Linting config for whatsapp-bridge
 # staticcheck disabled due to deprecated whatsmeow imports (requires library update)
 
