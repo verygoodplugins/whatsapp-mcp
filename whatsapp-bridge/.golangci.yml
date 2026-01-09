@@ -1,14 +1,16 @@
-# Relaxed linting config for initial fork
-# TODO: Enable stricter linting and fix issues over time
+version: "2"
+
+# Linting config for whatsapp-bridge
+# staticcheck disabled due to deprecated whatsmeow imports (requires library update)
 
 linters:
   enable:
     - govet
+    - errcheck
+    - unused
+    - ineffassign
   disable:
-    - errcheck      # Many unchecked json.Encode returns
     - staticcheck   # Deprecated whatsmeow imports (need library update)
-    - unused        # Some unused functions exist
-    - ineffassign   # Some ineffectual assignments exist
 
 run:
   timeout: 5m

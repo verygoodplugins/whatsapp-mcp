@@ -47,7 +47,7 @@ func SendWebhook(sender, content, chatJID string, isFromMe bool, quotedMessageId
 		fmt.Printf("Error sending webhook: %v\n", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == 200 {
 		fmt.Printf("✓ Webhook sent for message from %s\n", sender)
