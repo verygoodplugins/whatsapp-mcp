@@ -1,6 +1,51 @@
+# Databases
 *.db
+
+# Logs
+*.log
+
+# Config
 claude_desktop_config.json
-whatsapp.log
-whatsapp-bridge/.DS_Store
-/whatsapp-bridge/node_modules
-/whatsapp-bridge/store
+
+# OS files
+.DS_Store
+**/.DS_Store
+
+# Node
+node_modules/
+package-lock.json
+
+# Go binaries
+whatsapp-bridge/whatsapp-bridge
+whatsapp-bridge/whatsapp-client
+*.exe
+
+# WhatsApp data (personal/sensitive)
+whatsapp-bridge/store/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/

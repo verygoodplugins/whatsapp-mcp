@@ -964,7 +964,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		}
 
 		// Send the chat presence update
-		err = client.SendChatPresence(recipientJID, state, types.ChatPresenceMediaText)
+		err = client.SendChatPresence(context.Background(), recipientJID, state, types.ChatPresenceMediaText)
 
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -1317,7 +1317,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 
 		// If we didn't get a name, try group info
 		if name == "" {
-			groupInfo, err := client.GetGroupInfo(jid)
+			groupInfo, err := client.GetGroupInfo(context.Background(), jid)
 			if err == nil && groupInfo.Name != "" {
 				name = groupInfo.Name
 			} else {
