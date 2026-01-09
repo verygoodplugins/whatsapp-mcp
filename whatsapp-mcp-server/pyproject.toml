@@ -15,10 +15,6 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
-
-[tool.setuptools]
-py-modules = ["main", "whatsapp", "audio"]
-
 dependencies = [
     "httpx>=0.28.1",
     "mcp[cli]>=1.6.0",
@@ -36,6 +32,9 @@ dev = [
 Homepage = "https://github.com/verygoodplugins/whatsapp-mcp"
 Repository = "https://github.com/verygoodplugins/whatsapp-mcp"
 Issues = "https://github.com/verygoodplugins/whatsapp-mcp/issues"
+
+[tool.setuptools]
+py-modules = ["main", "whatsapp", "audio"]
 
 [tool.ruff]
 line-length = 120
