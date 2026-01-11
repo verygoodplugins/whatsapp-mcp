@@ -60,36 +60,97 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
-def get_contact(phone_number: str) -> dict[str, Any]:
-    """Look up a WhatsApp contact name by phone number or JID.
+def get_contact(
+    identifier: str | None = None,
+    phone_number: str | None = None,
+    phone: str | None = None,
+) -> dict[str, Any]:
+    """Look up a WhatsApp contact by phone number, LID, or full JID.
 
-    Use this to resolve a phone number to a contact name for better context.
+    Automatically detects the identifier type and queries appropriately.
 
     Args:
-        phone_number: Phone number (with or without country code) or full JID
-                      Examples: "12025551234", "12025551234@s.whatsapp.net"
+        identifier: Phone number, LID, or full JID. Examples:
+                    - "12025551234" (phone number)
+                    - "184125298348272" (LID - long numeric)
+                    - "12025551234@s.whatsapp.net" (phone JID)
+                    - "184125298348272@lid" (LID JID)
+        phone_number: Backward-compatible alias for `identifier`.
+        phone: Backward-compatible alias for `identifier` (matches README parameter name).
 
     Returns:
-        Dictionary with phone_number, jid, name, and whether it was resolved
+        Dictionary with jid, name, display_name, is_lid, and resolved status
     """
-    # Normalize input - handle both formats
-    jid = phone_number
-    if "@" not in phone_number:
-        # Clean the phone number (remove any non-digits)
-        clean_phone = "".join(c for c in phone_number if c.isdigit())
-        jid = f"{clean_phone}@s.whatsapp.net"
+    if identifier is None:
+        identifier = phone_number
+    if identifier is None:
+        identifier = phone
+    if identifier is None:
+        raise ValueError("Missing required argument: identifier (or phone_number / phone)")
 
-    name = whatsapp_get_sender_name(jid)
+    identifier = identifier.strip()
+    if not identifier:
+        raise ValueError("identifier must be non-empty")
 
-    # Check if we actually resolved a name (vs just getting the phone back)
-    phone_only = jid.split("@")[0] if "@" in jid else phone_number
-    resolved = name != jid and name != phone_only and name != phone_number
+    # Detect identifier type and normalize to JID.
+    if "@" in identifier:
+        # Already a JID - use as-is
+        jid = identifier
+        is_lid = jid.endswith("@lid") or jid.split("@", 1)[-1] == "lid"
+    else:
+        digits = "".join(c for c in identifier if c.isdigit())
+        if digits:
+            # WhatsApp phone numbers are max 15 digits (E.164). Longer numeric IDs are typically LIDs.
+            # For 15-digit numbers, ambiguity exists (could be phone or LID), so we try phone first and
+            # fall back to LID if nothing is found.
+            if len(digits) > 15:
+                jid = f"{digits}@lid"
+                is_lid = True
+            else:
+                jid = f"{digits}@s.whatsapp.net"
+                is_lid = False
+        else:
+            # Non-numeric and not a JID; try as-is.
+            jid = identifier
+            is_lid = False
+
+    jid_user = jid.split("@", 1)[0]
+
+    display_name: str | None = None
+    resolved = False
+
+    # Prefer chats table lookup via get_chat (works for both phone and LID contacts).
+    candidates: list[tuple[str, bool]] = [(jid, is_lid)]
+    if "@" not in identifier and identifier.isdigit() and len(identifier) == 15:
+        # 15-digit numeric identifier is ambiguous (could be phone or LID).
+        # Try LID JID as a fallback if phone JID isn't found.
+        candidates.append((f"{identifier}@lid", True))
+
+    chat = None
+    for candidate_jid, candidate_is_lid in candidates:
+        chat = whatsapp_get_chat(candidate_jid, include_last_message=False)
+        if chat:
+            jid = candidate_jid
+            is_lid = candidate_is_lid
+            jid_user = jid.split("@", 1)[0]
+            break
+
+    if chat and chat.get("name"):
+        display_name = chat["name"]
+        resolved = display_name not in (jid, jid_user)
+    else:
+        # Fallback: best-effort sender-name resolution (may use fuzzy LIKE lookup).
+        display_name = whatsapp_get_sender_name(jid)
+        resolved = display_name not in (jid, jid_user, identifier)
 
     return {
-        "phone_number": phone_only,
+        "identifier": identifier,
         "jid": jid,
-        "name": name if resolved else phone_only,
-        "display_name": name,
+        "phone_number": jid_user if not is_lid else None,
+        "lid": jid_user if is_lid else None,
+        "name": display_name if resolved else jid_user,
+        "display_name": display_name,
+        "is_lid": is_lid,
         "resolved": resolved,
     }
 

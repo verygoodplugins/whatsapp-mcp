@@ -112,14 +112,16 @@ Search contacts by name or phone number.
 
 #### `get_contact`
 
-Resolve a phone number to a contact name.
+Resolve a WhatsApp contact name from a phone number, LID, or full JID.
 
 **Parameters:**
-- `phone` (required): Phone number to look up
+- `identifier` (required): Phone number, LID, or full JID (aliases: `phone_number`, `phone`)
+  - Examples: `12025551234`, `184125298348272`, `12025551234@s.whatsapp.net`, `184125298348272@lid`
 
 **Natural Language Examples:**
 - "What's the name for phone number 5551234567?"
 - "Look up who owns this number"
+- "Who is 184125298348272@lid?"
 
 ### Message Operations
 

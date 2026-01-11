@@ -38,18 +38,18 @@ var forwardSelfMessages = getEnvBool("FORWARD_SELF", true)
 // getEnvBool reads a boolean env var with a default.
 // Accepts: 1/true/yes/on and 0/false/no/off (case-insensitive)
 func getEnvBool(key string, def bool) bool {
-    v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
-    if v == "" {
-        return def
-    }
-    switch v {
-    case "1", "true", "yes", "on":
-        return true
-    case "0", "false", "no", "off":
-        return false
-    default:
-        return def
-    }
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if v == "" {
+		return def
+	}
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return def
+	}
 }
 
 // Message represents a chat message for our client
@@ -487,6 +487,16 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 
 	// Get appropriate chat name (pass nil for conversation since we don't have one for regular messages)
 	name := GetChatName(client, messageStore, msg.Info.Chat, chatJID, nil, sender, logger)
+
+	// If contact resolution fails (common for LIDs), PushName is often the best available display name.
+	// Only apply for direct messages (not groups) and only when the stored name is the numeric JID user.
+	if !msg.Info.IsFromMe && msg.Info.Chat.Server != "g.us" && strings.TrimSpace(msg.Info.PushName) != "" {
+		pushName := strings.TrimSpace(msg.Info.PushName)
+		if name == "" || name == msg.Info.Chat.User {
+			logger.Infof("Updating chat name from PushName for %s: %s -> %s", chatJID, name, pushName)
+			name = pushName
+		}
+	}
 
 	// Update chat in database with the message timestamp (keeps last message time updated)
 	err := messageStore.StoreChat(chatJID, name, msg.Info.Timestamp)
@@ -992,7 +1002,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	server := &http.Server{
 		Addr:         serverAddr,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,  // Longer for media downloads
+		WriteTimeout: 60 * time.Second, // Longer for media downloads
 		IdleTimeout:  120 * time.Second,
 	}
 
@@ -1005,15 +1015,15 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 }
 
 func main() {
-    // Set up logger with DEBUG level for more detailed logging
-    logger := waLog.Stdout("Client", "DEBUG", true)
-    logger.Infof("Starting WhatsApp client...")
+	// Set up logger with DEBUG level for more detailed logging
+	logger := waLog.Stdout("Client", "DEBUG", true)
+	logger.Infof("Starting WhatsApp client...")
 
-    if forwardSelfMessages {
-        logger.Infof("FORWARD_SELF enabled: forwarding self messages to webhook")
-    } else {
-        logger.Infof("FORWARD_SELF disabled: self messages will NOT be forwarded")
-    }
+	if forwardSelfMessages {
+		logger.Infof("FORWARD_SELF enabled: forwarding self messages to webhook")
+	} else {
+		logger.Infof("FORWARD_SELF disabled: self messages will NOT be forwarded")
+	}
 
 	// Create database connection for storing session data
 	dbLog := waLog.Stdout("Database", "INFO", true)
@@ -1110,20 +1120,20 @@ func main() {
 
 	// Create channel to track connection success
 	connected := make(chan bool, 1)
-	
+
 	// Add connection retry logic
 	maxRetries := 3
 	var connErr error
-	
+
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		logger.Infof("Connection attempt %d/%d...", attempt, maxRetries)
-		
+
 		// Connect to WhatsApp
 		if client.Store.ID == nil {
 			// No ID stored, this is a new client, need to pair with phone
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
-			
+
 			qrChan, connErr := client.GetQRChannel(ctx)
 			if connErr != nil {
 				logger.Errorf("Failed to get QR channel: %v", connErr)
@@ -1133,7 +1143,7 @@ func main() {
 				time.Sleep(5 * time.Second)
 				continue
 			}
-			
+
 			connErr = client.Connect()
 			if connErr != nil {
 				logger.Errorf("Failed to connect (attempt %d): %v", attempt, connErr)
@@ -1192,8 +1202,8 @@ func main() {
 			break
 		}
 	}
-	
-	connectionSuccess:
+
+connectionSuccess:
 
 	// Wait a moment for connection to stabilize
 	time.Sleep(2 * time.Second)
