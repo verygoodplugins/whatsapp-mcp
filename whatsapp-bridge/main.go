@@ -1209,9 +1209,12 @@ func main() {
 	// Start REST API server
 	port := 8080
 	if p := os.Getenv("WHATSAPP_BRIDGE_PORT"); p != "" {
-		if v, err := strconv.Atoi(p); err == nil {
-			port = v
+		v, err := strconv.Atoi(p)
+		if err != nil || v < 1 || v > 65535 {
+			logger.Errorf("Invalid WHATSAPP_BRIDGE_PORT=%q, must be 1-65535", p)
+			return
 		}
+		port = v
 	}
 	startRESTServer(client, messageStore, port)
 
