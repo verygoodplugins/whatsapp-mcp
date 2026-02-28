@@ -504,14 +504,51 @@ func extractMediaInfo(msg *waProto.Message, msgTimestamp time.Time) (mediaType s
 	return "", "", "", nil, nil, nil, 0
 }
 
+// resolveLIDChat resolves a LID-based chat JID to its phone-based equivalent
+// so that incoming and outgoing messages are stored under the same chat entry.
+// The senderAlt/recipientAlt fields carry the phone JID on live messages;
+// for history sync these will be empty and the function falls back to the
+// whatsmeow LID store (populated during live message handling).
+func resolveLIDChat(client *whatsmeow.Client, chat, senderAlt, recipientAlt types.JID, isFromMe bool) types.JID {
+	if chat.Server != types.HiddenUserServer {
+		return chat
+	}
+
+	// For incoming DMs the phone JID is in SenderAlt;
+	// for outgoing DMs it is in RecipientAlt.
+	var alt types.JID
+	if !isFromMe && !senderAlt.IsEmpty() && senderAlt.Server == types.DefaultUserServer {
+		alt = senderAlt.ToNonAD()
+	} else if isFromMe && !recipientAlt.IsEmpty() && recipientAlt.Server == types.DefaultUserServer {
+		alt = recipientAlt.ToNonAD()
+	}
+
+	if !alt.IsEmpty() {
+		fmt.Printf("Resolved LID chat %s -> %s (from message alt)\n", chat, alt)
+		return alt
+	}
+
+	// Fallback: query the whatsmeow LID-PN mapping store.
+	pn, err := client.Store.LIDs.GetPNForLID(context.Background(), chat)
+	if err == nil && !pn.IsEmpty() {
+		fmt.Printf("Resolved LID chat %s -> %s (from LID store)\n", chat, pn.ToNonAD())
+		return pn.ToNonAD()
+	}
+
+	fmt.Printf("Warning: could not resolve LID chat %s to phone JID\n", chat)
+	return chat
+}
+
 // Handle regular incoming messages with media support
 func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
-	// Save message to database
-	chatJID := msg.Info.Chat.String()
+	// Resolve LID-based chats to phone-based JIDs so that incoming
+	// and outgoing messages land in the same chat entry.
+	resolvedChat := resolveLIDChat(client, msg.Info.Chat, msg.Info.SenderAlt, msg.Info.RecipientAlt, msg.Info.IsFromMe)
+	chatJID := resolvedChat.String()
 	sender := msg.Info.Sender.User
 
-	// Get appropriate chat name (pass nil for conversation since we don't have one for regular messages)
-	name := GetChatName(client, messageStore, msg.Info.Chat, chatJID, nil, sender, logger)
+	// Get appropriate chat name (pass resolved JID so contact lookup works)
+	name := GetChatName(client, messageStore, resolvedChat, chatJID, nil, sender, logger)
 
 	// If contact resolution fails (common for LIDs), PushName is often the best available display name.
 	// Only apply for direct messages (not groups) and only when the stored name is the numeric JID user.
@@ -1404,17 +1441,23 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 			continue
 		}
 
-		chatJID := *conversation.ID
+		rawChatJID := *conversation.ID
 
 		// Try to parse the JID
-		jid, err := types.ParseJID(chatJID)
+		jid, err := types.ParseJID(rawChatJID)
 		if err != nil {
-			logger.Warnf("Failed to parse JID %s: %v", chatJID, err)
+			logger.Warnf("Failed to parse JID %s: %v", rawChatJID, err)
 			continue
 		}
 
+		// Resolve LID-based chats to phone-based JIDs.
+		// History sync doesn't carry SenderAlt, so rely on the
+		// LID store mapping populated during live message handling.
+		resolved := resolveLIDChat(client, jid, types.EmptyJID, types.EmptyJID, false)
+		chatJID := resolved.String()
+
 		// Get appropriate chat name by passing the history sync conversation directly
-		name := GetChatName(client, messageStore, jid, chatJID, conversation, "", logger)
+		name := GetChatName(client, messageStore, resolved, chatJID, conversation, "", logger)
 
 		// Process messages
 		messages := conversation.Messages
