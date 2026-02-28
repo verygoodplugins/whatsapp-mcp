@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   python-lint:
@@ -39,6 +40,7 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           working-directory: whatsapp-bridge
+          version: v1.64.8
 
   go-build:
     name: Go Build
