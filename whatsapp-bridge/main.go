@@ -139,6 +139,21 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		return fmt.Errorf("failed to attach WhatsApp DB for LID chat migration: %w", err)
 	}
 
+	var lidMapTableExists int
+	if err := tx.QueryRow(fmt.Sprintf(
+		"SELECT COUNT(1) FROM %s.sqlite_master WHERE type='table' AND name='whatsmeow_lid_map';",
+		alias,
+	)).Scan(&lidMapTableExists); err != nil {
+		return fmt.Errorf("failed to inspect WhatsApp DB schema for LID migration: %w", err)
+	}
+	if lidMapTableExists == 0 {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit no-op LID chat migration: %w", err)
+		}
+		logger.Infof("Skipping LID chat migration: whatsmeow_lid_map table not found")
+		return nil
+	}
+
 	if _, err := tx.Exec(fmt.Sprintf(`
 		CREATE TEMP TABLE tmp_lid_to_phone AS
 		SELECT DISTINCT

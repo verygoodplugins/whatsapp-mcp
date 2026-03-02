@@ -8,6 +8,8 @@ This is the **whatsapp-mcp** repository - a Model Context Protocol (MCP) server 
 
 Originally forked from [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp), now maintained by [Very Good Plugins](https://verygoodplugins.com/?utm_source=github).
 
+**Important:** This is the `verygoodplugins/whatsapp-mcp` fork. Always use `origin` (not `upstream`) for PRs, issues, and `gh` commands. The default repo is set via `gh repo set-default verygoodplugins/whatsapp-mcp`.
+
 ## Architecture
 
 ```mermaid

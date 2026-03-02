@@ -75,7 +75,7 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 	if err != nil {
 		t.Fatalf("failed to create tables: %v", err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 	return &MessageStore{db: db}
 }
 
@@ -108,6 +108,12 @@ func buildTextMessage(chat, sender, senderAlt, recipientAlt types.JID, isFromMe 
 func queryChat(ms *MessageStore, jid string) (name string, found bool) {
 	err := ms.db.QueryRow("SELECT name FROM chats WHERE jid = ?", jid).Scan(&name)
 	return name, err == nil
+}
+
+// queryChatLastMessageTime returns the last_message_time for a chat JID.
+func queryChatLastMessageTime(ms *MessageStore, jid string) (lastMessageTime string, found bool) {
+	err := ms.db.QueryRow("SELECT last_message_time FROM chats WHERE jid = ?", jid).Scan(&lastMessageTime)
+	return lastMessageTime, err == nil
 }
 
 // queryMessageCount returns the number of messages stored under a chat JID.
@@ -295,6 +301,14 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_MigratesAndIsIdempotent(t *testing.T) 
 	}
 	if phoneName != "Legacy LID Name" {
 		t.Fatalf("expected phone chat name to be hydrated from LID chat, got %q", phoneName)
+	}
+
+	phoneTime, timeFound := queryChatLastMessageTime(ms, phoneJID)
+	if !timeFound {
+		t.Fatalf("expected phone chat to have last_message_time after migration")
+	}
+	if phoneTime != "2026-03-01T10:00:00Z" {
+		t.Fatalf("expected phone chat last_message_time to be the latest (from LID chat), got %q", phoneTime)
 	}
 
 	if err := ms.MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath, logger); err != nil {
