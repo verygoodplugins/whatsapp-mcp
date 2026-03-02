@@ -364,7 +364,14 @@ go build -o whatsapp-bridge
 
 # Run the binary
 ./whatsapp-bridge
+
+# During development (avoids stale binaries)
+go run .
 ```
+
+### Releasing (Maintainers)
+
+Release process and CI/CD details live in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Troubleshooting
 

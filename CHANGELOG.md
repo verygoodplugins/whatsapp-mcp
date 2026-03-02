@@ -33,7 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Infrastructure:**
 - CI/CD pipeline with GitHub Actions (lint, build, test)
+- Tag-based GitHub release workflow with validated artifacts (`.github/workflows/release.yml`)
+- Version consistency check across `pyproject.toml`, `server.json`, and release tags
 - Comprehensive documentation (README, CLAUDE.md)
+- Maintainer release playbook (`docs/RELEASING.md`)
 - Environment variable examples (`.env.example`)
 
 ### Fixed
@@ -48,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Upgraded whatsmeow to latest version (v0.0.0-20260107124630)
+- Upgraded Go linting pipeline to golangci-lint v2 (CI action + v2 config schema)
 - Modernized Python type hints (`Optional[str]` → `str | None`)
 - Improved docstrings with date format examples
 - Media download uses message timestamp for consistent filenames
