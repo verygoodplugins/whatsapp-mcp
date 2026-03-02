@@ -30,7 +30,7 @@ jobs:
   publish-release-assets:
     name: Publish Release Artifacts
     needs: release-please
-    if: ${{ needs.release-please.outputs.release_created }}
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
