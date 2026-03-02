@@ -91,7 +91,7 @@ jobs:
           mkdir -p dist
 
           cd whatsapp-bridge
-          go build -o ../dist/whatsapp-bridge-linux-amd64 .
+          GOOS=linux GOARCH=amd64 go build -o ../dist/whatsapp-bridge-linux-amd64 .
           cd ..
 
           cd whatsapp-mcp-server
@@ -99,7 +99,7 @@ jobs:
           cd ..
 
           cd dist
-          shasum -a 256 * > SHA256SUMS.txt
+          sha256sum * > SHA256SUMS.txt
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2

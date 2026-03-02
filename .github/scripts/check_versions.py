@@ -69,12 +69,17 @@ def main() -> int:
         )
 
     tag = args.tag.strip()
+    normalized_tag = ""
     if tag:
-        tag_version = normalize_tag(tag)
-        if pyproject_version != tag_version:
-            errors.append(
-                f"Version mismatch: tag={tag_version} != whatsapp-mcp-server/pyproject.toml={pyproject_version}"
-            )
+        try:
+            normalized_tag = normalize_tag(tag)
+        except ValueError as exc:
+            errors.append(f"Invalid tag format: {tag}: {exc}")
+        else:
+            if pyproject_version != normalized_tag:
+                errors.append(
+                    f"Version mismatch: tag={normalized_tag} != whatsapp-mcp-server/pyproject.toml={pyproject_version}"
+                )
 
     if errors:
         for error in errors:
@@ -84,7 +89,7 @@ def main() -> int:
     print(
         "Version check passed: "
         f"pyproject={pyproject_version}, server.json={server_version}, package={package_version}"
-        + (f", tag={normalize_tag(tag)}" if tag else "")
+        + (f", tag={normalized_tag}" if normalized_tag else "")
     )
     return 0
 
