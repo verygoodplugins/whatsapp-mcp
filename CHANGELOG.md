@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Go compilation errors from whatsmeow API changes (added `context.Background()`)
 - Media filename consistency - now uses message timestamp instead of download time
+- Startup migration now consolidates legacy `@lid` chat/message rows into mapped phone JIDs (`@s.whatsapp.net`) to prevent split chat history
 - golangci.yml configuration (removed deprecated linters)
 - Python linting issues (185 errors fixed)
 - Trailing whitespace in SQL queries
