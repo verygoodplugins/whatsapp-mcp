@@ -1,0 +1,76 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  publish-release-assets:
+    name: Publish Release Artifacts
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.sha }}
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Validate version consistency
+        run: python .github/scripts/check_versions.py --tag "${{ needs.release-please.outputs.tag_name }}"
+
+      - name: Build release artifacts
+        run: |
+          mkdir -p dist
+
+          cd whatsapp-bridge
+          GOOS=linux GOARCH=amd64 go build -o ../dist/whatsapp-bridge-linux-amd64 .
+          cd ..
+
+          cd whatsapp-mcp-server
+          uv build --out-dir ../dist
+          cd ..
+
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release-please.outputs.tag_name }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          overwrite_files: true

@@ -1,14 +1,11 @@
-name: Release
+name: Release (Manual Fallback)
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Optional tag to validate (vMAJOR.MINOR.PATCH)"
-        required: false
+        description: "Release tag to validate and publish artifacts for (vMAJOR.MINOR.PATCH)"
+        required: true
         type: string
 
 permissions:
@@ -32,18 +29,8 @@ jobs:
       - uses: astral-sh/setup-uv@v7
 
       - name: Validate version consistency
-        shell: bash
         run: |
-          TAG="${{ github.event.inputs.tag }}"
-          if [ -z "$TAG" ] && [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            TAG="${GITHUB_REF_NAME}"
-          fi
-
-          if [ -n "$TAG" ]; then
-            python .github/scripts/check_versions.py --tag "$TAG"
-          else
-            python .github/scripts/check_versions.py
-          fi
+          python .github/scripts/check_versions.py --tag "${{ github.event.inputs.tag }}"
 
       - name: Verify golangci configuration
         run: |
@@ -75,7 +62,6 @@ jobs:
   publish-github-release:
     name: Publish GitHub Release
     needs: validate-release
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -104,5 +90,7 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.tag }}
           files: dist/*
           generate_release_notes: true
+          overwrite_files: true

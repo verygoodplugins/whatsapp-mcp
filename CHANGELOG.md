@@ -33,7 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Infrastructure:**
 - CI/CD pipeline with GitHub Actions (lint, build, test)
-- Tag-based GitHub release workflow with validated artifacts (`.github/workflows/release.yml`)
+- Release Please workflow for automated release PRs/tags/changelog (`.github/workflows/release-please.yml`)
+- Manual fallback release workflow for artifact re-publish (`.github/workflows/release.yml`)
 - Version consistency check across `pyproject.toml`, `server.json`, and release tags
 - Comprehensive documentation (README, CLAUDE.md)
 - Maintainer release playbook (`docs/RELEASING.md`)

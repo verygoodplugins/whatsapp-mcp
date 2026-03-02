@@ -1,42 +1,44 @@
 # Releasing (Maintainers)
 
-This fork uses tag-driven releases and version consistency checks in CI.
+This fork uses Release Please for version/changelog automation and release tags.
 
-## 1) Prepare release commit
+## 1) Ongoing Development
 
-1. Update `CHANGELOG.md`:
-   - Move relevant entries from `Unreleased` into a new version section.
-2. Bump version in both files:
-   - `whatsapp-mcp-server/pyproject.toml` (`project.version`)
-   - `server.json` (`version` and `packages[].version` for `whatsapp-mcp-server`)
-3. Ensure PR CI is green.
+Use conventional commits on `main` (`feat:`, `fix:`, etc.).
+Workflow `.github/workflows/release-please.yml` continuously updates a Release PR.
 
-## 2) Tag the release
+When the Release PR is merged, Release Please will:
+- update `CHANGELOG.md`
+- bump versions in:
+  - `whatsapp-mcp-server/pyproject.toml`
+  - `server.json` (`version` and package version)
+- create the release tag (`vMAJOR.MINOR.PATCH`)
+- create the GitHub release
 
-Use semantic version tags in the format `vMAJOR.MINOR.PATCH`.
+## 2) First Fork Release Version Choice
 
-```bash
-git checkout main
-git pull --ff-only origin main
-git tag v0.1.0
-git push origin v0.1.0
+If you need to force a specific first version (for example `0.1.0`), create a
+commit with a `Release-As` footer:
+
+```text
+chore: bootstrap first fork release
+
+Release-As: 0.1.0
 ```
 
-## 3) What CI does on tag push
+Push that commit to `main`; Release Please will honor the requested version in
+the generated Release PR.
 
-Workflow: `.github/workflows/release.yml`
+## 3) Artifact Publishing
 
-- Validates versions are in sync (and match tag)
-- Verifies Go lint config + runs lint/tests/build
-- Runs Python tests
-- Builds artifacts:
-  - `whatsapp-bridge-linux-amd64`
-  - Python wheel + sdist for `whatsapp-mcp-server`
-  - `SHA256SUMS.txt`
-- Creates a GitHub release and uploads artifacts
+In the same workflow, after a release is created, a publish job builds and
+uploads release artifacts to the created GitHub release:
+- `whatsapp-bridge-linux-amd64`
+- Python wheel + sdist for `whatsapp-mcp-server`
+- `SHA256SUMS.txt`
 
-## 4) Optional: manual validation without publishing
+## 4) Manual Fallback (Rare)
 
-Run the release workflow manually (`workflow_dispatch`) from GitHub Actions.
-You can pass `tag` to validate a candidate version format and file consistency
-without pushing a tag.
+Workflow `.github/workflows/release.yml` is a manual fallback only
+(`workflow_dispatch`) for rebuilding/re-uploading artifacts for an existing tag.
+Use it when the automated publish step needs a rerun.

@@ -371,7 +371,8 @@ go run .
 
 ### Releasing (Maintainers)
 
-Release process and CI/CD details live in [docs/RELEASING.md](docs/RELEASING.md).
+Releases use Release Please automation; maintainer steps and fallback procedures
+are documented in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Troubleshooting
 
