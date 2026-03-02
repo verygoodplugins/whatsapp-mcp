@@ -314,3 +314,75 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_MissingWhatsAppDBIsNoOp(t *testing.T) 
 		t.Fatalf("expected missing whatsapp db to be treated as no-op, got error: %v", err)
 	}
 }
+
+func TestMigrateLegacyLIDChatsToPhoneJIDs_AggregatesByPhoneJIDDeterministically(t *testing.T) {
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	tmpDir := t.TempDir()
+	whatsappDBPath := filepath.Join(tmpDir, "whatsapp.db")
+
+	waDB, err := sql.Open("sqlite3", whatsappDBPath)
+	if err != nil {
+		t.Fatalf("failed to create whatsapp db: %v", err)
+	}
+	defer func() { _ = waDB.Close() }()
+
+	if _, err := waDB.Exec(`
+		CREATE TABLE whatsmeow_lid_map (
+			lid TEXT PRIMARY KEY,
+			pn TEXT NOT NULL
+		);
+		INSERT INTO whatsmeow_lid_map (lid, pn) VALUES ('111', '222');
+		INSERT INTO whatsmeow_lid_map (lid, pn) VALUES ('333', '222');
+	`); err != nil {
+		t.Fatalf("failed to prepare lid map db: %v", err)
+	}
+
+	lidA := "111@lid"
+	lidB := "333@lid"
+	phoneJID := "222@s.whatsapp.net"
+
+	_, err = ms.db.Exec(`
+		INSERT INTO chats (jid, name, last_message_time) VALUES
+			(?, 'Older Name', '2026-03-01T10:00:00Z'),
+			(?, 'Newest Name', '2026-03-01T11:00:00Z');
+
+		INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length) VALUES
+			('a1', ?, 'alice', 'from lid A', '2026-03-01T10:00:00Z', 0, '', '', '', NULL, NULL, NULL, 0),
+			('b1', ?, 'bob', 'from lid B', '2026-03-01T11:00:00Z', 0, '', '', '', NULL, NULL, NULL, 0);
+	`, lidA, lidB, lidA, lidB)
+	if err != nil {
+		t.Fatalf("failed to seed message store: %v", err)
+	}
+
+	if err := ms.MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath, logger); err != nil {
+		t.Fatalf("migration failed: %v", err)
+	}
+
+	if count := queryMessageCount(ms, lidA); count != 0 {
+		t.Fatalf("expected no messages under first LID after migration, got %d", count)
+	}
+	if count := queryMessageCount(ms, lidB); count != 0 {
+		t.Fatalf("expected no messages under second LID after migration, got %d", count)
+	}
+	if count := queryMessageCount(ms, phoneJID); count != 2 {
+		t.Fatalf("expected 2 messages under phone JID after migration, got %d", count)
+	}
+
+	name, found := queryChat(ms, phoneJID)
+	if !found {
+		t.Fatalf("expected merged phone chat row to exist")
+	}
+	if name != "Newest Name" {
+		t.Fatalf("expected deterministic name selection from latest source chat, got %q", name)
+	}
+
+	var lastMessage string
+	if err := ms.db.QueryRow("SELECT last_message_time FROM chats WHERE jid = ?", phoneJID).Scan(&lastMessage); err != nil {
+		t.Fatalf("failed to read merged last_message_time: %v", err)
+	}
+	if lastMessage != "2026-03-01T11:00:00Z" {
+		t.Fatalf("expected merged last_message_time to be max source value, got %s", lastMessage)
+	}
+}

@@ -171,10 +171,11 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 	}
 
 	if _, err := tx.Exec(`
-		CREATE TEMP TABLE tmp_lid_chat_meta AS
+		CREATE TEMP TABLE tmp_lid_chat_candidates AS
 		SELECT
 			m.phone_jid AS phone_jid,
-			COALESCE(NULLIF(TRIM(c.name), ''), substr(m.phone_jid, 1, instr(m.phone_jid, '@') - 1)) AS source_name,
+			m.lid_jid AS lid_jid,
+			NULLIF(TRIM(c.name), '') AS source_name,
 			COALESCE(
 				c.last_message_time,
 				(
@@ -185,6 +186,31 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 			) AS source_last_message_time
 		FROM tmp_lid_to_phone m
 		LEFT JOIN chats c ON c.jid = m.lid_jid;
+	`); err != nil {
+		return fmt.Errorf("failed to build temporary chat candidate table: %w", err)
+	}
+
+	if _, err := tx.Exec(`
+		CREATE TEMP TABLE tmp_lid_chat_meta AS
+		SELECT
+			c.phone_jid AS phone_jid,
+			COALESCE(
+				(
+					SELECT c2.source_name
+					FROM tmp_lid_chat_candidates c2
+					WHERE c2.phone_jid = c.phone_jid
+						AND c2.source_name IS NOT NULL
+					ORDER BY
+						CASE WHEN c2.source_last_message_time IS NULL THEN 1 ELSE 0 END,
+						c2.source_last_message_time DESC,
+						c2.lid_jid ASC
+					LIMIT 1
+				),
+				substr(c.phone_jid, 1, instr(c.phone_jid, '@') - 1)
+			) AS source_name,
+			MAX(c.source_last_message_time) AS source_last_message_time
+		FROM tmp_lid_chat_candidates c
+		GROUP BY c.phone_jid;
 	`); err != nil {
 		return fmt.Errorf("failed to build temporary chat metadata table: %w", err)
 	}
@@ -205,7 +231,6 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 					SELECT m.source_name
 					FROM tmp_lid_chat_meta m
 					WHERE m.phone_jid = chats.jid
-					LIMIT 1
 				)
 				ELSE name
 			END,
@@ -214,24 +239,20 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 					SELECT m.source_last_message_time
 					FROM tmp_lid_chat_meta m
 					WHERE m.phone_jid = chats.jid
-					LIMIT 1
 				) IS NULL THEN last_message_time
 				WHEN last_message_time IS NULL THEN (
 					SELECT m.source_last_message_time
 					FROM tmp_lid_chat_meta m
 					WHERE m.phone_jid = chats.jid
-					LIMIT 1
 				)
 				WHEN (
 					SELECT m.source_last_message_time
 					FROM tmp_lid_chat_meta m
 					WHERE m.phone_jid = chats.jid
-					LIMIT 1
 				) > last_message_time THEN (
 					SELECT m.source_last_message_time
 					FROM tmp_lid_chat_meta m
 					WHERE m.phone_jid = chats.jid
-					LIMIT 1
 				)
 				ELSE last_message_time
 			END
@@ -291,6 +312,9 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 	}
 	if _, err := tx.Exec("DROP TABLE IF EXISTS tmp_lid_chat_meta;"); err != nil {
 		return fmt.Errorf("failed to clean temporary chat metadata table: %w", err)
+	}
+	if _, err := tx.Exec("DROP TABLE IF EXISTS tmp_lid_chat_candidates;"); err != nil {
+		return fmt.Errorf("failed to clean temporary chat candidate table: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
