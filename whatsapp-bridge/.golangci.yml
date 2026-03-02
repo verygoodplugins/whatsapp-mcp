@@ -1,8 +1,6 @@
 # Linting config for whatsapp-bridge
 # staticcheck disabled due to deprecated whatsmeow imports (requires library update)
 
-version: "2"
-
 linters:
   enable:
     - govet
