@@ -7,16 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## 0.1.0 (2026-03-02)
 
-
-### release
-
-* adopt Release Please for automated versioning/changelog ([#15](https://github.com/verygoodplugins/whatsapp-mcp/issues/15)) ([6d45958](https://github.com/verygoodplugins/whatsapp-mcp/commit/6d45958139effa3079ff27a9708d400f89ba9ddf))
-
-## [Unreleased]
-
 ### Added
 
 **Go Bridge:**
+
 - `/api/typing` endpoint - Send typing indicators to chats
 - `/api/health` endpoint - Check WhatsApp connection status
 - Webhook system for incoming messages (`webhook.go`)
@@ -29,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - HTTP server timeouts for stability (read: 30s, write: 60s, idle: 120s)
 
 **Python MCP Server:**
+
 - `get_contact` tool - Resolve phone number to contact name
 - `sender_display` field in messages - Shows "Name (phone)" format
 - `sender_phone` field - Extracted phone number from JID
@@ -39,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Maximum limits (500 messages, 200 chats)
 
 **Infrastructure:**
+
 - CI/CD pipeline with GitHub Actions (lint, build, test)
 - Release Please workflow for automated release PRs/tags/changelog (`.github/workflows/release-please.yml`)
 - Manual fallback release workflow for artifact re-publish (`.github/workflows/release.yml`)
@@ -64,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Improved docstrings with date format examples
 - Media download uses message timestamp for consistent filenames
 - Refactored `send_message` to use unified `recipient` parameter
+- Adopt Release Please for automated versioning/changelog ([#15](https://github.com/verygoodplugins/whatsapp-mcp/issues/15)) ([6d45958](https://github.com/verygoodplugins/whatsapp-mcp/commit/6d45958139effa3079ff27a9708d400f89ba9ddf))
 
 ### Removed
 
