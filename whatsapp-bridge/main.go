@@ -811,8 +811,40 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		return
 	}
 
-	// Auto-download media if present
-	if mediaType != "" && url != "" && len(mediaKey) > 0 {
+	// For image messages, download media synchronously so we can include the base64
+	// payload in the webhook. Other media types (video, audio, document) are still
+	// downloaded asynchronously since they are not passed to the AI vision pipeline.
+	var imageDownloadPath string
+	var imageMimeType string
+	if mediaType == "image" && url != "" && len(mediaKey) > 0 {
+		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
+		success, _, dlFilename, dlPath, dlErr := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+		if success && dlErr == nil {
+			imageDownloadPath = dlPath
+			// Derive MIME type from filename extension
+			ext := strings.ToLower(filepath.Ext(dlFilename))
+			switch ext {
+			case ".jpg", ".jpeg":
+				imageMimeType = "image/jpeg"
+			case ".png":
+				imageMimeType = "image/png"
+			case ".gif":
+				imageMimeType = "image/gif"
+			case ".webp":
+				imageMimeType = "image/webp"
+			default:
+				imageMimeType = "image/jpeg"
+			}
+			logger.Infof("✅ Image downloaded: %s (%s)", dlPath, imageMimeType)
+		} else {
+			logger.Warnf("❌ Image download failed: %v", dlErr)
+			// Fall back to async download so media is cached for future MCP tool calls
+			go func() {
+				_, _, _, _, _ = downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+			}()
+		}
+	} else if mediaType != "" && mediaType != "image" && url != "" && len(mediaKey) > 0 {
+		// Non-image media: async download for caching only (not sent to vision pipeline)
 		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
 		go func() {
 			success, _, _, downloadPath, err := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
@@ -841,10 +873,24 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		fileLength,
 	)
 
-	// Send webhook for incoming messages
-	// Forward self-messages when FORWARD_SELF=true
-	if content != "" && (forwardSelfMessages || !msg.Info.IsFromMe) {
-		SendWebhook(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent)
+	// Send webhook for incoming messages.
+	// Forward self-messages when FORWARD_SELF=true.
+	// Always forward image messages (even without a text caption) so the AI vision
+	// pipeline can analyse the image content.
+	shouldForward := forwardSelfMessages || !msg.Info.IsFromMe
+	hasText := content != ""
+	hasImage := mediaType == "image"
+
+	if shouldForward && (hasText || hasImage) {
+		if hasImage {
+			SendWebhookWithMedia(
+				sender, content, chatJID, msg.Info.IsFromMe,
+				quotedMessageId, quotedSender, quotedContent,
+				msg.Info.ID, mediaType, imageMimeType, filename, imageDownloadPath,
+			)
+		} else {
+			SendWebhook(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent)
+		}
 	}
 
 	if err != nil {
