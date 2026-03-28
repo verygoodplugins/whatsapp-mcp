@@ -12,7 +12,10 @@
       "Read(/Users/jgarturo/Projects/OpenAI/claude-automation-hub/**)",
       "Read(/Users/jgarturo/Projects/OpenAI/claude-automation-hub/web/**)",
       "Read(/Users/jgarturo/Projects/OpenAI/claude-automation-hub/web/dashboard/src/**)",
-      "Read(/Users/jgarturo/Projects/OpenAI/claude-automation-hub/**)"
+      "Read(/Users/jgarturo/Projects/OpenAI/claude-automation-hub/**)",
+      "Bash(git -C /Users/robbieluu/whatsapp-mcp checkout HEAD -- whatsapp-bridge/main.go)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ],
     "deny": [],
     "ask": []
