@@ -32,12 +32,27 @@ func (m *mockLIDStore) GetPNForLID(_ context.Context, lid types.JID) (types.JID,
 	return types.EmptyJID, nil
 }
 
-func newTestClient(lidStore store.LIDStore) *whatsmeow.Client {
-	noop := &store.NoopStore{}
+// mockContactStore implements store.ContactStore with an in-memory map.
+type mockContactStore struct {
+	store.NoopStore
+	contacts map[types.JID]types.ContactInfo
+}
+
+func (m *mockContactStore) GetContact(_ context.Context, user types.JID) (types.ContactInfo, error) {
+	if info, ok := m.contacts[user]; ok {
+		return info, nil
+	}
+	return types.ContactInfo{}, nil
+}
+
+func newTestClient(lidStore store.LIDStore, contactStore store.ContactStore) *whatsmeow.Client {
+	if contactStore == nil {
+		contactStore = &store.NoopStore{}
+	}
 	return &whatsmeow.Client{
 		Store: &store.Device{
 			LIDs:     lidStore,
-			Contacts: noop,
+			Contacts: contactStore,
 		},
 	}
 }
@@ -133,7 +148,7 @@ var (
 // --- Integration tests: handleMessage stores under correct JID ---
 
 func TestHandleMessage_IncomingLIDMessage_StoredUnderPhoneJID(t *testing.T) {
-	client := newTestClient(&mockLIDStore{})
+	client := newTestClient(&mockLIDStore{}, nil)
 	ms := newTestMessageStore(t)
 	logger := testLogger()
 
@@ -165,7 +180,7 @@ func TestHandleMessage_IncomingLIDMessage_StoredUnderPhoneJID(t *testing.T) {
 }
 
 func TestHandleMessage_OutgoingLIDMessage_StoredUnderPhoneJID(t *testing.T) {
-	client := newTestClient(&mockLIDStore{})
+	client := newTestClient(&mockLIDStore{}, nil)
 	ms := newTestMessageStore(t)
 	logger := testLogger()
 
@@ -193,7 +208,7 @@ func TestHandleMessage_LIDWithStoreFallback_StoredUnderPhoneJID(t *testing.T) {
 	lidStore := &mockLIDStore{
 		pnByLID: map[types.JID]types.JID{phoneLID: phonePN},
 	}
-	client := newTestClient(lidStore)
+	client := newTestClient(lidStore, nil)
 	ms := newTestMessageStore(t)
 	logger := testLogger()
 
@@ -219,7 +234,7 @@ func TestHandleMessage_LIDWithStoreFallback_StoredUnderPhoneJID(t *testing.T) {
 }
 
 func TestHandleMessage_PhoneJID_Unaffected(t *testing.T) {
-	client := newTestClient(&mockLIDStore{})
+	client := newTestClient(&mockLIDStore{}, nil)
 	ms := newTestMessageStore(t)
 	logger := testLogger()
 
@@ -398,5 +413,125 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_AggregatesByPhoneJIDDeterministically(
 	}
 	if lastMessage != "2026-03-01T11:00:00Z" {
 		t.Fatalf("expected merged last_message_time to be max source value, got %s", lastMessage)
+	}
+}
+
+// --- Tests for resolveContactName ---
+
+func TestResolveContactName_FullName(t *testing.T) {
+	cs := &mockContactStore{contacts: map[types.JID]types.ContactInfo{
+		phonePN: {Found: true, FullName: "John Doe", PushName: "Johnny"},
+	}}
+	client := newTestClient(&mockLIDStore{}, cs)
+	name := resolveContactName(client, phonePN, testLogger())
+	if name != "John Doe" {
+		t.Errorf("expected 'John Doe', got %q", name)
+	}
+}
+
+func TestResolveContactName_PushNameFallback(t *testing.T) {
+	cs := &mockContactStore{contacts: map[types.JID]types.ContactInfo{
+		phonePN: {Found: true, PushName: "Johnny"},
+	}}
+	client := newTestClient(&mockLIDStore{}, cs)
+	name := resolveContactName(client, phonePN, testLogger())
+	if name != "Johnny" {
+		t.Errorf("expected 'Johnny', got %q", name)
+	}
+}
+
+func TestResolveContactName_BusinessNameFallback(t *testing.T) {
+	cs := &mockContactStore{contacts: map[types.JID]types.ContactInfo{
+		phonePN: {Found: true, BusinessName: "Acme Corp"},
+	}}
+	client := newTestClient(&mockLIDStore{}, cs)
+	name := resolveContactName(client, phonePN, testLogger())
+	if name != "Acme Corp" {
+		t.Errorf("expected 'Acme Corp', got %q", name)
+	}
+}
+
+func TestResolveContactName_NotFound(t *testing.T) {
+	cs := &mockContactStore{contacts: map[types.JID]types.ContactInfo{}}
+	client := newTestClient(&mockLIDStore{}, cs)
+	name := resolveContactName(client, phonePN, testLogger())
+	if name != "" {
+		t.Errorf("expected empty string, got %q", name)
+	}
+}
+
+// --- Tests for GetChatName contact resolution ---
+
+func TestGetChatName_NumericCachedName_ReResolved(t *testing.T) {
+	cs := &mockContactStore{contacts: map[types.JID]types.ContactInfo{
+		phonePN: {Found: true, FullName: "John Doe"},
+	}}
+	client := newTestClient(&mockLIDStore{}, cs)
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	// Pre-populate with numeric name (phone number)
+	_ = ms.StoreChat(phonePN.String(), "11234567890", time.Now())
+
+	name := GetChatName(client, ms, phonePN, phonePN.String(), nil, "", "", logger)
+	if name != "John Doe" {
+		t.Errorf("expected re-resolved name 'John Doe', got %q", name)
+	}
+}
+
+func TestGetChatName_NonNumericCachedName_Kept(t *testing.T) {
+	cs := &mockContactStore{contacts: map[types.JID]types.ContactInfo{
+		phonePN: {Found: true, FullName: "Jane Doe"},
+	}}
+	client := newTestClient(&mockLIDStore{}, cs)
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	_ = ms.StoreChat(phonePN.String(), "John Doe", time.Now())
+
+	name := GetChatName(client, ms, phonePN, phonePN.String(), nil, "", "", logger)
+	if name != "John Doe" {
+		t.Errorf("expected cached name 'John Doe', got %q", name)
+	}
+}
+
+func TestGetChatName_PushNameFallback(t *testing.T) {
+	cs := &mockContactStore{contacts: map[types.JID]types.ContactInfo{}}
+	client := newTestClient(&mockLIDStore{}, cs)
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	name := GetChatName(client, ms, phonePN, phonePN.String(), nil, "", "Dune", logger)
+	if name != "Dune" {
+		t.Errorf("expected 'Dune' from pushName, got %q", name)
+	}
+}
+
+// --- Integration test: handleMessage with PushName for LID contact ---
+
+func TestHandleMessage_PushNameUsedForLIDContact(t *testing.T) {
+	cs := &mockContactStore{contacts: map[types.JID]types.ContactInfo{}}
+	client := newTestClient(&mockLIDStore{}, cs)
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	msg := buildTextMessage(
+		phoneLID,
+		phoneLID,
+		phonePN,
+		types.EmptyJID,
+		false,
+		"Hello",
+	)
+	msg.Info.PushName = "Dune"
+
+	handleMessage(client, ms, msg, logger)
+
+	name, found := queryChat(ms, phonePN.String())
+	if !found {
+		t.Fatal("expected chat to exist")
+	}
+	if name != "Dune" {
+		t.Errorf("expected chat name 'Dune' from PushName, got %q", name)
 	}
 }

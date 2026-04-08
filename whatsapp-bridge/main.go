@@ -780,17 +780,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	sender := msg.Info.Sender.User
 
 	// Get appropriate chat name (pass resolved JID so contact lookup works)
-	name := GetChatName(client, messageStore, resolvedChat, chatJID, nil, sender, logger)
-
-	// If contact resolution fails (common for LIDs), PushName is often the best available display name.
-	// Only apply for direct messages (not groups) and only when the stored name is the numeric JID user.
-	if !msg.Info.IsFromMe && msg.Info.Chat.Server != "g.us" && strings.TrimSpace(msg.Info.PushName) != "" {
-		pushName := strings.TrimSpace(msg.Info.PushName)
-		if name == "" || name == msg.Info.Chat.User {
-			logger.Infof("Updating chat name from PushName for %s: %s -> %s", chatJID, name, pushName)
-			name = pushName
-		}
-	}
+	name := GetChatName(client, messageStore, resolvedChat, chatJID, nil, sender, strings.TrimSpace(msg.Info.PushName), logger)
 
 	// Update chat in database with the message timestamp (keeps last message time updated)
 	err := messageStore.StoreChat(chatJID, name, msg.Info.Timestamp)
@@ -1592,15 +1582,49 @@ connectionSuccess:
 	client.Disconnect()
 }
 
+// resolveContactName resolves a contact's display name from the whatsmeow contact store,
+// trying FullName, then PushName, then BusinessName.
+func resolveContactName(client *whatsmeow.Client, jid types.JID, logger waLog.Logger) string {
+	contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
+	if err != nil {
+		logger.Debugf("GetContact failed for %s: %v", jid, err)
+		return ""
+	}
+	if !contact.Found {
+		logger.Debugf("Contact not found in store for %s", jid)
+		return ""
+	}
+	if contact.FullName != "" {
+		return contact.FullName
+	}
+	if contact.PushName != "" {
+		return contact.PushName
+	}
+	if contact.BusinessName != "" {
+		return contact.BusinessName
+	}
+	return ""
+}
+
 // GetChatName determines the appropriate name for a chat based on JID and other info
-func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types.JID, chatJID string, conversation interface{}, sender string, logger waLog.Logger) string {
+func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types.JID, chatJID string, conversation interface{}, sender string, pushName string, logger waLog.Logger) string {
 	// First, check if chat already exists in database with a name
 	var existingName string
 	err := messageStore.db.QueryRow("SELECT name FROM chats WHERE jid = ?", chatJID).Scan(&existingName)
 	if err == nil && existingName != "" {
-		// Chat exists with a name, use that
-		logger.Infof("Using existing chat name for %s: %s", chatJID, existingName)
-		return existingName
+		// If the name is purely numeric, it's likely a phone number — try to resolve a proper name
+		isNumeric := true
+		for _, r := range existingName {
+			if r < '0' || r > '9' {
+				isNumeric = false
+				break
+			}
+		}
+		if !isNumeric {
+			logger.Infof("Using existing chat name for %s: %s", chatJID, existingName)
+			return existingName
+		}
+		logger.Infof("Existing name for %s is numeric (%s), attempting re-resolution", chatJID, existingName)
 	}
 
 	// Need to determine chat name
@@ -1657,15 +1681,14 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		// This is an individual contact
 		logger.Infof("Getting name for contact: %s", chatJID)
 
-		// Just use contact info (full name)
-		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
-		if err == nil && contact.FullName != "" {
-			name = contact.FullName
-		} else if sender != "" {
-			// Fallback to sender
+		name = resolveContactName(client, jid, logger)
+		if name == "" && pushName != "" {
+			name = pushName
+		}
+		if name == "" && sender != "" {
 			name = sender
-		} else {
-			// Last fallback to JID
+		}
+		if name == "" {
 			name = jid.User
 		}
 
@@ -1702,7 +1725,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 		chatJID := resolved.String()
 
 		// Get appropriate chat name by passing the history sync conversation directly
-		name := GetChatName(client, messageStore, resolved, chatJID, conversation, "", logger)
+		name := GetChatName(client, messageStore, resolved, chatJID, conversation, "", "", logger)
 
 		// Process messages
 		messages := conversation.Messages
