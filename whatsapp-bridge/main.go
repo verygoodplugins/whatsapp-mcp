@@ -1289,7 +1289,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, host 
 	})
 
 	// Start the server with proper timeouts
-	serverAddr := fmt.Sprintf("%s:%d", host, port)
+	serverAddr := net.JoinHostPort(host, strconv.Itoa(port))
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
 
 	// Create server with timeouts for stability
