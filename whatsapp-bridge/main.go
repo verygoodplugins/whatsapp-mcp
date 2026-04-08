@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -1084,7 +1085,7 @@ func extractDirectPathFromURL(url string) string {
 }
 
 // Start a REST API server to expose the WhatsApp client functionality
-func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
+func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, host string, port int) {
 	// Health check endpoint
 	http.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1288,7 +1289,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	})
 
 	// Start the server with proper timeouts
-	serverAddr := fmt.Sprintf(":%d", port)
+	serverAddr := net.JoinHostPort(host, strconv.Itoa(port))
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
 
 	// Create server with timeouts for stability
@@ -1514,6 +1515,14 @@ connectionSuccess:
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
 
 	// Start REST API server
+	host := "127.0.0.1" // secure default: bridge exposes private WhatsApp messages
+	if h := os.Getenv("WHATSAPP_BRIDGE_HOST"); h != "" {
+		if net.ParseIP(h) == nil {
+			logger.Errorf("Invalid WHATSAPP_BRIDGE_HOST=%q, must be a valid IP address", h)
+			return
+		}
+		host = h
+	}
 	port := 8080
 	if p := os.Getenv("WHATSAPP_BRIDGE_PORT"); p != "" {
 		v, err := strconv.Atoi(p)
@@ -1523,7 +1532,7 @@ connectionSuccess:
 		}
 		port = v
 	}
-	startRESTServer(client, messageStore, port)
+	startRESTServer(client, messageStore, host, port)
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)

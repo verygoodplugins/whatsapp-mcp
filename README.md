@@ -231,6 +231,7 @@ Copy `.env.example` to `.env` and configure as needed:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `WHATSAPP_BRIDGE_HOST` | `127.0.0.1` | Bind address for Go bridge REST API |
 | `WHATSAPP_BRIDGE_PORT` | `8080` | Port for Go bridge REST API |
 | `WEBHOOK_URL` | `http://localhost:8769/whatsapp/webhook` | Webhook for incoming messages |
 | `FORWARD_SELF` | `false` | Forward messages sent by self |
