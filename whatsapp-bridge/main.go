@@ -780,7 +780,13 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	sender := msg.Info.Sender.User
 
 	// Get appropriate chat name (pass resolved JID so contact lookup works)
-	name := GetChatName(client, messageStore, resolvedChat, chatJID, nil, sender, strings.TrimSpace(msg.Info.PushName), logger)
+	// Only use PushName for incoming messages — for outgoing messages, PushName is
+	// our own name, not the recipient's, which would incorrectly label the chat.
+	var pushName string
+	if !msg.Info.IsFromMe {
+		pushName = strings.TrimSpace(msg.Info.PushName)
+	}
+	name := GetChatName(client, messageStore, resolvedChat, chatJID, nil, sender, pushName, logger)
 
 	// Update chat in database with the message timestamp (keeps last message time updated)
 	err := messageStore.StoreChat(chatJID, name, msg.Info.Timestamp)
