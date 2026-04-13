@@ -3,7 +3,7 @@ import os
 import os.path
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -16,6 +16,34 @@ MESSAGES_DB_PATH = os.getenv(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store", "messages.db"),
 )
 WHATSAPP_API_BASE_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:8080/api")
+
+
+def format_timestamp_rfc3339_utc(dt: datetime) -> str:
+    """Format a datetime as RFC 3339 UTC with Z suffix (e.g. 2026-01-02T10:27:43Z)."""
+    utc = dt.astimezone(timezone.utc).replace(microsecond=0)
+    return utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_db_timestamp(raw) -> "datetime | None":
+    """Parse a SQLite timestamp string; naive values are treated as UTC."""
+    if raw is None or str(raw).strip() == "":
+        return None
+    s = str(raw).strip()
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00")) if s.endswith("Z") else datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def parse_filter_timestamp(s: str) -> datetime:
+    """Parse an after/before filter string; requires an explicit timezone (RFC 3339)."""
+    s = s.strip()
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00")) if s.endswith("Z") else datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        raise ValueError(
+            "after/before must include a timezone offset (RFC 3339), e.g. 2026-01-02T10:27:43Z"
+        )
+    return dt.astimezone(timezone.utc)
 
 
 @dataclass
@@ -168,18 +196,21 @@ def format_message(message: Message, show_chat_info: bool = True) -> None:
     """Print a single message with consistent formatting."""
     output = ""
 
+    ts = format_timestamp_rfc3339_utc(message.timestamp)
     if show_chat_info and message.chat_name:
-        output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] Chat: {message.chat_name} "
+        output += f"[{ts}] Chat: {message.chat_name} "
     else:
-        output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] "
+        output += f"[{ts}] "
 
     content_prefix = ""
     if hasattr(message, "media_type") and message.media_type:
-        content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
+        content_prefix = f"[{message.media_type}] "
 
     try:
         sender_name = get_sender_name(message.sender) if not message.is_from_me else "Me"
-        output += f"From: {sender_name}: {content_prefix}{message.content}\n"
+        msg_id = getattr(message, 'id', None)
+        id_suffix = f" [id:{msg_id}]" if msg_id else ""
+        output += f"From: {sender_name}: {content_prefix}{message.content}{id_suffix}\n"
     except Exception as e:
         print(f"Error formatting message: {e}")
     return output
@@ -242,21 +273,19 @@ def list_messages(
         # Add filters
         if after:
             try:
-                after = datetime.fromisoformat(after)
-            except ValueError:
-                raise ValueError(f"Invalid date format for 'after': {after}. Please use ISO-8601 format.")
-
+                after_utc = parse_filter_timestamp(after)
+            except ValueError as e:
+                raise ValueError(f"Invalid date format for 'after': {after}. {e}") from e
             where_clauses.append("messages.timestamp > ?")
-            params.append(after)
+            params.append(format_timestamp_rfc3339_utc(after_utc))
 
         if before:
             try:
-                before = datetime.fromisoformat(before)
-            except ValueError:
-                raise ValueError(f"Invalid date format for 'before': {before}. Please use ISO-8601 format.")
-
+                before_utc = parse_filter_timestamp(before)
+            except ValueError as e:
+                raise ValueError(f"Invalid date format for 'before': {before}. {e}") from e
             where_clauses.append("messages.timestamp < ?")
-            params.append(before)
+            params.append(format_timestamp_rfc3339_utc(before_utc))
 
         if sender_phone_number:
             where_clauses.append("messages.sender = ?")
@@ -267,8 +296,9 @@ def list_messages(
             params.append(chat_jid)
 
         if query:
-            where_clauses.append("LOWER(messages.content) LIKE LOWER(?)")
-            params.append(f"%{query}%")
+            # instr() is Unicode-safe; SQLite's LOWER() only handles ASCII
+            where_clauses.append("(instr(LOWER(messages.content), LOWER(?)) > 0 OR instr(messages.content, ?) > 0)")
+            params.extend([query, query])
 
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
@@ -466,8 +496,9 @@ def list_chats(
         params = []
 
         if query:
-            where_clauses.append("(LOWER(chats.name) LIKE LOWER(?) OR chats.jid LIKE ?)")
-            params.extend([f"%{query}%", f"%{query}%"])
+            # instr() is Unicode-safe; SQLite's LOWER() only handles ASCII
+            where_clauses.append("(instr(LOWER(chats.name), LOWER(?)) > 0 OR instr(chats.name, ?) > 0 OR chats.jid LIKE ?)")
+            params.extend([query, query, f"%{query}%"])
 
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
@@ -512,9 +543,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
 
-        # Split query into characters to support partial matching
-        search_pattern = "%" + query + "%"
-
+        # instr() is Unicode-safe; SQLite's LOWER() only handles ASCII
         cursor.execute(
             """
             SELECT DISTINCT
@@ -522,12 +551,12 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
                 name
             FROM chats
             WHERE
-                (LOWER(name) LIKE LOWER(?) OR LOWER(jid) LIKE LOWER(?))
+                (instr(LOWER(name), LOWER(?)) > 0 OR instr(name, ?) > 0 OR instr(LOWER(jid), LOWER(?)) > 0)
                 AND jid NOT LIKE '%@g.us'
             ORDER BY name, jid
             LIMIT 50
         """,
-            (search_pattern, search_pattern),
+            (query, query, query),
         )
 
         contacts = cursor.fetchall()
@@ -760,7 +789,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
             conn.close()
 
 
-def send_message(recipient: str, message: str) -> tuple[bool, str]:
+def send_message(recipient: str, message: str, quoted_id: str = None) -> tuple[bool, str]:
     try:
         # Validate input
         if not recipient:
@@ -771,6 +800,8 @@ def send_message(recipient: str, message: str) -> tuple[bool, str]:
             "recipient": recipient,
             "message": message,
         }
+        if quoted_id:
+            payload["quoted_id"] = quoted_id
 
         response = requests.post(url, json=payload)
 
@@ -789,7 +820,7 @@ def send_message(recipient: str, message: str) -> tuple[bool, str]:
         return False, f"Unexpected error: {str(e)}"
 
 
-def send_file(recipient: str, media_path: str) -> tuple[bool, str]:
+def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool, str]:
     try:
         # Validate input
         if not recipient:
@@ -802,7 +833,7 @@ def send_file(recipient: str, media_path: str) -> tuple[bool, str]:
             return False, f"Media file not found: {media_path}"
 
         url = f"{WHATSAPP_API_BASE_URL}/send"
-        payload = {"recipient": recipient, "media_path": media_path}
+        payload = {"recipient": recipient, "media_path": media_path, "message": caption}
 
         response = requests.post(url, json=payload)
 
