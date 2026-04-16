@@ -172,10 +172,12 @@ def _resolve_lid_to_phone(lid_or_jid: str) -> str | None:
         cursor = conn.cursor()
         cursor.execute("SELECT pn FROM whatsmeow_lid_map WHERE lid = ? LIMIT 1", (lid,))
         row = cursor.fetchone()
-        conn.close()
         return row[0] if row else None
     except sqlite3.Error:
         return None
+    finally:
+        if "conn" in locals():
+            conn.close()
 
 
 def _resolve_name_from_whatsmeow(jid: str) -> str | None:
@@ -214,15 +216,15 @@ def _resolve_name_from_whatsmeow(jid: str) -> str | None:
             (lookup_jid,),
         )
         row = cursor.fetchone()
-        conn.close()
         if row:
             # Prefer full_name, then push_name, then first_name, then business_name
             return row[0] or row[1] or row[2] or row[3] or None
         return None
     except sqlite3.Error:
         return None
-
-
+    finally:
+        if "conn" in locals():
+            conn.close()
 
 
 def get_sender_name(sender_jid: str) -> str:
