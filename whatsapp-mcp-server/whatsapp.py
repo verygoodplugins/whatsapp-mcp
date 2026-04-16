@@ -154,6 +154,31 @@ def _sender_aliases(value: str) -> list[str]:
     return aliases
 
 
+def _resolve_name_from_whatsmeow(jid: str) -> str | None:
+    """Look up a contact name from whatsmeow's contact store (whatsapp.db).
+
+    Falls back gracefully if the DB or table doesn't exist.
+    """
+    if not os.path.exists(WHATSMEOW_DB_PATH):
+        return None
+    try:
+        conn = sqlite3.connect(WHATSMEOW_DB_PATH)
+        cursor = conn.cursor()
+        # whatsmeow_contacts columns: our_jid, their_jid, first_name, full_name, push_name, business_name
+        cursor.execute(
+            "SELECT full_name, push_name, first_name, business_name FROM whatsmeow_contacts WHERE their_jid = ? LIMIT 1",
+            (jid,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            # Prefer full_name, then push_name, then first_name, then business_name
+            return row[0] or row[1] or row[2] or row[3] or None
+        return None
+    except sqlite3.Error:
+        return None
+
+
 def get_sender_name(sender_jid: str) -> str:
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
@@ -194,8 +219,13 @@ def get_sender_name(sender_jid: str) -> str:
 
         if result and result[0]:
             return result[0]
-        else:
-            return sender_jid
+
+        # Fall back to whatsmeow contact store
+        whatsmeow_name = _resolve_name_from_whatsmeow(sender_jid)
+        if whatsmeow_name:
+            return whatsmeow_name
+
+        return sender_jid
 
     except sqlite3.Error as e:
         print(f"Database error while getting sender name: {e}")
@@ -550,19 +580,22 @@ def list_chats(
 
 
 def search_contacts(query: str) -> list[dict[str, Any]]:
-    """Search contacts by name or phone number."""
+    """Search contacts by name or phone number.
+
+    Searches both the messages.db chats table and whatsmeow's contact store
+    (whatsapp.db) to find contacts. Results are deduplicated by JID.
+    """
+    seen_jids: set[str] = set()
+    result: list[dict[str, Any]] = []
+    search_pattern = "%" + query + "%"
+
+    # 1) Search messages.db chats table (existing behavior)
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
-
-        # Split query into characters to support partial matching
-        search_pattern = "%" + query + "%"
-
         cursor.execute(
             """
-            SELECT DISTINCT
-                jid,
-                name
+            SELECT DISTINCT jid, name
             FROM chats
             WHERE
                 (LOWER(name) LIKE LOWER(?) OR LOWER(jid) LIKE LOWER(?))
@@ -572,22 +605,49 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
         """,
             (search_pattern, search_pattern),
         )
-
-        contacts = cursor.fetchall()
-
-        result = []
-        for contact_data in contacts:
-            contact = Contact(phone_number=contact_data[0].split("@")[0], name=contact_data[1], jid=contact_data[0])
-            result.append(contact_to_dict(contact))
-
-        return result
-
+        for jid, name in cursor.fetchall():
+            if jid not in seen_jids:
+                seen_jids.add(jid)
+                contact = Contact(phone_number=jid.split("@")[0], name=name, jid=jid)
+                result.append(contact_to_dict(contact))
     except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        return []
+        print(f"Database error (messages.db): {e}")
     finally:
         if "conn" in locals():
             conn.close()
+
+    # 2) Search whatsmeow contact store (whatsapp.db)
+    if os.path.exists(WHATSMEOW_DB_PATH):
+        try:
+            conn2 = sqlite3.connect(WHATSMEOW_DB_PATH)
+            cursor2 = conn2.cursor()
+            cursor2.execute(
+                """
+                SELECT their_jid, full_name, push_name, first_name, business_name
+                FROM whatsmeow_contacts
+                WHERE
+                    LOWER(full_name) LIKE LOWER(?)
+                    OR LOWER(push_name) LIKE LOWER(?)
+                    OR LOWER(first_name) LIKE LOWER(?)
+                    OR LOWER(business_name) LIKE LOWER(?)
+                    OR their_jid LIKE ?
+                LIMIT 50
+            """,
+                (search_pattern, search_pattern, search_pattern, search_pattern, search_pattern),
+            )
+            for their_jid, full_name, push_name, first_name, business_name in cursor2.fetchall():
+                if their_jid not in seen_jids:
+                    seen_jids.add(their_jid)
+                    name = full_name or push_name or first_name or business_name or ""
+                    contact = Contact(phone_number=their_jid.split("@")[0], name=name, jid=their_jid)
+                    result.append(contact_to_dict(contact))
+        except sqlite3.Error as e:
+            print(f"Database error (whatsapp.db): {e}")
+        finally:
+            if "conn2" in locals():
+                conn2.close()
+
+    return result
 
 
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str, Any]]:
