@@ -265,13 +265,19 @@ def get_sender_name(sender_jid: str) -> str:
 
             result = cursor.fetchone()
 
-        if result and result[0]:
+        if result and result[0] and not result[0].replace("+", "").isdigit():
             return result[0]
 
         # Fall back to whatsmeow contact store
         whatsmeow_name = _resolve_name_from_whatsmeow(sender_jid)
         if whatsmeow_name:
             return whatsmeow_name
+
+        # Try with @s.whatsapp.net suffix if bare number
+        if "@" not in sender_jid:
+            whatsmeow_name = _resolve_name_from_whatsmeow(sender_jid + "@s.whatsapp.net")
+            if whatsmeow_name:
+                return whatsmeow_name
 
         return sender_jid
 
