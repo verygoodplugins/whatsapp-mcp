@@ -154,20 +154,64 @@ def _sender_aliases(value: str) -> list[str]:
     return aliases
 
 
+def _resolve_lid_to_phone(lid_or_jid: str) -> str | None:
+    """Resolve a WhatsApp LID (linked device identifier) to a phone number.
+
+    WhatsApp's newer protocol uses opaque LIDs (e.g. '35047067385985') as sender
+    identifiers instead of phone numbers. The whatsmeow_lid_map table maps these
+    back to real phone numbers.
+
+    Returns the phone number if found, None otherwise.
+    """
+    if not os.path.exists(WHATSMEOW_DB_PATH):
+        return None
+    # Extract the numeric part from JID-style strings (e.g. '35047067385985@lid')
+    lid = lid_or_jid.split("@")[0] if "@" in lid_or_jid else lid_or_jid
+    try:
+        conn = sqlite3.connect(WHATSMEOW_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT pn FROM whatsmeow_lid_map WHERE lid = ? LIMIT 1", (lid,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except sqlite3.Error:
+        return None
+
+
 def _resolve_name_from_whatsmeow(jid: str) -> str | None:
     """Look up a contact name from whatsmeow's contact store (whatsapp.db).
+
+    Handles both standard JIDs (12345@s.whatsapp.net) and LIDs (opaque numeric
+    identifiers used by WhatsApp's linked device protocol). LIDs are first
+    resolved to phone numbers via whatsmeow_lid_map, then looked up in contacts.
 
     Falls back gracefully if the DB or table doesn't exist.
     """
     if not os.path.exists(WHATSMEOW_DB_PATH):
         return None
+
+    lookup_jid = jid
+    jid_prefix = jid.split("@")[0] if "@" in jid else jid
+    jid_suffix = jid.split("@")[1] if "@" in jid else ""
+
+    # If this is a LID (@lid suffix) or a raw number, try LID map first.
+    # LIDs overlap in length with phone numbers (12-15 digits) so we always
+    # attempt LID resolution and fall through to direct contact lookup if not found.
+    if jid_suffix in ("lid", ""):
+        phone = _resolve_lid_to_phone(jid_prefix)
+        if phone:
+            lookup_jid = phone + "@s.whatsapp.net"
+        elif jid_suffix == "lid":
+            # Definitely a LID but not in the map — can't resolve
+            return None
+
     try:
         conn = sqlite3.connect(WHATSMEOW_DB_PATH)
         cursor = conn.cursor()
         # whatsmeow_contacts columns: our_jid, their_jid, first_name, full_name, push_name, business_name
         cursor.execute(
             "SELECT full_name, push_name, first_name, business_name FROM whatsmeow_contacts WHERE their_jid = ? LIMIT 1",
-            (jid,),
+            (lookup_jid,),
         )
         row = cursor.fetchone()
         conn.close()
@@ -177,6 +221,8 @@ def _resolve_name_from_whatsmeow(jid: str) -> str | None:
         return None
     except sqlite3.Error:
         return None
+
+
 
 
 def get_sender_name(sender_jid: str) -> str:
