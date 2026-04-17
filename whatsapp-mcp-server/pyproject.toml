@@ -17,8 +17,8 @@ classifiers = [
 ]
 dependencies = [
     "httpx>=0.28.1",
-    "mcp[cli]>=1.6.0",
-    "requests>=2.32.3",
+    "mcp[cli]>=1.27.0",
+    "requests>=2.33.1",
 ]
 
 [project.optional-dependencies]
