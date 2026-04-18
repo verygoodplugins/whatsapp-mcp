@@ -15,6 +15,10 @@ MESSAGES_DB_PATH = os.getenv(
     "WHATSAPP_DB_PATH",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store", "messages.db"),
 )
+WHATSMEOW_DB_PATH = os.getenv(
+    "WHATSMEOW_DB_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store", "whatsapp.db"),
+)
 WHATSAPP_API_BASE_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:8080/api")
 
 
@@ -111,6 +115,35 @@ def chat_to_dict(chat: "Chat") -> dict[str, Any]:
 def contact_to_dict(contact: "Contact") -> dict[str, Any]:
     """Convert a Contact dataclass to a dictionary for JSON serialization."""
     return {"phone_number": contact.phone_number, "name": contact.name, "jid": contact.jid}
+
+
+def _sender_aliases(value: str) -> list[str]:
+    # WhatsApp stores messages.sender as either a bare phone number or a bare LID.
+    # whatsmeow_lid_map (in whatsapp.db) maps between the two, so to find all
+    # messages from one contact we need to query for both IDs.
+    bare = value.split("@", 1)[0]
+    aliases = [bare]
+    if not os.path.isfile(WHATSMEOW_DB_PATH):
+        return aliases
+    try:
+        conn = sqlite3.connect(WHATSMEOW_DB_PATH)
+        try:
+            row = conn.execute(
+                "SELECT lid FROM whatsmeow_lid_map WHERE pn = ?", (bare,)
+            ).fetchone()
+            if row:
+                aliases.append(row[0])
+            else:
+                row = conn.execute(
+                    "SELECT pn FROM whatsmeow_lid_map WHERE lid = ?", (bare,)
+                ).fetchone()
+                if row:
+                    aliases.append(row[0])
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        pass
+    return aliases
 
 
 def get_sender_name(sender_jid: str) -> str:
@@ -259,8 +292,10 @@ def list_messages(
             params.append(before)
 
         if sender_phone_number:
-            where_clauses.append("messages.sender = ?")
-            params.append(sender_phone_number)
+            aliases = _sender_aliases(sender_phone_number)
+            placeholders = ",".join("?" * len(aliases))
+            where_clauses.append(f"messages.sender IN ({placeholders})")
+            params.extend(aliases)
 
         if chat_jid:
             where_clauses.append("messages.chat_jid = ?")
@@ -559,8 +594,10 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
 
+        aliases = _sender_aliases(jid)
+        placeholders = ",".join("?" * len(aliases))
         cursor.execute(
-            """
+            f"""
             SELECT DISTINCT
                 c.jid,
                 c.name,
@@ -570,11 +607,11 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
                 m.is_from_me as last_is_from_me
             FROM chats c
             JOIN messages m ON c.jid = m.chat_jid
-            WHERE m.sender = ? OR c.jid = ?
+            WHERE m.sender IN ({placeholders}) OR c.jid = ?
             ORDER BY c.last_message_time DESC
             LIMIT ? OFFSET ?
         """,
-            (jid, jid, limit, page * limit),
+            (*aliases, jid, limit, page * limit),
         )
 
         chats = cursor.fetchall()
@@ -614,8 +651,10 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
 
+        aliases = _sender_aliases(jid)
+        placeholders = ",".join("?" * len(aliases))
         cursor.execute(
-            """
+            f"""
             SELECT
                 m.timestamp,
                 m.sender,
@@ -627,11 +666,11 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
                 m.media_type
             FROM messages m
             JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.sender = ? OR c.jid = ?
+            WHERE m.sender IN ({placeholders}) OR c.jid = ?
             ORDER BY m.timestamp DESC
             LIMIT 1
         """,
-            (jid, jid),
+            (*aliases, jid),
         )
 
         msg_data = cursor.fetchone()
