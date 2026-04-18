@@ -118,31 +118,43 @@ def contact_to_dict(contact: "Contact") -> dict[str, Any]:
 
 
 def _sender_aliases(value: str) -> list[str]:
-    # WhatsApp stores messages.sender as either a bare phone number or a bare LID.
-    # whatsmeow_lid_map (in whatsapp.db) maps between the two, so to find all
-    # messages from one contact we need to query for both IDs.
+    # messages.sender is written inconsistently: the same contact may appear as
+    # bare phone ("13232432100"), full phone JID ("13232432100@s.whatsapp.net"),
+    # bare LID ("231241139937355"), or full LID JID ("231241139937355@lid").
+    # whatsmeow_lid_map (whatsapp.db) maps pn<->lid; we emit all four forms so
+    # an IN-based filter catches every row regardless of which form was stored.
     bare = value.split("@", 1)[0]
-    aliases = [bare]
-    if not os.path.isfile(WHATSMEOW_DB_PATH):
-        return aliases
-    try:
-        conn = sqlite3.connect(WHATSMEOW_DB_PATH)
+    pn: str | None = None
+    lid: str | None = None
+    if os.path.isfile(WHATSMEOW_DB_PATH):
         try:
-            row = conn.execute(
-                "SELECT lid FROM whatsmeow_lid_map WHERE pn = ?", (bare,)
-            ).fetchone()
-            if row:
-                aliases.append(row[0])
-            else:
+            conn = sqlite3.connect(WHATSMEOW_DB_PATH)
+            try:
                 row = conn.execute(
-                    "SELECT pn FROM whatsmeow_lid_map WHERE lid = ?", (bare,)
+                    "SELECT lid FROM whatsmeow_lid_map WHERE pn = ?", (bare,)
                 ).fetchone()
                 if row:
-                    aliases.append(row[0])
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        pass
+                    pn, lid = bare, row[0]
+                else:
+                    row = conn.execute(
+                        "SELECT pn FROM whatsmeow_lid_map WHERE lid = ?", (bare,)
+                    ).fetchone()
+                    if row:
+                        lid, pn = bare, row[0]
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            pass
+
+    aliases: list[str] = []
+    if pn:
+        aliases += [pn, f"{pn}@s.whatsapp.net"]
+    if lid:
+        aliases += [lid, f"{lid}@lid"]
+    if not aliases:
+        # No mapping found; emit the bare form plus both possible suffixes so
+        # we still match whichever form the bridge happened to store.
+        aliases = [bare, f"{bare}@s.whatsapp.net", f"{bare}@lid"]
     return aliases
 
 
