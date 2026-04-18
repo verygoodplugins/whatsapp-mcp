@@ -237,6 +237,37 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_DB_PATH` | `../whatsapp-bridge/store/messages.db` | Path to SQLite database |
 | `WHATSAPP_API_URL` | `http://localhost:8080/api` | Go bridge REST API URL |
 
+### CLI flags (Go bridge)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--full-history-pair` | `false` | Request full history at pair time. Only takes effect on a fresh pair (no existing `whatsapp.db`); no-op for already-paired sessions. The phone ultimately decides the actual history window sent — see [Requesting full history](#requesting-full-history) below. |
+
+### Requesting full history
+
+whatsmeow's default pairing asks for "recent sync" — roughly the last 3 months, with the exact window decided by the phone. If you want to pull more history at pair time:
+
+```bash
+# Stop the bridge
+launchctl bootout gui/$UID/com.whatsapp-bridge    # or however you manage it
+
+# Back up, then remove the auth session (keeps messages.db intact)
+cp whatsapp-bridge/store/whatsapp.db{,.bak}
+rm whatsapp-bridge/store/whatsapp.db
+
+# Re-pair with the flag
+cd whatsapp-bridge
+./whatsapp-bridge --full-history-pair
+# Scan the QR with WhatsApp → Settings → Linked Devices → Link a Device
+# Wait for "History sync complete" in the logs (can take 10-30 minutes)
+# Ctrl+C when sync has quiesced, then restart under your normal process manager
+```
+
+Caveats:
+- **The phone decides the actual cap.** The flag requests up to 10 years / 100 GB, but WhatsApp's iOS primary device enforces its own retention policy. iPad companion is documented at ~1 year max; other linked devices appear to follow similar logic.
+- **Only effective on a fresh pair.** With `whatsapp.db` already present, no new pair handshake fires and the flag is a no-op.
+- **Messages the phone has deleted are not recoverable** — auto-expire, low-storage cleanup, and manual delete all leave no trace for the phone to share.
+
 ## Architecture
 
 ```mermaid
