@@ -667,7 +667,7 @@ type SendMessageRequest struct {
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -692,6 +692,10 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 			Server: "s.whatsapp.net", // For personal chats
 		}
 	}
+
+	// Preserve the phone/group JID for local DB storage, since LID resolution
+	// below rewrites recipientJID to @lid form for sending but queries use phone JID.
+	storageChatJID := recipientJID.String()
 
 	// For personal chats, resolve phone number JID to LID (Linked Identity).
 	// WhatsApp is migrating to LID-based addressing; messages sent to the
@@ -850,10 +854,37 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	}
 
 	// Send message
-	_, err = client.SendMessage(context.Background(), recipientJID, msg)
+	sendResp, err := client.SendMessage(context.Background(), recipientJID, msg)
 
 	if err != nil {
 		return false, fmt.Sprintf("Error sending message: %v", err)
+	}
+
+	// Store the outbound message locally so it appears in queries immediately,
+	// without waiting for the next WhatsApp HistorySync on reconnect.
+	if messageStore != nil {
+		ownJID := ""
+		if client.Store != nil && client.Store.ID != nil {
+			ownJID = client.Store.ID.User
+		}
+		storeErr := messageStore.StoreMessage(
+			sendResp.ID,
+			storageChatJID,
+			ownJID,
+			message,
+			sendResp.Timestamp,
+			true,
+			"", "", "",
+			nil, nil, nil, 0,
+		)
+		if storeErr != nil {
+			fmt.Printf("Warning: failed to store outbound message locally: %v\n", storeErr)
+		} else {
+			fmt.Printf("[%s] → %s: %s\n",
+				sendResp.Timestamp.Format("2006-01-02 15:04:05"),
+				storageChatJID,
+				message)
+		}
 	}
 
 	return true, fmt.Sprintf("Message sent to %s", recipient)
@@ -1436,7 +1467,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
+		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, req.MediaPath)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")

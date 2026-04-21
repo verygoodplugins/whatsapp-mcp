@@ -21,6 +21,8 @@ package-lock.json
 # Go binaries
 whatsapp-bridge/whatsapp-bridge
 whatsapp-bridge/whatsapp-client
+whatsapp-bridge/whatsapp-bridge.bak-*
+whatsapp-bridge/whatsapp-bridge.new
 *.exe
 
 # WhatsApp data (personal/sensitive)
