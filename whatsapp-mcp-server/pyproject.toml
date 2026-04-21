@@ -19,6 +19,7 @@ dependencies = [
     "httpx>=0.28.1",
     "mcp[cli]>=1.6.0",
     "requests>=2.32.3",
+    "anyio<4.9",
 ]
 
 [project.optional-dependencies]
