@@ -1,0 +1,14 @@
+# Code owners — auto-requested for review on matching paths.
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default — every PR
+*                               @jack-arturo
+
+# CI / release / governance — owner only
+/.github/                       @jack-arturo
+/release-please-config.json     @jack-arturo
+/.release-please-manifest.json  @jack-arturo
+/ROADMAP.md                     @jack-arturo
+/AGENTS.md                      @jack-arturo
+/CLAUDE.md                      @jack-arturo
+/CONTRIBUTING.md                @jack-arturo

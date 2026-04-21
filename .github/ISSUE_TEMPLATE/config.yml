@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/verygoodplugins/whatsapp-mcp/discussions
+    about: Ask a question, share an idea, or discuss usage. Please use Discussions for non-bug, non-feature topics.
+  - name: Roadmap & scope
+    url: https://github.com/verygoodplugins/whatsapp-mcp/blob/main/ROADMAP.md
+    about: Before requesting a feature, check what this fork is (and is not) trying to be.
