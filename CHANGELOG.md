@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **bridge:** surface image/video/document captions in extractTextContent ([#42](https://github.com/verygoodplugins/whatsapp-mcp/issues/42)) ([fbb3f28](https://github.com/verygoodplugins/whatsapp-mcp/commit/fbb3f283f0296a5f7e4aaf72eec2b99853de41b8))
 * **mcp:** match messages by both phone number and LID via whatsmeow_lid_map ([#43](https://github.com/verygoodplugins/whatsapp-mcp/issues/43)) ([04c8755](https://github.com/verygoodplugins/whatsapp-mcp/commit/04c875568424a125b3e824ba094427f8d899d7c3))
 * **mcp:** resolve contacts via whatsmeow store with LID → phone fallback ([#30](https://github.com/verygoodplugins/whatsapp-mcp/issues/30)) ([b9b0175](https://github.com/verygoodplugins/whatsapp-mcp/commit/b9b0175e6475d5402feedc190f44758045985992))
-* pin anyio&lt;4.9 to avoid cancel scope regression ([#44](https://github.com/verygoodplugins/whatsapp-mcp/issues/44)) ([627db67](https://github.com/verygoodplugins/whatsapp-mcp/commit/627db6746076108ba4ca370ff3f95420ccbb30ef))
+* pin `anyio<4.9` to avoid cancel scope regression ([#44](https://github.com/verygoodplugins/whatsapp-mcp/issues/44)) ([627db67](https://github.com/verygoodplugins/whatsapp-mcp/commit/627db6746076108ba4ca370ff3f95420ccbb30ef))
 * security hardening for LAN exposure and Unicode search ([#55](https://github.com/verygoodplugins/whatsapp-mcp/issues/55)) ([8097f39](https://github.com/verygoodplugins/whatsapp-mcp/commit/8097f39dd4a19edd2ebab52d086704b528019005))
 
 
