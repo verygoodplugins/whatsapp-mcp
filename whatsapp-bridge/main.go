@@ -889,7 +889,8 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	// and outgoing messages land in the same chat entry.
 	resolvedChat := resolveLIDChat(client, msg.Info.Chat, msg.Info.SenderAlt, msg.Info.RecipientAlt, msg.Info.IsFromMe)
 	chatJID := resolvedChat.String()
-	sender := msg.Info.Sender.User
+	resolvedSender := resolveLIDChat(client, msg.Info.Sender.ToNonAD(), msg.Info.SenderAlt, msg.Info.RecipientAlt, msg.Info.IsFromMe)
+	sender := resolvedSender.User
 
 	// Get appropriate chat name (pass resolved JID so contact lookup works)
 	name := GetChatName(client, messageStore, resolvedChat, chatJID, nil, sender, logger)
