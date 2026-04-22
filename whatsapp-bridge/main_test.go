@@ -333,7 +333,8 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_MissingWhatsAppDBIsNoOp(t *testing.T) 
 	}
 }
 
-func TestMigrateLegacyLIDChatsToPhoneJIDs_AggregatesByPhoneJIDDeterministically(t *testing.T) {	ms := newTestMessageStore(t)
+func TestMigrateLegacyLIDChatsToPhoneJIDs_AggregatesByPhoneJIDDeterministically(t *testing.T) {
+	ms := newTestMessageStore(t)
 	logger := testLogger()
 
 	tmpDir := t.TempDir()
@@ -507,6 +508,9 @@ func TestHandleMessage_ImageWithCaption_WebhookForwarded(t *testing.T) {
 		}
 		if payload.MessageID != "test-img-001" {
 			t.Errorf("expected messageId=test-img-001, got %q", payload.MessageID)
+		}
+		if payload.Content != "" {
+			t.Errorf("expected empty content (captions not extracted by extractTextContent), got %q", payload.Content)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for webhook call")
