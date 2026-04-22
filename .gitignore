@@ -7,6 +7,9 @@
 # Config
 claude_desktop_config.json
 
+# Claude Code local settings (per-user)
+.claude/settings.local.json
+
 # OS files
 .DS_Store
 **/.DS_Store
