@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"math"
 	"math/rand"
@@ -25,6 +26,8 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/proto/waCompanionReg"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -35,6 +38,12 @@ import (
 // Whether to forward messages sent by self via webhook.
 // Defaults to true. Override with env FORWARD_SELF=false.
 var forwardSelfMessages = getEnvBool("FORWARD_SELF", true)
+
+// CLI flag: request a full history sync at pair time.
+// Only meaningful on a fresh pair (whatsapp.db deleted). See the usage block
+// near NewClient for the full rationale and caveats.
+var fullHistoryPairFlag = flag.Bool("full-history-pair", false,
+	"Request full history at pair time (only effective when re-pairing; no-op for existing sessions)")
 
 // getEnvBool reads a boolean env var with a default.
 // Accepts: 1/true/yes/on and 0/false/no/off (case-insensitive)
@@ -1459,6 +1468,8 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 }
 
 func main() {
+	flag.Parse()
+
 	// Set up logger with DEBUG level for more detailed logging
 	logger := waLog.Stdout("Client", "DEBUG", true)
 	logger.Infof("Starting WhatsApp client...")
@@ -1495,6 +1506,30 @@ func main() {
 			logger.Errorf("Failed to get device: %v", err)
 			return
 		}
+	}
+
+	// Optionally request a full history sync at pair time.
+	//
+	// whatsmeow's default DeviceProps has RequireFullSync=false, which asks the
+	// primary device for "recent" history only (typically ~3 months, decided by
+	// the phone). Setting RequireFullSync=true with a large FullSyncDaysLimit
+	// flips the handshake to request full-history mode. The phone still decides
+	// the actual cap — iPad companion is documented at ~1 year max
+	// (https://wabetainfo.com/...). Only meaningful at pair time: for an
+	// already-paired session (whatsapp.db present), this is a no-op because no
+	// new pair handshake fires.
+	//
+	// Enable by passing --full-history-pair on the command line BEFORE deleting
+	// whatsapp.db and re-scanning the QR code. The flag defaults to false so
+	// normal launchd-managed restarts don't accidentally trigger a huge sync.
+	if *fullHistoryPairFlag {
+		store.DeviceProps.RequireFullSync = proto.Bool(true)
+		store.DeviceProps.HistorySyncConfig = &waCompanionReg.DeviceProps_HistorySyncConfig{
+			FullSyncDaysLimit:   proto.Uint32(3650),
+			FullSyncSizeMbLimit: proto.Uint32(102400),
+			StorageQuotaMb:      proto.Uint32(102400),
+		}
+		logger.Infof("--full-history-pair enabled: requesting full history (days=3650, sizeMb=102400)")
 	}
 
 	// Create client instance
