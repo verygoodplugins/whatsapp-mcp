@@ -235,6 +235,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WEBHOOK_URL` | `http://localhost:8769/whatsapp/webhook` | Webhook for incoming messages |
 | `FORWARD_SELF` | `false` | Forward messages sent by self |
 | `WHATSAPP_DB_PATH` | `../whatsapp-bridge/store/messages.db` | Path to SQLite database |
+| `WHATSMEOW_DB_PATH` | `../whatsapp-bridge/store/whatsapp.db` | whatsmeow DB used for LID ↔ phone resolution |
 | `WHATSAPP_API_URL` | `http://localhost:8080/api` | Go bridge REST API URL |
 
 ## Architecture
