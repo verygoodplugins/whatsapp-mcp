@@ -1431,6 +1431,20 @@ func main() {
 			default:
 			}
 
+		case *events.StreamReplaced:
+			// Another WhatsApp Web session took our slot. whatsmeow treats this
+			// as a "permanent" disconnect and suppresses the Disconnected event,
+			// so we must handle it explicitly. Wait briefly to avoid ping-ponging
+			// with the other client, then reconnect.
+			logger.Warnf("⚠️  Stream replaced by another session — will reconnect after 30s")
+			go func() {
+				time.Sleep(30 * time.Second)
+				select {
+				case reconnectChan <- true:
+				default:
+				}
+			}()
+
 		case *events.ClientOutdated:
 			logger.Errorf("❌ Client outdated - please update whatsmeow library")
 		}
