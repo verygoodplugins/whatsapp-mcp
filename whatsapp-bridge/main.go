@@ -447,7 +447,18 @@ func extractTextContent(msg *waProto.Message) string {
 		return extendedText.GetText()
 	}
 
-	// For now, we're ignoring non-text messages
+	// Captions on media messages — surface them as searchable content
+	// alongside the media itself. Audio messages don't carry captions.
+	if img := msg.GetImageMessage(); img != nil {
+		return img.GetCaption()
+	}
+	if vid := msg.GetVideoMessage(); vid != nil {
+		return vid.GetCaption()
+	}
+	if doc := msg.GetDocumentMessage(); doc != nil {
+		return doc.GetCaption()
+	}
+
 	return ""
 }
 
@@ -700,8 +711,9 @@ func extractQuotedMessageInfo(msg *waProto.Message) (quotedMessageId string, quo
 	return quotedMessageId, quotedSender, quotedContent
 }
 
-// Extract media info from a message - uses provided timestamp for consistent filenames
-func extractMediaInfo(msg *waProto.Message, msgTimestamp time.Time) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
+// Extract media info from a message. Filenames embed the message ID so that
+// two messages arriving in the same second do not collide on a single file.
+func extractMediaInfo(msg *waProto.Message, msgTimestamp time.Time, msgID string) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
 	if msg == nil {
 		return "", "", "", nil, nil, nil, 0
 	}
@@ -712,22 +724,26 @@ func extractMediaInfo(msg *waProto.Message, msgTimestamp time.Time) (mediaType s
 		ts = time.Now()
 	}
 	tsStr := ts.Format("20060102_150405")
+	suffix := tsStr
+	if msgID != "" {
+		suffix = tsStr + "_" + msgID
+	}
 
 	// Check for image message
 	if img := msg.GetImageMessage(); img != nil {
-		return "image", "image_" + tsStr + ".jpg",
+		return "image", "image_" + suffix + ".jpg",
 			img.GetURL(), img.GetMediaKey(), img.GetFileSHA256(), img.GetFileEncSHA256(), img.GetFileLength()
 	}
 
 	// Check for video message
 	if vid := msg.GetVideoMessage(); vid != nil {
-		return "video", "video_" + tsStr + ".mp4",
+		return "video", "video_" + suffix + ".mp4",
 			vid.GetURL(), vid.GetMediaKey(), vid.GetFileSHA256(), vid.GetFileEncSHA256(), vid.GetFileLength()
 	}
 
 	// Check for audio message
 	if aud := msg.GetAudioMessage(); aud != nil {
-		return "audio", "audio_" + tsStr + ".ogg",
+		return "audio", "audio_" + suffix + ".ogg",
 			aud.GetURL(), aud.GetMediaKey(), aud.GetFileSHA256(), aud.GetFileEncSHA256(), aud.GetFileLength()
 	}
 
@@ -735,7 +751,7 @@ func extractMediaInfo(msg *waProto.Message, msgTimestamp time.Time) (mediaType s
 	if doc := msg.GetDocumentMessage(); doc != nil {
 		filename := doc.GetFileName()
 		if filename == "" {
-			filename = "document_" + tsStr
+			filename = "document_" + suffix
 		}
 		return "document", filename,
 			doc.GetURL(), doc.GetMediaKey(), doc.GetFileSHA256(), doc.GetFileEncSHA256(), doc.GetFileLength()
@@ -809,8 +825,8 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	// Extract text content
 	content := extractTextContent(msg.Message)
 
-	// Extract media info - pass message timestamp for consistent filenames
-	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message, msg.Info.Timestamp)
+	// Extract media info - pass message timestamp + ID for unique filenames
+	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message, msg.Info.Timestamp, msg.Info.ID)
 
 	// Extract quoted message info
 	quotedMessageId, quotedSender, quotedContent := extractQuotedMessageInfo(msg.Message)
@@ -820,20 +836,8 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		return
 	}
 
-	// Auto-download media if present
-	if mediaType != "" && url != "" && len(mediaKey) > 0 {
-		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
-		go func() {
-			success, _, _, downloadPath, err := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
-			if success && err == nil {
-				logger.Infof("✅ Auto-downloaded media: %s", downloadPath)
-			} else {
-				logger.Warnf("❌ Auto-download failed: %v", err)
-			}
-		}()
-	}
-
-	// Store message in database
+	// Store message in database first so that downloadMedia (which queries the DB
+	// by message ID) can find the row when we call it synchronously below.
 	err = messageStore.StoreMessage(
 		msg.Info.ID,
 		chatJID,
@@ -849,16 +853,74 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		fileEncSHA256,
 		fileLength,
 	)
-
-	// Send webhook for incoming messages
-	// Forward self-messages when FORWARD_SELF=true
-	if content != "" && (forwardSelfMessages || !msg.Info.IsFromMe) {
-		SendWebhook(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent)
-	}
-
 	if err != nil {
 		logger.Warnf("Failed to store message: %v", err)
-	} else {
+	}
+
+	// For image messages, download media synchronously so we can include the base64
+	// payload in the webhook. Other media types (video, audio, document) are still
+	// downloaded asynchronously since they are not passed to the AI vision pipeline.
+	var imageDownloadPath string
+	var imageMimeType string
+	if mediaType == "image" && url != "" && len(mediaKey) > 0 {
+		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
+		success, _, _, dlPath, dlErr := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+		if success && dlErr == nil {
+			imageDownloadPath = dlPath
+			// Detect MIME type by sniffing the actual file bytes rather than
+			// trusting the generated filename extension (always .jpg).
+			if f, openErr := os.Open(dlPath); openErr == nil {
+				buf := make([]byte, 512)
+				if n, readErr := f.Read(buf); readErr == nil || n > 0 {
+					imageMimeType = http.DetectContentType(buf[:n])
+				}
+				_ = f.Close()
+			}
+			if imageMimeType == "" {
+				imageMimeType = "application/octet-stream"
+			}
+			logger.Infof("✅ Image downloaded: %s (%s)", dlPath, imageMimeType)
+		} else {
+			logger.Warnf("❌ Image download failed: %v", dlErr)
+			// Fall back to async download so media is cached for future MCP tool calls
+			go func() {
+				_, _, _, _, _ = downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+			}()
+		}
+	} else if mediaType != "" && mediaType != "image" && url != "" && len(mediaKey) > 0 {
+		// Non-image media: async download for caching only (not sent to vision pipeline)
+		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
+		go func() {
+			success, _, _, downloadPath, err := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+			if success && err == nil {
+				logger.Infof("✅ Auto-downloaded media: %s", downloadPath)
+			} else {
+				logger.Warnf("❌ Auto-download failed: %v", err)
+			}
+		}()
+	}
+
+	// Send webhook for incoming messages.
+	// Forward self-messages when FORWARD_SELF=true.
+	// Always forward image messages (even without a text caption) so the AI vision
+	// pipeline can analyse the image content.
+	shouldForward := forwardSelfMessages || !msg.Info.IsFromMe
+	hasText := content != ""
+	hasImage := mediaType == "image"
+
+	if shouldForward && (hasText || hasImage) {
+		if hasImage {
+			SendWebhookWithMedia(
+				sender, content, chatJID, msg.Info.IsFromMe,
+				quotedMessageId, quotedSender, quotedContent,
+				msg.Info.ID, mediaType, imageMimeType, filename, imageDownloadPath,
+			)
+		} else {
+			SendWebhook(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent)
+		}
+	}
+
+	if err == nil {
 		// Log message reception
 		timestamp := msg.Info.Timestamp.Format("2006-01-02 15:04:05")
 		direction := "←"
@@ -982,7 +1044,8 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		return false, "", "", "", fmt.Errorf("not a media message")
 	}
 
-	// Generate filename from message timestamp (not stored filename which may be wrong)
+	// Rebuild filename from (timestamp, messageID) — must match extractMediaInfo.
+	// The message ID disambiguates two messages that arrive in the same second.
 	var ext string
 	switch mediaType {
 	case "image":
@@ -996,7 +1059,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	default:
 		ext = ""
 	}
-	filename := fmt.Sprintf("%s_%s%s", mediaType, timestamp.Format("20060102_150405"), ext)
+	filename := fmt.Sprintf("%s_%s_%s%s", mediaType, timestamp.Format("20060102_150405"), messageID, ext)
 
 	// First, check if we already have this file
 	chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
@@ -1446,6 +1509,20 @@ func main() {
 			default:
 			}
 
+		case *events.StreamReplaced:
+			// Another WhatsApp Web session took our slot. whatsmeow treats this
+			// as a "permanent" disconnect and suppresses the Disconnected event,
+			// so we must handle it explicitly. Wait briefly to avoid ping-ponging
+			// with the other client, then reconnect.
+			logger.Warnf("⚠️  Stream replaced by another session — will reconnect after 30s")
+			go func() {
+				time.Sleep(30 * time.Second)
+				select {
+				case reconnectChan <- true:
+				default:
+				}
+			}()
+
 		case *events.ClientOutdated:
 			logger.Errorf("❌ Client outdated - please update whatsmeow library")
 		}
@@ -1764,13 +1841,18 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					}
 				}
 
-				// Extract media info - use message timestamp for consistent filenames
+				// Extract media info - pass message timestamp + ID for unique filenames
 				var mediaType, filename, url string
 				var mediaKey, fileSHA256, fileEncSHA256 []byte
 				var fileLength uint64
 
+				histMsgID := ""
+				if msg.Message != nil && msg.Message.Key != nil && msg.Message.Key.ID != nil {
+					histMsgID = *msg.Message.Key.ID
+				}
+
 				if msg.Message.Message != nil {
-					mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message, timestamp)
+					mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message, timestamp, histMsgID)
 				}
 
 				// Log the message content for debugging

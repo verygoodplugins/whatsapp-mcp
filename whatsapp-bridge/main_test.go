@@ -3,6 +3,10 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -329,6 +333,67 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_MissingWhatsAppDBIsNoOp(t *testing.T) 
 	}
 }
 
+func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  *waProto.Message
+		want string
+	}{
+		{
+			name: "Conversation",
+			msg:  &waProto.Message{Conversation: proto.String("hola")},
+			want: "hola",
+		},
+		{
+			name: "ExtendedTextMessage",
+			msg: &waProto.Message{
+				ExtendedTextMessage: &waProto.ExtendedTextMessage{Text: proto.String("quoted reply")},
+			},
+			want: "quoted reply",
+		},
+		{
+			name: "ImageMessage with caption",
+			msg: &waProto.Message{
+				ImageMessage: &waProto.ImageMessage{Caption: proto.String("sunset on the beach")},
+			},
+			want: "sunset on the beach",
+		},
+		{
+			name: "VideoMessage with caption",
+			msg: &waProto.Message{
+				VideoMessage: &waProto.VideoMessage{Caption: proto.String("the kids playing")},
+			},
+			want: "the kids playing",
+		},
+		{
+			name: "DocumentMessage with caption",
+			msg: &waProto.Message{
+				DocumentMessage: &waProto.DocumentMessage{Caption: proto.String("invoice attached")},
+			},
+			want: "invoice attached",
+		},
+		{
+			name: "ImageMessage without caption returns empty",
+			msg:  &waProto.Message{ImageMessage: &waProto.ImageMessage{}},
+			want: "",
+		},
+		{
+			name: "Nil message returns empty",
+			msg:  nil,
+			want: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractTextContent(tc.msg)
+			if got != tc.want {
+				t.Errorf("extractTextContent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestMigrateLegacyLIDChatsToPhoneJIDs_AggregatesByPhoneJIDDeterministically(t *testing.T) {
 	ms := newTestMessageStore(t)
 	logger := testLogger()
@@ -398,5 +463,116 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_AggregatesByPhoneJIDDeterministically(
 	}
 	if lastMessage != "2026-03-01T11:00:00Z" {
 		t.Fatalf("expected merged last_message_time to be max source value, got %s", lastMessage)
+	}
+}
+
+// buildImageMessage constructs an events.Message that carries an ImageMessage
+// with no download metadata (URL/media-key are empty), so handleMessage will
+// classify it as an image but skip the synchronous download attempt.
+func buildImageMessage(chat, sender types.JID, isFromMe bool, caption string) *events.Message {
+	img := &waProto.ImageMessage{}
+	if caption != "" {
+		img.Caption = proto.String(caption)
+	}
+	return &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     chat,
+				Sender:   sender,
+				IsFromMe: isFromMe,
+			},
+			ID:        "test-img-001",
+			Timestamp: time.Now(),
+		},
+		Message: &waProto.Message{ImageMessage: img},
+	}
+}
+
+// captureWebhook starts a local httptest server that records the first webhook
+// payload it receives. It returns the server and a channel that yields the
+// decoded payload.
+func captureWebhook(t *testing.T) (*httptest.Server, <-chan WebhookPayload) {
+	t.Helper()
+	ch := make(chan WebhookPayload, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var p WebhookPayload
+		if err := json.Unmarshal(body, &p); err == nil {
+			select {
+			case ch <- p:
+			default:
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, ch
+}
+
+// TestHandleMessage_ImageOnly_WebhookForwarded verifies that an image message
+// with no text caption is forwarded to the webhook endpoint (not silently
+// dropped), and that the webhook payload contains the expected media fields.
+func TestHandleMessage_ImageOnly_WebhookForwarded(t *testing.T) {
+	srv, webhookCh := captureWebhook(t)
+	t.Setenv("WEBHOOK_URL", srv.URL)
+
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	msg := buildImageMessage(phonePN, phonePN, false, "") // no caption
+
+	handleMessage(client, ms, msg, logger)
+
+	// The image-only message must be stored.
+	if count := queryMessageCount(ms, phonePN.String()); count != 1 {
+		t.Errorf("expected 1 message stored, got %d", count)
+	}
+
+	// The webhook must have been called.
+	select {
+	case payload := <-webhookCh:
+		if payload.MediaType != "image" {
+			t.Errorf("expected mediaType=image, got %q", payload.MediaType)
+		}
+		if payload.MessageID != "test-img-001" {
+			t.Errorf("expected messageId=test-img-001, got %q", payload.MessageID)
+		}
+		if payload.Content != "" {
+			t.Errorf("expected empty content for image-only message, got %q", payload.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for webhook call")
+	}
+}
+
+// TestHandleMessage_ImageWithCaption_WebhookForwarded verifies that an image
+// message WITH a text caption is forwarded and that the caption is included in
+// the webhook content field (extractTextContent now surfaces image captions).
+func TestHandleMessage_ImageWithCaption_WebhookForwarded(t *testing.T) {
+	srv, webhookCh := captureWebhook(t)
+	t.Setenv("WEBHOOK_URL", srv.URL)
+
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	msg := buildImageMessage(phonePN, phonePN, false, "look at this!")
+
+	handleMessage(client, ms, msg, logger)
+
+	select {
+	case payload := <-webhookCh:
+		if payload.MediaType != "image" {
+			t.Errorf("expected mediaType=image, got %q", payload.MediaType)
+		}
+		if payload.MessageID != "test-img-001" {
+			t.Errorf("expected messageId=test-img-001, got %q", payload.MessageID)
+		}
+		if payload.Content != "look at this!" {
+			t.Errorf("expected caption in content, got %q", payload.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for webhook call")
 	}
 }
