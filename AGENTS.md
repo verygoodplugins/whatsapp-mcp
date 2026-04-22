@@ -73,7 +73,9 @@ uv run ruff format .        # format
 
 ## CI gates
 
-Every PR runs (see `.github/workflows/`):
+Every PR runs (see `.github/workflows/`). Not every job is blocking today:
+
+**Blocking — must be green to merge:**
 
 - `Python Lint` (`ruff check` + `ruff format --check`)
 - `Python Tests` (`pytest`)
@@ -81,18 +83,21 @@ Every PR runs (see `.github/workflows/`):
 - `Go Build`
 - `Version Consistency` (Python pkg version vs `.release-please-manifest.json`)
 - `CodeQL Analysis (Python | Go)`
+
+**Informational — runs on every PR but won't fail the build today (`continue-on-error: true`):**
+
 - `Bandit Security Scan`
 - `Python Dependency Audit` (`pip-audit`)
 - `Go Vulnerability Check` (`govulncheck`)
 
-A red CI is a hard block. Fix the failure or explain in the PR why it's unrelated.
+A failing blocking job is a hard block — fix it or explain in the PR why it's unrelated. For informational scans, investigate findings and either fix them or note in the PR why they're acceptable.
 
 ## Environment variables
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `WHATSAPP_DB_PATH` | `../whatsapp-bridge/store/messages.db` | SQLite path used by the MCP server |
-| `WHATSAPP_API_URL` | `http://127.0.0.1:8080/api` | Bridge REST endpoint |
+| `WHATSAPP_API_URL` | `http://localhost:8080/api` | Bridge REST endpoint |
 | `WHATSAPP_BRIDGE_PORT` | `8080` | Port the bridge binds to |
 | `WEBHOOK_URL` | `http://localhost:8769/whatsapp/webhook` | Outgoing webhook for incoming messages (empty = disabled) |
 | `FORWARD_SELF` | `false` | Whether self-sent messages are forwarded |
