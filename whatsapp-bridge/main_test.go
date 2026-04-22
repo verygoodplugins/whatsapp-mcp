@@ -14,6 +14,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -44,6 +45,25 @@ func newTestClient(lidStore store.LIDStore) *whatsmeow.Client {
 			Contacts: noop,
 		},
 	}
+}
+
+// newTestClientWithSelf builds a test client with the user's own phone JID set
+// on Store.ID, which the production code uses as the sender-alt hint for
+// outgoing messages. Tests that exercise sender resolution for outgoing
+// messages must use this constructor.
+func newTestClientWithSelf(lidStore store.LIDStore, selfPhone types.JID) *whatsmeow.Client {
+	c := newTestClient(lidStore)
+	pn := selfPhone.ToNonAD()
+	c.Store.ID = &pn
+	return c
+}
+
+// querySender returns the sender column for the first message stored under a
+// chat JID, or empty string if none.
+func querySender(ms *MessageStore, chatJID string) string {
+	var s string
+	_ = ms.db.QueryRow("SELECT sender FROM messages WHERE chat_jid = ? LIMIT 1", chatJID).Scan(&s)
+	return s
 }
 
 func newTestMessageStore(t *testing.T) *MessageStore {
@@ -254,6 +274,314 @@ func TestHandleMessage_PhoneJID_Unaffected(t *testing.T) {
 
 	if count := queryMessageCount(ms, phonePN.String()); count != 1 {
 		t.Errorf("expected 1 message under phone JID %s, got %d", phonePN, count)
+	}
+}
+
+// --- Sender column resolution ---
+//
+// These tests guard against the regression where the bridge stored the
+// LID user-part (or, for outgoing messages, the recipient's phone) in the
+// sender column even after the chat-JID was resolved to a phone JID.
+
+var (
+	selfLID   = types.JID{User: "999888777666555", Server: types.HiddenUserServer}
+	selfPhone = types.JID{User: "10000000000", Server: types.DefaultUserServer}
+)
+
+// TestHandleMessage_OutgoingFromSelf_SenderIsOwnPhone asserts that an
+// outgoing message from a LID-typed self does not get the recipient's
+// phone written into the sender column. Before the fix, resolveLIDChat
+// reused recipientAlt for the sender, mis-attributing self messages.
+func TestHandleMessage_OutgoingFromSelf_SenderIsOwnPhone(t *testing.T) {
+	client := newTestClientWithSelf(&mockLIDStore{}, selfPhone)
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	msg := buildTextMessage(
+		phoneLID,       // chat: peer LID
+		selfLID,        // sender: own LID
+		types.EmptyJID, // senderAlt: empty for outgoing
+		phonePN,        // recipientAlt: peer phone (NOT self phone)
+		true,           // outgoing
+		"hi",
+	)
+
+	handleMessage(client, ms, msg, logger)
+
+	got := querySender(ms, phonePN.String())
+	if got != selfPhone.User {
+		t.Errorf("outgoing sender = %q, want own phone user %q (recipient phone is %q, must not appear)",
+			got, selfPhone.User, phonePN.User)
+	}
+}
+
+// TestHandleMessage_IncomingLID_SenderResolvedFromAlt asserts that an
+// incoming LID-only sender with a non-empty SenderAlt is rewritten to the
+// peer's phone user-part, not stored as the raw LID number.
+func TestHandleMessage_IncomingLID_SenderResolvedFromAlt(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	msg := buildTextMessage(
+		phoneLID,       // chat: LID
+		phoneLID,       // sender: peer LID
+		phonePN,        // senderAlt: peer phone
+		types.EmptyJID, // recipientAlt: unused for incoming
+		false,          // incoming
+		"hola",
+	)
+
+	handleMessage(client, ms, msg, logger)
+
+	got := querySender(ms, phonePN.String())
+	if got != phonePN.User {
+		t.Errorf("incoming sender = %q, want peer phone user %q", got, phonePN.User)
+	}
+}
+
+// TestHandleMessage_IncomingLID_SenderResolvedFromStore covers the
+// history-sync-style case: SenderAlt is empty but the LID store has a
+// PN mapping for the peer LID, so the sender column should still end up
+// as the phone user-part.
+func TestHandleMessage_IncomingLID_SenderResolvedFromStore(t *testing.T) {
+	client := newTestClient(&mockLIDStore{
+		pnByLID: map[types.JID]types.JID{phoneLID: phonePN},
+	})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	msg := buildTextMessage(
+		phoneLID,       // chat: LID
+		phoneLID,       // sender: peer LID
+		types.EmptyJID, // senderAlt: empty (post-fix, fallback to LID store)
+		types.EmptyJID, // recipientAlt: empty
+		false,          // incoming
+		"hello",
+	)
+
+	handleMessage(client, ms, msg, logger)
+
+	got := querySender(ms, phonePN.String())
+	if got != phonePN.User {
+		t.Errorf("incoming sender = %q, want peer phone user %q (LID store fallback)",
+			got, phonePN.User)
+	}
+}
+
+// TestHandleMessage_LIDWithoutMapping_SenderFallsBackToLID asserts the
+// graceful-degradation path: with no SenderAlt and no LID store mapping,
+// the bridge stores the raw LID user-part rather than failing or writing
+// an unrelated value.
+func TestHandleMessage_LIDWithoutMapping_SenderFallsBackToLID(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	msg := buildTextMessage(
+		phoneLID,       // chat: LID
+		phoneLID,       // sender: peer LID
+		types.EmptyJID, // senderAlt: empty
+		types.EmptyJID, // recipientAlt: empty
+		false,          // incoming
+		"orphan",
+	)
+
+	handleMessage(client, ms, msg, logger)
+
+	// Chat JID has no mapping either, so the message ends up under the LID chat.
+	got := querySender(ms, phoneLID.String())
+	if got != phoneLID.User {
+		t.Errorf("orphan-LID sender = %q, want raw LID user %q (graceful fallback)",
+			got, phoneLID.User)
+	}
+}
+
+// --- LID sender backfill migration ---
+
+func TestMigrateLegacyLIDSendersToPhones_RewritesAndIsIdempotent(t *testing.T) {
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	tmpDir := t.TempDir()
+	whatsappDBPath := filepath.Join(tmpDir, "whatsapp.db")
+
+	waDB, err := sql.Open("sqlite3", whatsappDBPath)
+	if err != nil {
+		t.Fatalf("failed to create whatsapp db: %v", err)
+	}
+	defer func() { _ = waDB.Close() }()
+
+	if _, err := waDB.Exec(`
+		CREATE TABLE whatsmeow_lid_map (
+			lid TEXT PRIMARY KEY,
+			pn TEXT NOT NULL
+		);
+		INSERT INTO whatsmeow_lid_map (lid, pn) VALUES ('111', '222');
+		INSERT INTO whatsmeow_lid_map (lid, pn) VALUES ('333', '444');
+	`); err != nil {
+		t.Fatalf("failed to prepare lid map db: %v", err)
+	}
+
+	chatPhone := "222@s.whatsapp.net"
+	groupChat := "group@g.us"
+
+	if _, err := ms.db.Exec(`
+		INSERT INTO chats (jid, name, last_message_time) VALUES
+			(?, 'Peer', '2026-03-01T10:00:00Z'),
+			(?, 'Group', '2026-03-01T11:00:00Z');
+
+		INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length) VALUES
+			('m1', ?, '111', 'incoming dm pre-fix',  '2026-03-01T10:00:00Z', 0, '', '', '', NULL, NULL, NULL, 0),
+			('m2', ?, '222', 'incoming dm post-fix', '2026-03-01T10:01:00Z', 0, '', '', '', NULL, NULL, NULL, 0),
+			('g1', ?, '333', 'group msg pre-fix',    '2026-03-01T11:00:00Z', 0, '', '', '', NULL, NULL, NULL, 0),
+			('g2', ?, '999', 'group msg unmapped',   '2026-03-01T11:01:00Z', 0, '', '', '', NULL, NULL, NULL, 0);
+	`, chatPhone, groupChat, chatPhone, chatPhone, groupChat, groupChat); err != nil {
+		t.Fatalf("failed to seed message store: %v", err)
+	}
+
+	if err := ms.MigrateLegacyLIDSendersToPhones(whatsappDBPath, logger); err != nil {
+		t.Fatalf("migration failed: %v", err)
+	}
+
+	type row struct {
+		id, sender string
+	}
+	var got []row
+	rows, err := ms.db.Query("SELECT id, sender FROM messages ORDER BY id")
+	if err != nil {
+		t.Fatalf("failed to read messages: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.sender); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got = append(got, r)
+	}
+
+	want := map[string]string{
+		"m1": "222", // rewritten via lid map
+		"m2": "222", // already phone, untouched
+		"g1": "444", // rewritten via lid map
+		"g2": "999", // unmapped LID stays as-is (graceful fallback)
+	}
+	for _, r := range got {
+		if w, ok := want[r.id]; !ok || r.sender != w {
+			t.Errorf("message %s: sender = %q, want %q", r.id, r.sender, w)
+		}
+	}
+
+	if err := ms.MigrateLegacyLIDSendersToPhones(whatsappDBPath, logger); err != nil {
+		t.Fatalf("second run should be no-op, got error: %v", err)
+	}
+}
+
+func TestMigrateLegacyLIDSendersToPhones_MissingWhatsAppDBIsNoOp(t *testing.T) {
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	missingPath := filepath.Join(t.TempDir(), "missing-whatsapp.db")
+	if err := ms.MigrateLegacyLIDSendersToPhones(missingPath, logger); err != nil {
+		t.Fatalf("expected missing whatsapp db to be a no-op, got error: %v", err)
+	}
+}
+
+// TestHandleMessage_GroupParticipantLID_ResolvedViaStore covers the
+// highest-volume path that triggers the LID-sender bug: a group message
+// where the participant JID is LID-only and the per-message SenderAlt is
+// empty. Resolution must come from the LID store.
+func TestHandleMessage_GroupParticipantLID_ResolvedViaStore(t *testing.T) {
+	groupJID := types.JID{User: "254110094043-1619359480", Server: types.GroupServer}
+	participantLID := types.JID{User: "261391827087520", Server: types.HiddenUserServer}
+	participantPhone := types.JID{User: "31612345678", Server: types.DefaultUserServer}
+
+	client := newTestClient(&mockLIDStore{
+		pnByLID: map[types.JID]types.JID{participantLID: participantPhone},
+	})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	// Pre-seed the group chat row so GetChatName short-circuits on the
+	// existing-name path and doesn't try to issue a GetGroupInfo IQ
+	// against the fake client.
+	if err := ms.StoreChat(groupJID.String(), "Test Group", time.Now()); err != nil {
+		t.Fatalf("seed group chat: %v", err)
+	}
+
+	msg := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     groupJID,
+				Sender:   participantLID,
+				IsFromMe: false,
+				IsGroup:  true,
+			},
+			ID:        "test-group-001",
+			Timestamp: time.Now(),
+		},
+		Message: &waProto.Message{
+			Conversation: proto.String("group hello"),
+		},
+	}
+
+	handleMessage(client, ms, msg, logger)
+
+	got := querySender(ms, groupJID.String())
+	if got != participantPhone.User {
+		t.Errorf("group participant sender = %q, want phone user %q", got, participantPhone.User)
+	}
+}
+
+// TestHandleHistorySync_LIDParticipant_ResolvedViaStore exercises the
+// history-sync code path. Because history-sync rows do not carry SenderAlt,
+// resolution must succeed via the LID store fallback that
+// resolveUserJID consults. The stored sender column must be the phone
+// user-part, not the raw LID number copied verbatim from Key.Participant.
+func TestHandleHistorySync_LIDParticipant_ResolvedViaStore(t *testing.T) {
+	chatJID := phonePN.String() // history-sync conversation already keyed by phone
+	participantLID := types.JID{User: "445566778899", Server: types.HiddenUserServer}
+	participantPhone := types.JID{User: "11234567890", Server: types.DefaultUserServer}
+
+	client := newTestClientWithSelf(&mockLIDStore{
+		pnByLID: map[types.JID]types.JID{participantLID: participantPhone},
+	}, selfPhone)
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	historySync := &events.HistorySync{
+		Data: &waProto.HistorySync{
+			SyncType: waProto.HistorySync_RECENT.Enum(),
+			Conversations: []*waProto.Conversation{
+				{
+					ID: proto.String(chatJID),
+					Messages: []*waProto.HistorySyncMsg{
+						{
+							Message: &waProto.WebMessageInfo{
+								Key: &waCommon.MessageKey{
+									ID:          proto.String("hist-msg-001"),
+									FromMe:      proto.Bool(false),
+									Participant: proto.String(participantLID.String()),
+								},
+								MessageTimestamp: proto.Uint64(uint64(time.Now().Unix())),
+								Message: &waProto.Message{
+									Conversation: proto.String("history payload"),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	handleHistorySync(client, ms, historySync, logger)
+
+	got := querySender(ms, chatJID)
+	if got != participantPhone.User {
+		t.Errorf("history-sync sender = %q, want resolved phone user %q (raw LID was %q)",
+			got, participantPhone.User, participantLID.User)
 	}
 }
 
