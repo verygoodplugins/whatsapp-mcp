@@ -1,0 +1,68 @@
+name: Feature request
+description: Propose a new feature or enhancement.
+title: "feat: <short description>"
+labels: ["type:feat", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please skim [`ROADMAP.md`](https://github.com/verygoodplugins/whatsapp-mcp/blob/main/ROADMAP.md). This fork is intentionally narrow — features outside the "in scope" list are usually closed with a redirect.
+
+        State the **problem**, not the solution. Solutions are easier to design once the problem is clear.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that's hard or impossible today?
+      placeholder: "When my agent receives a message in a group chat, it can't tell who the sender is by name — only the JID."
+    validations:
+      required: true
+
+  - type: textarea
+    id: usecase
+    attributes:
+      label: Use case
+      description: Concrete scenario. Who's the user? What are they doing?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Which scope bucket does this fit?
+      description: See ROADMAP.md
+      options:
+        - Bridge stability
+        - MCP correctness
+        - Observability & ops
+        - Security
+        - CI / release
+        - "I'm not sure — please advise"
+        - "It's not in any of the above"
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach (optional)
+      description: If you have a specific implementation in mind, describe it. Otherwise, leave blank.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other ways to solve the underlying problem (e.g. existing tools, downstream forks, manual workarounds).
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I read `ROADMAP.md` and believe this fits the project's goals.
+          required: true
+        - label: I searched existing issues and didn't find a duplicate.
+          required: true
+        - label: I'm willing to help test or implement this (optional but appreciated).
+          required: false

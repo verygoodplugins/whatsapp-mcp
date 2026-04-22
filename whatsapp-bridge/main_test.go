@@ -333,6 +333,67 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_MissingWhatsAppDBIsNoOp(t *testing.T) 
 	}
 }
 
+func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  *waProto.Message
+		want string
+	}{
+		{
+			name: "Conversation",
+			msg:  &waProto.Message{Conversation: proto.String("hola")},
+			want: "hola",
+		},
+		{
+			name: "ExtendedTextMessage",
+			msg: &waProto.Message{
+				ExtendedTextMessage: &waProto.ExtendedTextMessage{Text: proto.String("quoted reply")},
+			},
+			want: "quoted reply",
+		},
+		{
+			name: "ImageMessage with caption",
+			msg: &waProto.Message{
+				ImageMessage: &waProto.ImageMessage{Caption: proto.String("sunset on the beach")},
+			},
+			want: "sunset on the beach",
+		},
+		{
+			name: "VideoMessage with caption",
+			msg: &waProto.Message{
+				VideoMessage: &waProto.VideoMessage{Caption: proto.String("the kids playing")},
+			},
+			want: "the kids playing",
+		},
+		{
+			name: "DocumentMessage with caption",
+			msg: &waProto.Message{
+				DocumentMessage: &waProto.DocumentMessage{Caption: proto.String("invoice attached")},
+			},
+			want: "invoice attached",
+		},
+		{
+			name: "ImageMessage without caption returns empty",
+			msg:  &waProto.Message{ImageMessage: &waProto.ImageMessage{}},
+			want: "",
+		},
+		{
+			name: "Nil message returns empty",
+			msg:  nil,
+			want: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractTextContent(tc.msg)
+			if got != tc.want {
+				t.Errorf("extractTextContent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestMigrateLegacyLIDChatsToPhoneJIDs_AggregatesByPhoneJIDDeterministically(t *testing.T) {
 	ms := newTestMessageStore(t)
 	logger := testLogger()
@@ -486,9 +547,8 @@ func TestHandleMessage_ImageOnly_WebhookForwarded(t *testing.T) {
 }
 
 // TestHandleMessage_ImageWithCaption_WebhookForwarded verifies that an image
-// message WITH a text caption is also forwarded and carries the media fields.
-// Note: extractTextContent does not extract image captions, so content will be
-// empty; the media metadata is still forwarded to the webhook.
+// message WITH a text caption is forwarded and that the caption is included in
+// the webhook content field (extractTextContent now surfaces image captions).
 func TestHandleMessage_ImageWithCaption_WebhookForwarded(t *testing.T) {
 	srv, webhookCh := captureWebhook(t)
 	t.Setenv("WEBHOOK_URL", srv.URL)
@@ -509,8 +569,8 @@ func TestHandleMessage_ImageWithCaption_WebhookForwarded(t *testing.T) {
 		if payload.MessageID != "test-img-001" {
 			t.Errorf("expected messageId=test-img-001, got %q", payload.MessageID)
 		}
-		if payload.Content != "" {
-			t.Errorf("expected empty content (captions not extracted by extractTextContent), got %q", payload.Content)
+		if payload.Content != "look at this!" {
+			t.Errorf("expected caption in content, got %q", payload.Content)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for webhook call")

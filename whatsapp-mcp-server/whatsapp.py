@@ -15,6 +15,10 @@ MESSAGES_DB_PATH = os.getenv(
     "WHATSAPP_DB_PATH",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store", "messages.db"),
 )
+WHATSMEOW_DB_PATH = os.getenv(
+    "WHATSMEOW_DB_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store", "whatsapp.db"),
+)
 WHATSAPP_API_BASE_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:8080/api")
 
 
@@ -113,6 +117,116 @@ def contact_to_dict(contact: "Contact") -> dict[str, Any]:
     return {"phone_number": contact.phone_number, "name": contact.name, "jid": contact.jid}
 
 
+def _sender_aliases(value: str) -> list[str]:
+    # messages.sender is written inconsistently: the same contact may appear as
+    # bare phone ("13232432100"), full phone JID ("13232432100@s.whatsapp.net"),
+    # bare LID ("231241139937355"), or full LID JID ("231241139937355@lid").
+    # whatsmeow_lid_map (whatsapp.db) maps pn<->lid; we emit all four forms so
+    # an IN-based filter catches every row regardless of which form was stored.
+    bare = value.split("@", 1)[0]
+    pn: str | None = None
+    lid: str | None = None
+    if os.path.isfile(WHATSMEOW_DB_PATH):
+        try:
+            conn = sqlite3.connect(WHATSMEOW_DB_PATH)
+            try:
+                row = conn.execute("SELECT lid FROM whatsmeow_lid_map WHERE pn = ?", (bare,)).fetchone()
+                if row:
+                    pn, lid = bare, row[0]
+                else:
+                    row = conn.execute("SELECT pn FROM whatsmeow_lid_map WHERE lid = ?", (bare,)).fetchone()
+                    if row:
+                        lid, pn = bare, row[0]
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            pass
+
+    aliases: list[str] = []
+    if pn:
+        aliases += [pn, f"{pn}@s.whatsapp.net"]
+    if lid:
+        aliases += [lid, f"{lid}@lid"]
+    if not aliases:
+        # No mapping found; emit the bare form plus both possible suffixes so
+        # we still match whichever form the bridge happened to store.
+        aliases = [bare, f"{bare}@s.whatsapp.net", f"{bare}@lid"]
+    return aliases
+
+
+def _resolve_lid_to_phone(lid_or_jid: str) -> str | None:
+    """Resolve a WhatsApp LID (linked device identifier) to a phone number.
+
+    WhatsApp's newer protocol uses opaque LIDs (e.g. '35047067385985') as sender
+    identifiers instead of phone numbers. The whatsmeow_lid_map table maps these
+    back to real phone numbers.
+
+    Returns the phone number if found, None otherwise.
+    """
+    if not os.path.exists(WHATSMEOW_DB_PATH):
+        return None
+    # Extract the numeric part from JID-style strings (e.g. '35047067385985@lid')
+    lid = lid_or_jid.split("@")[0] if "@" in lid_or_jid else lid_or_jid
+    try:
+        conn = sqlite3.connect(WHATSMEOW_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT pn FROM whatsmeow_lid_map WHERE lid = ? LIMIT 1", (lid,))
+        row = cursor.fetchone()
+        return row[0] if row else None
+    except sqlite3.Error:
+        return None
+    finally:
+        if "conn" in locals():
+            conn.close()
+
+
+def _resolve_name_from_whatsmeow(jid: str) -> str | None:
+    """Look up a contact name from whatsmeow's contact store (whatsapp.db).
+
+    Handles both standard JIDs (12345@s.whatsapp.net) and LIDs (opaque numeric
+    identifiers used by WhatsApp's linked device protocol). LIDs are first
+    resolved to phone numbers via whatsmeow_lid_map, then looked up in contacts.
+
+    Falls back gracefully if the DB or table doesn't exist.
+    """
+    if not os.path.exists(WHATSMEOW_DB_PATH):
+        return None
+
+    lookup_jid = jid
+    jid_prefix = jid.split("@")[0] if "@" in jid else jid
+    jid_suffix = jid.split("@")[1] if "@" in jid else ""
+
+    # If this is a LID (@lid suffix) or a raw number, try LID map first.
+    # LIDs overlap in length with phone numbers (12-15 digits) so we always
+    # attempt LID resolution and fall through to direct contact lookup if not found.
+    if jid_suffix in ("lid", ""):
+        phone = _resolve_lid_to_phone(jid_prefix)
+        if phone:
+            lookup_jid = phone + "@s.whatsapp.net"
+        elif jid_suffix == "lid":
+            # Definitely a LID but not in the map — can't resolve
+            return None
+
+    try:
+        conn = sqlite3.connect(WHATSMEOW_DB_PATH)
+        cursor = conn.cursor()
+        # whatsmeow_contacts columns: our_jid, their_jid, first_name, full_name, push_name, business_name
+        cursor.execute(
+            "SELECT full_name, push_name, first_name, business_name FROM whatsmeow_contacts WHERE their_jid = ? LIMIT 1",
+            (lookup_jid,),
+        )
+        row = cursor.fetchone()
+        if row:
+            # Prefer full_name, then push_name, then first_name, then business_name
+            return row[0] or row[1] or row[2] or row[3] or None
+        return None
+    except sqlite3.Error:
+        return None
+    finally:
+        if "conn" in locals():
+            conn.close()
+
+
 def get_sender_name(sender_jid: str) -> str:
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
@@ -151,10 +265,21 @@ def get_sender_name(sender_jid: str) -> str:
 
             result = cursor.fetchone()
 
-        if result and result[0]:
+        if result and result[0] and not result[0].replace("+", "").isdigit():
             return result[0]
-        else:
-            return sender_jid
+
+        # Fall back to whatsmeow contact store
+        whatsmeow_name = _resolve_name_from_whatsmeow(sender_jid)
+        if whatsmeow_name:
+            return whatsmeow_name
+
+        # Try with @s.whatsapp.net suffix if bare number
+        if "@" not in sender_jid:
+            whatsmeow_name = _resolve_name_from_whatsmeow(sender_jid + "@s.whatsapp.net")
+            if whatsmeow_name:
+                return whatsmeow_name
+
+        return sender_jid
 
     except sqlite3.Error as e:
         print(f"Database error while getting sender name: {e}")
@@ -259,8 +384,10 @@ def list_messages(
             params.append(before)
 
         if sender_phone_number:
-            where_clauses.append("messages.sender = ?")
-            params.append(sender_phone_number)
+            aliases = _sender_aliases(sender_phone_number)
+            placeholders = ",".join("?" * len(aliases))
+            where_clauses.append(f"messages.sender IN ({placeholders})")
+            params.extend(aliases)
 
         if chat_jid:
             where_clauses.append("messages.chat_jid = ?")
@@ -507,19 +634,22 @@ def list_chats(
 
 
 def search_contacts(query: str) -> list[dict[str, Any]]:
-    """Search contacts by name or phone number."""
+    """Search contacts by name or phone number.
+
+    Searches both the messages.db chats table and whatsmeow's contact store
+    (whatsapp.db) to find contacts. Results are deduplicated by JID.
+    """
+    seen_jids: set[str] = set()
+    result: list[dict[str, Any]] = []
+    search_pattern = "%" + query + "%"
+
+    # 1) Search messages.db chats table (existing behavior)
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
-
-        # Split query into characters to support partial matching
-        search_pattern = "%" + query + "%"
-
         cursor.execute(
             """
-            SELECT DISTINCT
-                jid,
-                name
+            SELECT DISTINCT jid, name
             FROM chats
             WHERE
                 (LOWER(name) LIKE LOWER(?) OR LOWER(jid) LIKE LOWER(?))
@@ -529,22 +659,49 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
         """,
             (search_pattern, search_pattern),
         )
-
-        contacts = cursor.fetchall()
-
-        result = []
-        for contact_data in contacts:
-            contact = Contact(phone_number=contact_data[0].split("@")[0], name=contact_data[1], jid=contact_data[0])
-            result.append(contact_to_dict(contact))
-
-        return result
-
+        for jid, name in cursor.fetchall():
+            if jid not in seen_jids:
+                seen_jids.add(jid)
+                contact = Contact(phone_number=jid.split("@")[0], name=name, jid=jid)
+                result.append(contact_to_dict(contact))
     except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        return []
+        print(f"Database error (messages.db): {e}")
     finally:
         if "conn" in locals():
             conn.close()
+
+    # 2) Search whatsmeow contact store (whatsapp.db)
+    if os.path.exists(WHATSMEOW_DB_PATH):
+        try:
+            conn2 = sqlite3.connect(WHATSMEOW_DB_PATH)
+            cursor2 = conn2.cursor()
+            cursor2.execute(
+                """
+                SELECT their_jid, full_name, push_name, first_name, business_name
+                FROM whatsmeow_contacts
+                WHERE
+                    LOWER(full_name) LIKE LOWER(?)
+                    OR LOWER(push_name) LIKE LOWER(?)
+                    OR LOWER(first_name) LIKE LOWER(?)
+                    OR LOWER(business_name) LIKE LOWER(?)
+                    OR their_jid LIKE ?
+                LIMIT 50
+            """,
+                (search_pattern, search_pattern, search_pattern, search_pattern, search_pattern),
+            )
+            for their_jid, full_name, push_name, first_name, business_name in cursor2.fetchall():
+                if their_jid not in seen_jids:
+                    seen_jids.add(their_jid)
+                    name = full_name or push_name or first_name or business_name or ""
+                    contact = Contact(phone_number=their_jid.split("@")[0], name=name, jid=their_jid)
+                    result.append(contact_to_dict(contact))
+        except sqlite3.Error as e:
+            print(f"Database error (whatsapp.db): {e}")
+        finally:
+            if "conn2" in locals():
+                conn2.close()
+
+    return result
 
 
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str, Any]]:
@@ -559,8 +716,10 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
 
+        aliases = _sender_aliases(jid)
+        placeholders = ",".join("?" * len(aliases))
         cursor.execute(
-            """
+            f"""
             SELECT DISTINCT
                 c.jid,
                 c.name,
@@ -570,11 +729,11 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
                 m.is_from_me as last_is_from_me
             FROM chats c
             JOIN messages m ON c.jid = m.chat_jid
-            WHERE m.sender = ? OR c.jid = ?
+            WHERE m.sender IN ({placeholders}) OR c.jid = ?
             ORDER BY c.last_message_time DESC
             LIMIT ? OFFSET ?
         """,
-            (jid, jid, limit, page * limit),
+            (*aliases, jid, limit, page * limit),
         )
 
         chats = cursor.fetchall()
@@ -614,8 +773,10 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
 
+        aliases = _sender_aliases(jid)
+        placeholders = ",".join("?" * len(aliases))
         cursor.execute(
-            """
+            f"""
             SELECT
                 m.timestamp,
                 m.sender,
@@ -627,11 +788,11 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
                 m.media_type
             FROM messages m
             JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.sender = ? OR c.jid = ?
+            WHERE m.sender IN ({placeholders}) OR c.jid = ?
             ORDER BY m.timestamp DESC
             LIMIT 1
         """,
-            (jid, jid),
+            (*aliases, jid),
         )
 
         msg_data = cursor.fetchone()

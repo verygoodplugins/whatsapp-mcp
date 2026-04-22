@@ -1,0 +1,50 @@
+name: Dependabot auto-merge
+
+# Auto-approves and enables auto-merge for low-risk Dependabot PRs:
+# - any patch update
+# - minor updates to development dependencies (pytest, ruff, etc.)
+# - minor updates to GitHub Actions
+#
+# Major updates and minor updates to runtime/production deps still
+# require manual review.
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Approve and enable auto-merge
+        if: |
+          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+          (steps.meta.outputs.update-type == 'version-update:semver-minor' &&
+           steps.meta.outputs.dependency-type == 'direct:development') ||
+          (steps.meta.outputs.update-type == 'version-update:semver-minor' &&
+           steps.meta.outputs.package-ecosystem == 'github_actions')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          CURRENT_LOGIN="$(gh api user --jq .login)"
+          ALREADY_APPROVED="$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews" --jq '[.[] | select(.user.login == "'"$CURRENT_LOGIN"'" and .state == "APPROVED")] | length')"
+          if [ "$ALREADY_APPROVED" -eq 0 ]; then
+            gh pr review --approve "$PR_URL"
+          fi
+          gh pr merge --auto --squash "$PR_URL"

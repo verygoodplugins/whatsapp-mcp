@@ -41,7 +41,7 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 
    ```bash
    cd whatsapp-bridge
-   go run main.go
+   go run .
    ```
 
    Scan the QR code with WhatsApp on your phone to authenticate.
@@ -235,6 +235,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WEBHOOK_URL` | `http://localhost:8769/whatsapp/webhook` | Webhook for incoming messages |
 | `FORWARD_SELF` | `false` | Forward messages sent by self |
 | `WHATSAPP_DB_PATH` | `../whatsapp-bridge/store/messages.db` | Path to SQLite database |
+| `WHATSMEOW_DB_PATH` | `../whatsapp-bridge/store/whatsapp.db` | whatsmeow DB used for LID ↔ phone resolution |
 | `WHATSAPP_API_URL` | `http://localhost:8080/api` | Go bridge REST API URL |
 
 ## Architecture
@@ -389,7 +390,7 @@ Windows requires CGO for go-sqlite3. Install [MSYS2](https://www.msys2.org/) and
 
 ```bash
 go env -w CGO_ENABLED=1
-go run main.go
+go run .
 ```
 
 ## Security Notice
