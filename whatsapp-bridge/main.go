@@ -431,14 +431,56 @@ func extractTextContent(msg *waProto.Message) string {
 		return ""
 	}
 
-	// Try to get text content
+	// Plain text messages
 	if text := msg.GetConversation(); text != "" {
 		return text
-	} else if extendedText := msg.GetExtendedTextMessage(); extendedText != nil {
+	}
+	if extendedText := msg.GetExtendedTextMessage(); extendedText != nil {
 		return extendedText.GetText()
 	}
 
-	// For now, we're ignoring non-text messages
+	// Interactive messages (buttons sent by bots/businesses)
+	if interactive := msg.GetInteractiveMessage(); interactive != nil {
+		if body := interactive.GetBody(); body != nil {
+			text := body.GetText()
+			if footer := interactive.GetFooter(); footer != nil && footer.GetText() != "" {
+				text += "\n" + footer.GetText()
+			}
+			return text
+		}
+	}
+
+	// Buttons message (legacy button format)
+	if buttons := msg.GetButtonsMessage(); buttons != nil {
+		return buttons.GetContentText()
+	}
+
+	// Buttons response (user tapped a button)
+	if buttonsResp := msg.GetButtonsResponseMessage(); buttonsResp != nil {
+		return buttonsResp.GetSelectedDisplayText()
+	}
+
+	// List message
+	if list := msg.GetListMessage(); list != nil {
+		if title := list.GetTitle(); title != "" {
+			return title + "\n" + list.GetDescription()
+		}
+		return list.GetDescription()
+	}
+
+	// List response (user selected from a list)
+	if listResp := msg.GetListResponseMessage(); listResp != nil {
+		return listResp.GetTitle()
+	}
+
+	// Image/video captions
+	if img := msg.GetImageMessage(); img != nil && img.GetCaption() != "" {
+		return img.GetCaption()
+	}
+	if vid := msg.GetVideoMessage(); vid != nil && vid.GetCaption() != "" {
+		return vid.GetCaption()
+	}
+
 	return ""
 }
 
@@ -453,10 +495,11 @@ type SendMessageRequest struct {
 	Recipient string `json:"recipient"`
 	Message   string `json:"message"`
 	MediaPath string `json:"media_path,omitempty"`
+	QuotedID  string `json:"quoted_id,omitempty"`
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string, quotedID string, msgStore *MessageStore) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -517,7 +560,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 		}
 
 		// Determine media type and mime type based on file extension
-		fileExt := strings.ToLower(mediaPath[strings.LastIndex(mediaPath, ".")+1:])
+		fileExt := strings.ToLower(strings.TrimPrefix(filepath.Ext(mediaPath), "."))
 		var mediaType whatsmeow.MediaType
 		var mimeType string
 
@@ -553,7 +596,39 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 			mediaType = whatsmeow.MediaVideo
 			mimeType = "video/quicktime"
 
-		// Document types (for any other file type)
+		// Document types with explicit MIME types
+		case "pdf":
+			mediaType = whatsmeow.MediaDocument
+			mimeType = "application/pdf"
+		case "doc":
+			mediaType = whatsmeow.MediaDocument
+			mimeType = "application/msword"
+		case "docx":
+			mediaType = whatsmeow.MediaDocument
+			mimeType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+		case "xls":
+			mediaType = whatsmeow.MediaDocument
+			mimeType = "application/vnd.ms-excel"
+		case "xlsx":
+			mediaType = whatsmeow.MediaDocument
+			mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+		case "ppt":
+			mediaType = whatsmeow.MediaDocument
+			mimeType = "application/vnd.ms-powerpoint"
+		case "pptx":
+			mediaType = whatsmeow.MediaDocument
+			mimeType = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+		case "csv":
+			mediaType = whatsmeow.MediaDocument
+			mimeType = "text/csv"
+		case "txt":
+			mediaType = whatsmeow.MediaDocument
+			mimeType = "text/plain"
+		case "zip":
+			mediaType = whatsmeow.MediaDocument
+			mimeType = "application/zip"
+
+		// Fallback for unknown types
 		default:
 			mediaType = whatsmeow.MediaDocument
 			mimeType = "application/octet-stream"
@@ -622,8 +697,10 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 				FileLength:    &resp.FileLength,
 			}
 		case whatsmeow.MediaDocument:
+			docFileName := filepath.Base(mediaPath)
 			msg.DocumentMessage = &waProto.DocumentMessage{
-				Title:         proto.String(mediaPath[strings.LastIndex(mediaPath, "/")+1:]),
+				Title:         proto.String(docFileName),
+				FileName:      proto.String(docFileName),
 				Caption:       proto.String(message),
 				Mimetype:      proto.String(mimeType),
 				URL:           &resp.URL,
@@ -633,6 +710,31 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 				FileSHA256:    resp.FileSHA256,
 				FileLength:    &resp.FileLength,
 			}
+		}
+	} else if quotedID != "" {
+		// Quoted reply: look up the original message from DB for proper rendering
+		var quotedContent, quotedSender string
+		if msgStore != nil {
+			row := msgStore.db.QueryRow(
+				"SELECT content, sender FROM messages WHERE id = ? LIMIT 1", quotedID)
+			row.Scan(&quotedContent, &quotedSender)
+		}
+		participantStr := recipientJID.String()
+		if quotedSender != "" {
+			participantStr = quotedSender + "@s.whatsapp.net"
+		}
+		contextInfo := &waProto.ContextInfo{
+			StanzaID:    proto.String(quotedID),
+			Participant: proto.String(participantStr),
+		}
+		if quotedContent != "" {
+			contextInfo.QuotedMessage = &waProto.Message{
+				Conversation: proto.String(quotedContent),
+			}
+		}
+		msg.ExtendedTextMessage = &waProto.ExtendedTextMessage{
+			Text:        proto.String(message),
+			ContextInfo: contextInfo,
 		}
 	} else {
 		msg.Conversation = proto.String(message)
@@ -1129,7 +1231,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
+		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath, req.QuotedID, messageStore)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -1288,7 +1390,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	})
 
 	// Start the server with proper timeouts
-	serverAddr := fmt.Sprintf(":%d", port)
+	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
 
 	// Create server with timeouts for stability
