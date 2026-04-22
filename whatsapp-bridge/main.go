@@ -827,10 +827,8 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		return
 	}
 
-	// Store message in database FIRST so the auto-download goroutine can find it.
-	// Previously the goroutine was launched before StoreMessage, which raced with
-	// the insert: if the goroutine ran first, downloadMedia's "SELECT ... WHERE
-	// id=?" returned no rows and silently dropped the media.
+	// Store message in database first so that downloadMedia (which queries the DB
+	// by message ID) can find the row when we call it synchronously below.
 	err = messageStore.StoreMessage(
 		msg.Info.ID,
 		chatJID,
@@ -846,29 +844,74 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		fileEncSHA256,
 		fileLength,
 	)
+	if err != nil {
+		logger.Warnf("Failed to store message: %v", err)
+	}
 
-	// Auto-download media if present, now that the DB row exists.
-	if err == nil && mediaType != "" && url != "" && len(mediaKey) > 0 {
+	// For image messages, download media synchronously so we can include the base64
+	// payload in the webhook. Other media types (video, audio, document) are still
+	// downloaded asynchronously since they are not passed to the AI vision pipeline.
+	var imageDownloadPath string
+	var imageMimeType string
+	if mediaType == "image" && url != "" && len(mediaKey) > 0 {
+		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
+		success, _, _, dlPath, dlErr := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+		if success && dlErr == nil {
+			imageDownloadPath = dlPath
+			// Detect MIME type by sniffing the actual file bytes rather than
+			// trusting the generated filename extension (always .jpg).
+			if f, openErr := os.Open(dlPath); openErr == nil {
+				buf := make([]byte, 512)
+				if n, readErr := f.Read(buf); readErr == nil || n > 0 {
+					imageMimeType = http.DetectContentType(buf[:n])
+				}
+				_ = f.Close()
+			}
+			if imageMimeType == "" {
+				imageMimeType = "application/octet-stream"
+			}
+			logger.Infof("✅ Image downloaded: %s (%s)", dlPath, imageMimeType)
+		} else {
+			logger.Warnf("❌ Image download failed: %v", dlErr)
+			// Fall back to async download so media is cached for future MCP tool calls
+			go func() {
+				_, _, _, _, _ = downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+			}()
+		}
+	} else if mediaType != "" && mediaType != "image" && url != "" && len(mediaKey) > 0 {
+		// Non-image media: async download for caching only (not sent to vision pipeline)
 		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
 		go func() {
-			success, _, _, downloadPath, dlErr := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
-			if success && dlErr == nil {
+			success, _, _, downloadPath, err := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+			if success && err == nil {
 				logger.Infof("✅ Auto-downloaded media: %s", downloadPath)
 			} else {
-				logger.Warnf("❌ Auto-download failed: %v", dlErr)
+				logger.Warnf("❌ Auto-download failed: %v", err)
 			}
 		}()
 	}
 
-	// Send webhook for incoming messages
-	// Forward self-messages when FORWARD_SELF=true
-	if content != "" && (forwardSelfMessages || !msg.Info.IsFromMe) {
-		SendWebhook(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent)
+	// Send webhook for incoming messages.
+	// Forward self-messages when FORWARD_SELF=true.
+	// Always forward image messages (even without a text caption) so the AI vision
+	// pipeline can analyse the image content.
+	shouldForward := forwardSelfMessages || !msg.Info.IsFromMe
+	hasText := content != ""
+	hasImage := mediaType == "image"
+
+	if shouldForward && (hasText || hasImage) {
+		if hasImage {
+			SendWebhookWithMedia(
+				sender, content, chatJID, msg.Info.IsFromMe,
+				quotedMessageId, quotedSender, quotedContent,
+				msg.Info.ID, mediaType, imageMimeType, filename, imageDownloadPath,
+			)
+		} else {
+			SendWebhook(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent)
+		}
 	}
 
-	if err != nil {
-		logger.Warnf("Failed to store message: %v", err)
-	} else {
+	if err == nil {
 		// Log message reception
 		timestamp := msg.Info.Timestamp.Format("2006-01-02 15:04:05")
 		direction := "←"
