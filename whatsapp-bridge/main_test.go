@@ -329,6 +329,67 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_MissingWhatsAppDBIsNoOp(t *testing.T) 
 	}
 }
 
+func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  *waProto.Message
+		want string
+	}{
+		{
+			name: "Conversation",
+			msg:  &waProto.Message{Conversation: proto.String("hola")},
+			want: "hola",
+		},
+		{
+			name: "ExtendedTextMessage",
+			msg: &waProto.Message{
+				ExtendedTextMessage: &waProto.ExtendedTextMessage{Text: proto.String("quoted reply")},
+			},
+			want: "quoted reply",
+		},
+		{
+			name: "ImageMessage with caption",
+			msg: &waProto.Message{
+				ImageMessage: &waProto.ImageMessage{Caption: proto.String("sunset on the beach")},
+			},
+			want: "sunset on the beach",
+		},
+		{
+			name: "VideoMessage with caption",
+			msg: &waProto.Message{
+				VideoMessage: &waProto.VideoMessage{Caption: proto.String("the kids playing")},
+			},
+			want: "the kids playing",
+		},
+		{
+			name: "DocumentMessage with caption",
+			msg: &waProto.Message{
+				DocumentMessage: &waProto.DocumentMessage{Caption: proto.String("invoice attached")},
+			},
+			want: "invoice attached",
+		},
+		{
+			name: "ImageMessage without caption returns empty",
+			msg:  &waProto.Message{ImageMessage: &waProto.ImageMessage{}},
+			want: "",
+		},
+		{
+			name: "Nil message returns empty",
+			msg:  nil,
+			want: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractTextContent(tc.msg)
+			if got != tc.want {
+				t.Errorf("extractTextContent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestMigrateLegacyLIDChatsToPhoneJIDs_AggregatesByPhoneJIDDeterministically(t *testing.T) {
 	ms := newTestMessageStore(t)
 	logger := testLogger()
