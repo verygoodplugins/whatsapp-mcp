@@ -396,9 +396,7 @@ def list_messages(
         if query:
             # SQLite's LOWER() only handles ASCII, so LIKE LOWER(...) silently
             # excludes Unicode matches. instr() on the raw column preserves them.
-            where_clauses.append(
-                "(instr(LOWER(messages.content), LOWER(?)) > 0 OR instr(messages.content, ?) > 0)"
-            )
+            where_clauses.append("(instr(LOWER(messages.content), LOWER(?)) > 0 OR instr(messages.content, ?) > 0)")
             params.extend([query, query])
 
         if where_clauses:
