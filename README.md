@@ -41,7 +41,7 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 
    ```bash
    cd whatsapp-bridge
-   go run main.go
+   go run .
    ```
 
    Scan the QR code with WhatsApp on your phone to authenticate.
