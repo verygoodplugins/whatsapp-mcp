@@ -17,7 +17,7 @@ cd whatsapp-mcp
 
 # Bridge
 cd whatsapp-bridge
-go run main.go     # scan QR to pair
+go run .           # scan QR to pair
 
 # MCP server (separate terminal)
 cd ../whatsapp-mcp-server
