@@ -473,10 +473,12 @@ func (store *MessageStore) MarkCallRejected(callID, chatJID string) error {
 // offer timestamp. Infers final result when the call was still in_progress
 // (meaning no accept was seen → the call was missed).
 func (store *MessageStore) MarkCallTerminated(callID, chatJID, reason string, endedAt time.Time) error {
+	// ROUND before CAST: julianday() arithmetic produces a float and CAST truncates
+	// toward zero, so a 90-second call would otherwise record as 89.
 	_, err := store.db.Exec(
 		`UPDATE calls SET
 			ended_at = ?,
-			duration_sec = CAST((julianday(?) - julianday(timestamp)) * 86400 AS INTEGER),
+			duration_sec = CAST(ROUND((julianday(?) - julianday(timestamp)) * 86400) AS INTEGER),
 			reason = ?,
 			result = CASE result
 				WHEN 'in_progress' THEN 'missed'
