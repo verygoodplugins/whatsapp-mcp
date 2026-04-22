@@ -38,7 +38,7 @@ jobs:
           go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.7.1 config verify
 
       - name: Run Go lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v9
         with:
           version: v2.7.1
           working-directory: whatsapp-bridge
