@@ -21,7 +21,7 @@ Thanks for the PR! A couple of quick checks before you submit:
 
 ## Scope check
 
-- [ ] This change fits the [`ROADMAP.md`](../ROADMAP.md) "in scope" list, **or** I've opened an issue first to discuss
+- [ ] This change fits the [`ROADMAP.md`](https://github.com/verygoodplugins/whatsapp-mcp/blob/main/ROADMAP.md) "in scope" list, **or** I've opened an issue first to discuss
 - [ ] PR is focused on one concern (split if not)
 - [ ] PR is ≤ ~300 LOC, **or** justified in the description
 
