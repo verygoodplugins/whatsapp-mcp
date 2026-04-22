@@ -20,7 +20,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.24"
+          go-version: "1.25"
 
       - uses: actions/setup-python@v6
         with:
@@ -68,7 +68,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.24"
+          go-version: "1.25"
 
       - uses: astral-sh/setup-uv@v7
 
