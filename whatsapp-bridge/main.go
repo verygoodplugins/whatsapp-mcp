@@ -106,6 +106,24 @@ func NewMessageStore() (*MessageStore, error) {
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
+
+		CREATE TABLE IF NOT EXISTS calls (
+			call_id TEXT,
+			chat_jid TEXT,
+			from_jid TEXT,
+			timestamp TIMESTAMP,
+			is_from_me BOOLEAN,
+			call_type TEXT,
+			is_group BOOLEAN,
+			result TEXT,
+			duration_sec INTEGER,
+			ended_at TIMESTAMP,
+			reason TEXT,
+			PRIMARY KEY (call_id, chat_jid)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_calls_chat ON calls(chat_jid);
+		CREATE INDEX IF NOT EXISTS idx_calls_timestamp ON calls(timestamp);
 	`)
 	if err != nil {
 		_ = db.Close()
@@ -401,6 +419,76 @@ func (store *MessageStore) GetMessages(chatJID string, limit int) ([]Message, er
 	}
 
 	return messages, nil
+}
+
+// Call storage methods.
+//
+// WhatsApp calls arrive as a sequence of events: Offer/OfferNotice → Accept →
+// Terminate (or Reject → Terminate). We model each call as a single row keyed
+// by (call_id, chat_jid), upserted as events arrive. The `result` column
+// tracks the call's final state as the event sequence plays out.
+//
+// State machine:
+//   Offer/OfferNotice → result = "in_progress"
+//   Accept            → result = "answered"
+//   Reject            → result = "rejected"
+//   Terminate         → if result == "in_progress" → "missed"
+//                       if result == "answered"    → "ended"
+//                       otherwise preserve existing (rejected stays rejected)
+
+// StoreCallOffer inserts a new call row when an offer event arrives. Uses
+// INSERT OR IGNORE so duplicate offer events (rare but possible) don't clobber
+// a call already in a later lifecycle state.
+func (store *MessageStore) StoreCallOffer(callID, chatJID, fromJID string, timestamp time.Time, isFromMe bool, callType string, isGroup bool) error {
+	_, err := store.db.Exec(
+		`INSERT OR IGNORE INTO calls
+		 (call_id, chat_jid, from_jid, timestamp, is_from_me, call_type, is_group, result)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 'in_progress')`,
+		callID, chatJID, fromJID, timestamp, isFromMe, callType, isGroup,
+	)
+	return err
+}
+
+// MarkCallAnswered records that the offer was accepted.
+func (store *MessageStore) MarkCallAnswered(callID, chatJID string) error {
+	_, err := store.db.Exec(
+		`UPDATE calls SET result = 'answered'
+		 WHERE call_id = ? AND chat_jid = ? AND result = 'in_progress'`,
+		callID, chatJID,
+	)
+	return err
+}
+
+// MarkCallRejected records that the call was explicitly rejected.
+func (store *MessageStore) MarkCallRejected(callID, chatJID string) error {
+	_, err := store.db.Exec(
+		`UPDATE calls SET result = 'rejected'
+		 WHERE call_id = ? AND chat_jid = ? AND result = 'in_progress'`,
+		callID, chatJID,
+	)
+	return err
+}
+
+// MarkCallTerminated records the end of a call, computing duration from the
+// offer timestamp. Infers final result when the call was still in_progress
+// (meaning no accept was seen → the call was missed).
+func (store *MessageStore) MarkCallTerminated(callID, chatJID, reason string, endedAt time.Time) error {
+	// ROUND before CAST: julianday() arithmetic produces a float and CAST truncates
+	// toward zero, so a 90-second call would otherwise record as 89.
+	_, err := store.db.Exec(
+		`UPDATE calls SET
+			ended_at = ?,
+			duration_sec = CAST(ROUND((julianday(?) - julianday(timestamp)) * 86400) AS INTEGER),
+			reason = ?,
+			result = CASE result
+				WHEN 'in_progress' THEN 'missed'
+				WHEN 'answered'    THEN 'ended'
+				ELSE result
+			END
+		 WHERE call_id = ? AND chat_jid = ?`,
+		endedAt, endedAt, reason, callID, chatJID,
+	)
+	return err
 }
 
 // Get all chats
@@ -827,10 +915,8 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		return
 	}
 
-	// Store message in database FIRST so the auto-download goroutine can find it.
-	// Previously the goroutine was launched before StoreMessage, which raced with
-	// the insert: if the goroutine ran first, downloadMedia's "SELECT ... WHERE
-	// id=?" returned no rows and silently dropped the media.
+	// Store message in database first so that downloadMedia (which queries the DB
+	// by message ID) can find the row when we call it synchronously below.
 	err = messageStore.StoreMessage(
 		msg.Info.ID,
 		chatJID,
@@ -846,29 +932,74 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		fileEncSHA256,
 		fileLength,
 	)
+	if err != nil {
+		logger.Warnf("Failed to store message: %v", err)
+	}
 
-	// Auto-download media if present, now that the DB row exists.
-	if err == nil && mediaType != "" && url != "" && len(mediaKey) > 0 {
+	// For image messages, download media synchronously so we can include the base64
+	// payload in the webhook. Other media types (video, audio, document) are still
+	// downloaded asynchronously since they are not passed to the AI vision pipeline.
+	var imageDownloadPath string
+	var imageMimeType string
+	if mediaType == "image" && url != "" && len(mediaKey) > 0 {
+		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
+		success, _, _, dlPath, dlErr := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+		if success && dlErr == nil {
+			imageDownloadPath = dlPath
+			// Detect MIME type by sniffing the actual file bytes rather than
+			// trusting the generated filename extension (always .jpg).
+			if f, openErr := os.Open(dlPath); openErr == nil {
+				buf := make([]byte, 512)
+				if n, readErr := f.Read(buf); readErr == nil || n > 0 {
+					imageMimeType = http.DetectContentType(buf[:n])
+				}
+				_ = f.Close()
+			}
+			if imageMimeType == "" {
+				imageMimeType = "application/octet-stream"
+			}
+			logger.Infof("✅ Image downloaded: %s (%s)", dlPath, imageMimeType)
+		} else {
+			logger.Warnf("❌ Image download failed: %v", dlErr)
+			// Fall back to async download so media is cached for future MCP tool calls
+			go func() {
+				_, _, _, _, _ = downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+			}()
+		}
+	} else if mediaType != "" && mediaType != "image" && url != "" && len(mediaKey) > 0 {
+		// Non-image media: async download for caching only (not sent to vision pipeline)
 		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
 		go func() {
-			success, _, _, downloadPath, dlErr := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
-			if success && dlErr == nil {
+			success, _, _, downloadPath, err := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+			if success && err == nil {
 				logger.Infof("✅ Auto-downloaded media: %s", downloadPath)
 			} else {
-				logger.Warnf("❌ Auto-download failed: %v", dlErr)
+				logger.Warnf("❌ Auto-download failed: %v", err)
 			}
 		}()
 	}
 
-	// Send webhook for incoming messages
-	// Forward self-messages when FORWARD_SELF=true
-	if content != "" && (forwardSelfMessages || !msg.Info.IsFromMe) {
-		SendWebhook(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent)
+	// Send webhook for incoming messages.
+	// Forward self-messages when FORWARD_SELF=true.
+	// Always forward image messages (even without a text caption) so the AI vision
+	// pipeline can analyse the image content.
+	shouldForward := forwardSelfMessages || !msg.Info.IsFromMe
+	hasText := content != ""
+	hasImage := mediaType == "image"
+
+	if shouldForward && (hasText || hasImage) {
+		if hasImage {
+			SendWebhookWithMedia(
+				sender, content, chatJID, msg.Info.IsFromMe,
+				quotedMessageId, quotedSender, quotedContent,
+				msg.Info.ID, mediaType, imageMimeType, filename, imageDownloadPath,
+			)
+		} else {
+			SendWebhook(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent)
+		}
 	}
 
-	if err != nil {
-		logger.Warnf("Failed to store message: %v", err)
-	} else {
+	if err == nil {
 		// Log message reception
 		timestamp := msg.Info.Timestamp.Format("2006-01-02 15:04:05")
 		direction := "←"
@@ -1400,6 +1531,44 @@ func main() {
 			// Process history sync events
 			handleHistorySync(client, messageStore, v, logger)
 
+		case *events.CallOffer:
+			// 1:1 incoming call. call_type defaults to "voice"; CallOffer
+			// doesn't expose Media directly (it's buried in the binary Data
+			// node). Group calls come through CallOfferNotice instead, which
+			// DOES expose Media cleanly.
+			handleCallOffer(client, messageStore, v.BasicCallMeta, "voice", false, logger)
+
+		case *events.CallOfferNotice:
+			// Group calls. v.Media is "audio" or "video"; normalize to our
+			// "voice"/"video" convention.
+			callType := "voice"
+			if v.Media == "video" {
+				callType = "video"
+			}
+			isGroup := v.Type == "group" || !v.BasicCallMeta.GroupJID.IsEmpty()
+			handleCallOffer(client, messageStore, v.BasicCallMeta, callType, isGroup, logger)
+
+		case *events.CallAccept:
+			if err := messageStore.MarkCallAnswered(v.CallID, callChatJID(v.BasicCallMeta)); err != nil {
+				logger.Warnf("Failed to mark call answered: %v", err)
+			} else {
+				logger.Infof("Call answered: id=%s", v.CallID)
+			}
+
+		case *events.CallReject:
+			if err := messageStore.MarkCallRejected(v.CallID, callChatJID(v.BasicCallMeta)); err != nil {
+				logger.Warnf("Failed to mark call rejected: %v", err)
+			} else {
+				logger.Infof("Call rejected: id=%s", v.CallID)
+			}
+
+		case *events.CallTerminate:
+			if err := messageStore.MarkCallTerminated(v.CallID, callChatJID(v.BasicCallMeta), v.Reason, v.Timestamp); err != nil {
+				logger.Warnf("Failed to mark call terminated: %v", err)
+			} else {
+				logger.Infof("Call terminated: id=%s reason=%q", v.CallID, v.Reason)
+			}
+
 		case *events.Connected:
 			logger.Infof("✓ Successfully connected to WhatsApp servers")
 
@@ -1700,9 +1869,72 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 	return name
 }
 
-// Handle history sync events
+// callChatJID resolves the chat JID that a call belongs to. For group calls
+// this is the group JID; for 1:1 calls it's the call creator's JID — which
+// stays stable across the entire lifecycle (Offer → Accept → Terminate).
+//
+// meta.From is NOT reliable as the chat key: for Accept events that fire
+// when the user picks up on their phone, meta.From is the *accepting*
+// device's JID (our own), not the other party's. Using From caused Accept
+// UPDATEs to miss the row stored at Offer time, so the state machine fell
+// through to "missed" when the user answered elsewhere.
+//
+// meta.CallCreator is populated from the stanza's call-creator attribute,
+// which WhatsApp keeps consistent for every event in the call.
+func callChatJID(meta types.BasicCallMeta) string {
+	if !meta.GroupJID.IsEmpty() {
+		return meta.GroupJID.String()
+	}
+	if !meta.CallCreator.IsEmpty() {
+		return meta.CallCreator.ToNonAD().String()
+	}
+	return meta.From.ToNonAD().String()
+}
+
+// handleCallOffer stores a new call row. The isFromMe path is defensive —
+// in practice WhatsApp's primary device handles outbound calls without
+// notifying linked devices, so events observed here are always inbound and
+// isFromMe stays false. We keep the branch anyway in case behavior changes.
+func handleCallOffer(client *whatsmeow.Client, messageStore *MessageStore, meta types.BasicCallMeta, callType string, isGroup bool, logger waLog.Logger) {
+	chatJID := callChatJID(meta)
+
+	fromJID := ""
+	switch {
+	case !meta.CallCreator.IsEmpty():
+		fromJID = meta.CallCreator.ToNonAD().String()
+	case !meta.From.IsEmpty():
+		fromJID = meta.From.ToNonAD().String()
+	}
+
+	isFromMe := client.Store.ID != nil && fromJID == client.Store.ID.ToNonAD().String()
+
+	if err := messageStore.StoreCallOffer(meta.CallID, chatJID, fromJID, meta.Timestamp, isFromMe, callType, isGroup); err != nil {
+		logger.Warnf("Failed to store call offer: %v", err)
+		return
+	}
+
+	kind := "Call"
+	if isGroup {
+		kind = "Group call"
+	}
+	direction := "incoming"
+	if isFromMe {
+		direction = "outgoing"
+	}
+	logger.Infof("%s %s: id=%s type=%s from=%s chat=%s",
+		kind, direction, meta.CallID, callType, fromJID, chatJID)
+}
+
 func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, historySync *events.HistorySync, logger waLog.Logger) {
-	fmt.Printf("Received history sync event with %d conversations\n", len(historySync.Data.Conversations))
+	// Log every history sync event with its shape. Different sync types
+	// carry different payloads; logging type/chunk/progress makes it easy
+	// to reason about what arrived from WhatsApp when debugging.
+	logger.Infof("Received history sync: type=%s chunk=%d progress=%d conversations=%d",
+		historySync.Data.GetSyncType(),
+		historySync.Data.GetChunkOrder(),
+		historySync.Data.GetProgress(),
+		len(historySync.Data.Conversations),
+	)
 
 	syncedCount := 0
 	for _, conversation := range historySync.Data.Conversations {
