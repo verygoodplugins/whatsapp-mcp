@@ -15,6 +15,7 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 - **Contact Search**: Search contacts by name or phone number with `sender_display` format ("Name (phone)")
 - **Send Messages**: Send text messages to individuals or groups
 - **Media Support**: Send and download images, videos, documents, and voice messages
+- **Call History**: Capture incoming voice/video calls into a local SQLite table (live, 1:1 and group)
 - **Webhook Integration**: Forward incoming messages to external services
 - **Local Storage**: All messages stored locally in SQLite - only sent to Claude when you allow it
 
@@ -268,6 +269,48 @@ Caveats:
 - **The phone decides the actual cap.** The flag requests up to 10 years / 100 GB, but WhatsApp's iOS primary device enforces its own retention policy. iPad companion is documented at ~1 year max; other linked devices appear to follow similar logic.
 - **Only effective on a fresh pair.** With `whatsapp.db` already present, no new pair handshake fires and the flag is a no-op.
 - **Messages the phone has deleted are not recoverable** — auto-expire, low-storage cleanup, and manual delete all leave no trace for the phone to share.
+## Call History
+
+The bridge captures incoming WhatsApp voice and video calls live into a
+dedicated `calls` table in `messages.db`. When a 1:1 call arrives
+(`CallOffer`) or a group call is announced (`CallOfferNotice`), a row is
+inserted with `result='in_progress'`. Subsequent `CallAccept` /
+`CallReject` / `CallTerminate` events update the row — final result becomes
+`answered`, `rejected`, `missed`, or `ended` depending on the event
+sequence. See the state-machine comment above `StoreCallOffer` in `main.go`
+for the exact transitions.
+
+### Schema
+
+```sql
+CREATE TABLE calls (
+    call_id TEXT,
+    chat_jid TEXT,          -- group JID for group calls, call creator JID for 1:1
+    from_jid TEXT,          -- JID of whoever started the call
+    timestamp TIMESTAMP,    -- call start time
+    is_from_me BOOLEAN,
+    call_type TEXT,         -- 'voice' or 'video'
+    is_group BOOLEAN,
+    result TEXT,            -- 'in_progress' | 'answered' | 'ended' |
+                            --   'missed' | 'rejected'
+    duration_sec INTEGER,   -- computed when the call terminates
+    ended_at TIMESTAMP,
+    reason TEXT,            -- terminate reason string from whatsmeow
+    PRIMARY KEY (call_id, chat_jid)
+);
+```
+
+### Caveats
+
+- **Outbound calls are not captured.** WhatsApp's primary device handles
+  calls it initiates without notifying linked devices, so the bridge never
+  sees an event for them.
+- **Call results only reflect what the bridge saw.** If the bridge is
+  offline when a call happens, the events are lost.
+- **1:1 calls default to `call_type='voice'`.** `CallOffer` events don't
+  expose media type directly (it's buried in the binary call data). Group
+  calls via `CallOfferNotice` include a `Media` field and are recorded
+  accurately as voice or video.
 
 ## Architecture
 
