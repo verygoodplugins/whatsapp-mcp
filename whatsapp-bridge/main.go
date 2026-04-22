@@ -373,6 +373,109 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 	return nil
 }
 
+// MigrateLegacyLIDSendersToPhones rewrites the `sender` column for any
+// message whose stored value is a LID user-part for which whatsmeow has a
+// known phone-number mapping. This is the row-level analogue of the
+// chat-JID migration above and is required because earlier builds resolved
+// the chat JID but stored the raw LID user-part as the sender, leaving
+// the database internally inconsistent (chat = phone, sender = LID).
+//
+// The migration is idempotent: a second run finds no remaining LID-shaped
+// senders to rewrite. It is safe to run on every startup.
+func (store *MessageStore) MigrateLegacyLIDSendersToPhones(whatsappDBPath string, logger waLog.Logger) error {
+	if _, err := os.Stat(whatsappDBPath); err != nil {
+		if os.IsNotExist(err) {
+			logger.Infof("Skipping LID sender migration: %s not found", whatsappDBPath)
+			return nil
+		}
+		return fmt.Errorf("failed to stat WhatsApp DB %s: %w", whatsappDBPath, err)
+	}
+
+	tx, err := store.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to start LID sender migration transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	alias := fmt.Sprintf("wa_sender_mig_%d", time.Now().UnixNano())
+	escapedPath := strings.ReplaceAll(whatsappDBPath, "'", "''")
+	if _, err := tx.Exec(fmt.Sprintf("ATTACH DATABASE '%s' AS %s;", escapedPath, alias)); err != nil {
+		return fmt.Errorf("failed to attach WhatsApp DB for LID sender migration: %w", err)
+	}
+
+	var lidMapTableExists int
+	if err := tx.QueryRow(fmt.Sprintf(
+		"SELECT COUNT(1) FROM %s.sqlite_master WHERE type='table' AND name='whatsmeow_lid_map';",
+		alias,
+	)).Scan(&lidMapTableExists); err != nil {
+		return fmt.Errorf("failed to inspect WhatsApp DB schema for LID sender migration: %w", err)
+	}
+	if lidMapTableExists == 0 {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit no-op LID sender migration: %w", err)
+		}
+		logger.Infof("Skipping LID sender migration: whatsmeow_lid_map table not found")
+		return nil
+	}
+
+	// The sender column stores just the user-part (no @server suffix), so we
+	// match directly against whatsmeow_lid_map.lid. We pre-build a temp table
+	// scoped to senders that actually appear in our messages, both to avoid
+	// scanning the full LID map per row and to give us an accurate row count.
+	if _, err := tx.Exec(fmt.Sprintf(`
+		CREATE TEMP TABLE tmp_lid_sender_map AS
+		SELECT DISTINCT lm.lid AS lid_user, lm.pn AS phone_user
+		FROM %s.whatsmeow_lid_map lm
+		WHERE lm.lid != '' AND lm.pn != ''
+		  AND EXISTS (SELECT 1 FROM messages m WHERE m.sender = lm.lid);
+	`, alias)); err != nil {
+		return fmt.Errorf("failed to build temporary LID sender mapping table: %w", err)
+	}
+
+	var mappedSenders int
+	if err := tx.QueryRow("SELECT COUNT(*) FROM tmp_lid_sender_map;").Scan(&mappedSenders); err != nil {
+		return fmt.Errorf("failed to count mapped LID senders: %w", err)
+	}
+
+	if mappedSenders == 0 {
+		if _, err := tx.Exec("DROP TABLE IF EXISTS tmp_lid_sender_map;"); err != nil {
+			return fmt.Errorf("failed to clean temporary LID sender mapping table: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit no-op LID sender migration: %w", err)
+		}
+		logger.Infof("LID sender migration: nothing to migrate")
+		return nil
+	}
+
+	updateResult, err := tx.Exec(`
+		UPDATE messages
+		SET sender = (
+			SELECT phone_user FROM tmp_lid_sender_map WHERE lid_user = messages.sender
+		)
+		WHERE sender IN (SELECT lid_user FROM tmp_lid_sender_map);
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to rewrite legacy LID senders: %w", err)
+	}
+	updatedRows, _ := updateResult.RowsAffected()
+
+	if _, err := tx.Exec("DROP TABLE IF EXISTS tmp_lid_sender_map;"); err != nil {
+		return fmt.Errorf("failed to clean temporary LID sender mapping table: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit LID sender migration: %w", err)
+	}
+
+	logger.Infof(
+		"LID sender migration complete: mapped_senders=%d updated_messages=%d",
+		mappedSenders,
+		updatedRows,
+	)
+	return nil
+}
+
 // Close the database connection
 func (store *MessageStore) Close() error {
 	return store.db.Close()
@@ -883,13 +986,57 @@ func resolveLIDChat(client *whatsmeow.Client, chat, senderAlt, recipientAlt type
 	return chat
 }
 
+// resolveUserJID resolves a single user JID (sender or participant) to its
+// phone-based equivalent. Unlike resolveLIDChat it takes a single hint alt
+// JID (either SenderAlt for the peer in a DM or the user's own phone JID
+// for outgoing messages) so it can never accidentally substitute the
+// recipient's identity for the sender's. Falls back to the whatsmeow
+// LID-PN store, then returns the original JID if no mapping is known.
+func resolveUserJID(client *whatsmeow.Client, j, alt types.JID) types.JID {
+	j = j.ToNonAD()
+	if j.Server != types.HiddenUserServer {
+		return j
+	}
+	if !alt.IsEmpty() && alt.Server == types.DefaultUserServer {
+		return alt.ToNonAD()
+	}
+	if client != nil && client.Store != nil && client.Store.LIDs != nil {
+		if pn, err := client.Store.LIDs.GetPNForLID(context.Background(), j); err == nil && !pn.IsEmpty() {
+			return pn.ToNonAD()
+		}
+	}
+	return j
+}
+
+// senderAltForMessage returns the best phone-JID hint for the sender of a
+// message: SenderAlt for incoming, the user's own phone JID for outgoing.
+// Falls through to EmptyJID if no hint is available, in which case
+// resolveUserJID will fall back to the LID store.
+func senderAltForMessage(client *whatsmeow.Client, info types.MessageInfo) types.JID {
+	if info.IsFromMe {
+		if client != nil && client.Store != nil && client.Store.ID != nil {
+			return client.Store.ID.ToNonAD()
+		}
+		return types.EmptyJID
+	}
+	if !info.SenderAlt.IsEmpty() && info.SenderAlt.Server == types.DefaultUserServer {
+		return info.SenderAlt.ToNonAD()
+	}
+	return types.EmptyJID
+}
+
 // Handle regular incoming messages with media support
 func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
 	// Resolve LID-based chats to phone-based JIDs so that incoming
 	// and outgoing messages land in the same chat entry.
 	resolvedChat := resolveLIDChat(client, msg.Info.Chat, msg.Info.SenderAlt, msg.Info.RecipientAlt, msg.Info.IsFromMe)
 	chatJID := resolvedChat.String()
-	sender := msg.Info.Sender.User
+	// Resolve the *sender* with a sender-specific alt so that outgoing-from-self
+	// messages don't get tagged with the recipient's phone number, and incoming
+	// messages from LID-only peers get rewritten to their phone user-part when
+	// the LID store has a mapping.
+	resolvedSender := resolveUserJID(client, msg.Info.Sender, senderAltForMessage(client, msg.Info))
+	sender := resolvedSender.User
 
 	// Get appropriate chat name (pass resolved JID so contact lookup works)
 	name := GetChatName(client, messageStore, resolvedChat, chatJID, nil, sender, logger)
@@ -1553,6 +1700,11 @@ func main() {
 		return
 	}
 
+	if err := messageStore.MigrateLegacyLIDSendersToPhones("store/whatsapp.db", logger); err != nil {
+		logger.Errorf("Failed to migrate legacy LID sender rows: %v", err)
+		return
+	}
+
 	// Channel to signal reconnection needs
 	reconnectChan := make(chan bool, 1)
 
@@ -2053,20 +2205,33 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					continue
 				}
 
-				// Determine sender
+				// Determine sender. History-sync rows do not carry SenderAlt,
+				// so any LID-based participant is resolved through the
+				// whatsmeow LID store (populated during live message handling).
 				var sender string
 				isFromMe := false
 				if msg.Message.Key != nil {
 					if msg.Message.Key.FromMe != nil {
 						isFromMe = *msg.Message.Key.FromMe
 					}
-					if !isFromMe && msg.Message.Key.Participant != nil && *msg.Message.Key.Participant != "" {
-						sender = *msg.Message.Key.Participant
-					} else if isFromMe {
-						sender = client.Store.ID.User
-					} else {
-						sender = jid.User
+					var rawSender types.JID
+					switch {
+					case isFromMe && client.Store.ID != nil:
+						rawSender = client.Store.ID.ToNonAD()
+					case msg.Message.Key.Participant != nil && *msg.Message.Key.Participant != "":
+						if parsed, perr := types.ParseJID(*msg.Message.Key.Participant); perr == nil {
+							rawSender = parsed
+						} else {
+							rawSender = types.JID{User: *msg.Message.Key.Participant}
+						}
+					default:
+						rawSender = jid
 					}
+					var alt types.JID
+					if isFromMe && client.Store.ID != nil {
+						alt = client.Store.ID.ToNonAD()
+					}
+					sender = resolveUserJID(client, rawSender, alt).User
 				} else {
 					sender = jid.User
 				}
