@@ -1,0 +1,35 @@
+name: PR Title
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+
+permissions:
+  pull-requests: read
+
+jobs:
+  conventional-pr-title:
+    if: ${{ github.event.pull_request.base.ref == 'main' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate conventional PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|docs|chore|refactor|test|perf|build|ci|revert)(\([[:alnum:]_.-]+\))?!?: .+'
+
+          if [[ "$PR_TITLE" =~ $pattern ]]; then
+            echo "PR title is valid: $PR_TITLE"
+            exit 0
+          fi
+
+          echo "PR title must use Conventional Commits so squash-merge commits on main have clean, consistent messages."
+          echo "Allowed prefixes: feat, fix, docs, chore, refactor, test, perf, build, ci, revert"
+          echo "Examples:"
+          echo "  fix: harden push approval auth flow"
+          echo "  feat(auth): add TOTP support"
+          exit 1
