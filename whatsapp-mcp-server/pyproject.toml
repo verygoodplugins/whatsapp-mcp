@@ -1,6 +1,6 @@
 [project]
 name = "whatsapp-mcp-server"
-version = "0.1.0"
+version = "0.2.0"
 description = "WhatsApp integration for Claude via Model Context Protocol (MCP)"
 requires-python = ">=3.11"
 license = "MIT"
