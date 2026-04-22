@@ -28,7 +28,7 @@ whatsapp-mcp/
 └── .github/                # CI, release, security workflows
 ```
 
-Data flow: AI client → MCP server (Python) → reads SQLite directly **or** calls bridge REST (`http://127.0.0.1:8080/api/*`) → bridge (Go) → WhatsApp Web.
+Data flow: AI client → MCP server (Python) → reads SQLite directly **or** calls bridge REST (`http://localhost:8080/api/*` by default; configurable via `WHATSAPP_API_URL` and `WHATSAPP_BRIDGE_PORT`) → bridge (Go) → WhatsApp Web.
 
 Two SQLite databases:
 

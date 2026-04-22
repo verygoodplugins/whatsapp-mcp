@@ -84,4 +84,4 @@ We use [Semantic Versioning](https://semver.org/) and [Conventional Commits](htt
 - `feat!:` / `fix!:` / `BREAKING CHANGE:` → major bump
 - `chore:`, `docs:`, `ci:`, `test:`, `refactor:` → no bump
 
-Pre-1.0 (where we are now), breaking changes can land in minor releases but should still be explicit and documented in `CHANGELOG.md`.
+Pre-1.0 (where we are now), breaking changes can land in minor releases but should still be called out explicitly in the conventional commit footer and the PR description so release-please captures them in the generated `CHANGELOG.md` (which is auto-managed — don't hand-edit it).
