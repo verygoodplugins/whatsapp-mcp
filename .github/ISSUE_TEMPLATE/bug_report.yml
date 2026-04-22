@@ -1,0 +1,100 @@
+name: Bug report
+description: Something is broken or behaving unexpectedly.
+title: "bug: <short description>"
+labels: ["type:bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please fill out the sections below — issues without a clear reproduction often can't be acted on.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences describing the bug.
+      placeholder: "send_message returns 200 but message never arrives in WhatsApp."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Exact, minimal steps. Include commands, tool calls, or curl invocations.
+      placeholder: |
+        1. Start the bridge: `go run main.go`
+        2. From Claude Desktop, call `send_message` with `{...}`
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include error messages, stack traces, and bridge logs if relevant. Redact phone numbers.
+    validations:
+      required: true
+
+  - type: input
+    id: bridge-version
+    attributes:
+      label: Bridge version
+      description: "`./whatsapp-bridge --version` or git SHA"
+    validations:
+      required: true
+
+  - type: input
+    id: mcp-version
+    attributes:
+      label: MCP server version
+      description: From `whatsapp-mcp-server/pyproject.toml` or `pip show whatsapp-mcp-server`
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows (WSL)
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: client
+    attributes:
+      label: AI client
+      description: e.g. Claude Desktop 0.x, Cursor 1.x, custom MCP client
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste bridge / MCP server logs. Wrap in triple backticks. Redact phone numbers.
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing issues and didn't find a duplicate.
+          required: true
+        - label: I'm running the latest release (or `main`).
+          required: true
+        - label: I redacted phone numbers / message contents from logs.
+          required: true
