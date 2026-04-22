@@ -811,20 +811,10 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		return
 	}
 
-	// Auto-download media if present
-	if mediaType != "" && url != "" && len(mediaKey) > 0 {
-		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
-		go func() {
-			success, _, _, downloadPath, err := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
-			if success && err == nil {
-				logger.Infof("✅ Auto-downloaded media: %s", downloadPath)
-			} else {
-				logger.Warnf("❌ Auto-download failed: %v", err)
-			}
-		}()
-	}
-
-	// Store message in database
+	// Store message in database FIRST so the auto-download goroutine can find it.
+	// Previously the goroutine was launched before StoreMessage, which raced with
+	// the insert: if the goroutine ran first, downloadMedia's "SELECT ... WHERE
+	// id=?" returned no rows and silently dropped the media.
 	err = messageStore.StoreMessage(
 		msg.Info.ID,
 		chatJID,
@@ -840,6 +830,19 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		fileEncSHA256,
 		fileLength,
 	)
+
+	// Auto-download media if present, now that the DB row exists.
+	if err == nil && mediaType != "" && url != "" && len(mediaKey) > 0 {
+		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
+		go func() {
+			success, _, _, downloadPath, dlErr := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+			if success && dlErr == nil {
+				logger.Infof("✅ Auto-downloaded media: %s", downloadPath)
+			} else {
+				logger.Warnf("❌ Auto-download failed: %v", dlErr)
+			}
+		}()
+	}
 
 	// Send webhook for incoming messages
 	// Forward self-messages when FORWARD_SELF=true
