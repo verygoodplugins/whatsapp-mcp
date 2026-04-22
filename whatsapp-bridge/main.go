@@ -425,6 +425,491 @@ func (store *MessageStore) GetChats() (map[string]time.Time, error) {
 	return chats, nil
 }
 
+// ---- REST API query methods ----
+
+// ChatResponse represents a chat in JSON API responses.
+type ChatResponse struct {
+	JID             string      `json:"jid"`
+	Name            *string     `json:"name"`
+	IsGroup         bool        `json:"is_group"`
+	LastMessageTime *string     `json:"last_message_time"`
+	LastMessage     *string     `json:"last_message"`
+	LastSender      *string     `json:"last_sender"`
+	LastIsFromMe    *bool       `json:"last_is_from_me"`
+}
+
+// MessageResponse represents a message in JSON API responses.
+type MessageResponse struct {
+	ID        string  `json:"id"`
+	Timestamp string  `json:"timestamp"`
+	Sender    string  `json:"sender"`
+	ChatName  *string `json:"chat_name"`
+	Content   string  `json:"content"`
+	IsFromMe  bool    `json:"is_from_me"`
+	ChatJID   string  `json:"chat_jid"`
+	MediaType *string `json:"media_type"`
+}
+
+// ContactResponse represents a contact in JSON API responses.
+type ContactResponse struct {
+	PhoneNumber string  `json:"phone_number"`
+	Name        *string `json:"name"`
+	JID         string  `json:"jid"`
+}
+
+// MessageContextResponse represents message context in JSON API responses.
+type MessageContextResponse struct {
+	Message *MessageResponse  `json:"message"`
+	Before  []MessageResponse `json:"before"`
+	After   []MessageResponse `json:"after"`
+}
+
+func nullableString(s sql.NullString) *string {
+	if s.Valid {
+		return &s.String
+	}
+	return nil
+}
+
+func nullableBool(b sql.NullBool) *bool {
+	if b.Valid {
+		return &b.Bool
+	}
+	return nil
+}
+
+// ListChats returns chats matching the given filters.
+func (store *MessageStore) ListChats(query string, limit, offset int, includeLastMessage bool, sortBy string) ([]ChatResponse, error) {
+	queryParts := []string{`SELECT chats.jid, chats.name, chats.last_message_time`}
+	if includeLastMessage {
+		queryParts = append(queryParts, `, messages.content, messages.sender, messages.is_from_me`)
+	}
+	queryParts = append(queryParts, ` FROM chats`)
+	if includeLastMessage {
+		queryParts = append(queryParts, ` LEFT JOIN messages ON chats.jid = messages.chat_jid AND chats.last_message_time = messages.timestamp`)
+	}
+
+	var whereClauses []string
+	var params []interface{}
+
+	if query != "" {
+		whereClauses = append(whereClauses, `(LOWER(chats.name) LIKE LOWER(?) OR chats.jid LIKE ?)`)
+		pattern := "%" + query + "%"
+		params = append(params, pattern, pattern)
+	}
+
+	if len(whereClauses) > 0 {
+		queryParts = append(queryParts, " WHERE "+strings.Join(whereClauses, " AND "))
+	}
+
+	if sortBy == "name" {
+		queryParts = append(queryParts, ` ORDER BY chats.name`)
+	} else {
+		queryParts = append(queryParts, ` ORDER BY chats.last_message_time DESC`)
+	}
+
+	queryParts = append(queryParts, ` LIMIT ? OFFSET ?`)
+	params = append(params, limit, offset)
+
+	rows, err := store.db.Query(strings.Join(queryParts, ""), params...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	chats := make([]ChatResponse, 0)
+	for rows.Next() {
+		var c ChatResponse
+		var jid string
+		var name sql.NullString
+		var lastTime sql.NullString
+		var lastMsg sql.NullString
+		var lastSender sql.NullString
+		var lastFromMe sql.NullBool
+
+		if includeLastMessage {
+			err = rows.Scan(&jid, &name, &lastTime, &lastMsg, &lastSender, &lastFromMe)
+		} else {
+			err = rows.Scan(&jid, &name, &lastTime)
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		c.JID = jid
+		c.Name = nullableString(name)
+		c.IsGroup = strings.HasSuffix(jid, "@g.us")
+		c.LastMessageTime = nullableString(lastTime)
+		if includeLastMessage {
+			c.LastMessage = nullableString(lastMsg)
+			c.LastSender = nullableString(lastSender)
+			c.LastIsFromMe = nullableBool(lastFromMe)
+		}
+		chats = append(chats, c)
+	}
+	return chats, nil
+}
+
+// GetChatByJID returns a single chat by its JID.
+func (store *MessageStore) GetChatByJID(jid string, includeLastMessage bool) (*ChatResponse, error) {
+	queryParts := []string{`SELECT c.jid, c.name, c.last_message_time`}
+	if includeLastMessage {
+		queryParts = append(queryParts, `, m.content, m.sender, m.is_from_me`)
+	}
+	queryParts = append(queryParts, ` FROM chats c`)
+	if includeLastMessage {
+		queryParts = append(queryParts, ` LEFT JOIN messages m ON c.jid = m.chat_jid AND c.last_message_time = m.timestamp`)
+	}
+	queryParts = append(queryParts, ` WHERE c.jid = ?`)
+
+	var c ChatResponse
+	var name sql.NullString
+	var lastTime sql.NullString
+	var lastMsg sql.NullString
+	var lastSender sql.NullString
+	var lastFromMe sql.NullBool
+
+	var err error
+	row := store.db.QueryRow(strings.Join(queryParts, ""), jid)
+	if includeLastMessage {
+		err = row.Scan(&c.JID, &name, &lastTime, &lastMsg, &lastSender, &lastFromMe)
+	} else {
+		err = row.Scan(&c.JID, &name, &lastTime)
+	}
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	c.Name = nullableString(name)
+	c.IsGroup = strings.HasSuffix(c.JID, "@g.us")
+	c.LastMessageTime = nullableString(lastTime)
+	if includeLastMessage {
+		c.LastMessage = nullableString(lastMsg)
+		c.LastSender = nullableString(lastSender)
+		c.LastIsFromMe = nullableBool(lastFromMe)
+	}
+	return &c, nil
+}
+
+// GetDirectChatByPhone returns the direct (non-group) chat matching a phone number.
+func (store *MessageStore) GetDirectChatByPhone(phone string) (*ChatResponse, error) {
+	row := store.db.QueryRow(`
+		SELECT c.jid, c.name, c.last_message_time,
+		       m.content, m.sender, m.is_from_me
+		FROM chats c
+		LEFT JOIN messages m ON c.jid = m.chat_jid AND c.last_message_time = m.timestamp
+		WHERE c.jid LIKE ? AND c.jid NOT LIKE '%@g.us'
+		LIMIT 1
+	`, "%"+phone+"%")
+
+	var c ChatResponse
+	var name sql.NullString
+	var lastTime sql.NullString
+	var lastMsg sql.NullString
+	var lastSender sql.NullString
+	var lastFromMe sql.NullBool
+
+	err := row.Scan(&c.JID, &name, &lastTime, &lastMsg, &lastSender, &lastFromMe)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	c.Name = nullableString(name)
+	c.IsGroup = false
+	c.LastMessageTime = nullableString(lastTime)
+	c.LastMessage = nullableString(lastMsg)
+	c.LastSender = nullableString(lastSender)
+	c.LastIsFromMe = nullableBool(lastFromMe)
+	return &c, nil
+}
+
+// GetContactChats returns all chats involving a contact.
+func (store *MessageStore) GetContactChats(jid string, limit, offset int) ([]ChatResponse, error) {
+	rows, err := store.db.Query(`
+		SELECT DISTINCT c.jid, c.name, c.last_message_time,
+		       m.content, m.sender, m.is_from_me
+		FROM chats c
+		JOIN messages m ON c.jid = m.chat_jid
+		WHERE m.sender = ? OR c.jid = ?
+		ORDER BY c.last_message_time DESC
+		LIMIT ? OFFSET ?
+	`, jid, jid, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	chats := make([]ChatResponse, 0)
+	for rows.Next() {
+		var c ChatResponse
+		var name sql.NullString
+		var lastTime sql.NullString
+		var lastMsg sql.NullString
+		var lastSender sql.NullString
+		var lastFromMe sql.NullBool
+
+		if err := rows.Scan(&c.JID, &name, &lastTime, &lastMsg, &lastSender, &lastFromMe); err != nil {
+			return nil, err
+		}
+		c.Name = nullableString(name)
+		c.IsGroup = strings.HasSuffix(c.JID, "@g.us")
+		c.LastMessageTime = nullableString(lastTime)
+		c.LastMessage = nullableString(lastMsg)
+		c.LastSender = nullableString(lastSender)
+		c.LastIsFromMe = nullableBool(lastFromMe)
+		chats = append(chats, c)
+	}
+	return chats, nil
+}
+
+// ListMessages returns messages matching the given filters.
+func (store *MessageStore) ListMessages(chatJID, sender, search, after, before, sortBy string, limit, offset int) ([]MessageResponse, error) {
+	queryParts := []string{`SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type FROM messages JOIN chats ON messages.chat_jid = chats.jid`}
+
+	var whereClauses []string
+	var params []interface{}
+
+	if chatJID != "" {
+		whereClauses = append(whereClauses, `messages.chat_jid = ?`)
+		params = append(params, chatJID)
+	}
+	if sender != "" {
+		whereClauses = append(whereClauses, `messages.sender = ?`)
+		params = append(params, sender)
+	}
+	if search != "" {
+		whereClauses = append(whereClauses, `LOWER(messages.content) LIKE LOWER(?)`)
+		params = append(params, "%"+search+"%")
+	}
+	if after != "" {
+		whereClauses = append(whereClauses, `messages.timestamp > ?`)
+		params = append(params, after)
+	}
+	if before != "" {
+		whereClauses = append(whereClauses, `messages.timestamp < ?`)
+		params = append(params, before)
+	}
+
+	if len(whereClauses) > 0 {
+		queryParts = append(queryParts, " WHERE "+strings.Join(whereClauses, " AND "))
+	}
+
+	order := "DESC"
+	if sortBy == "oldest" {
+		order = "ASC"
+	}
+	queryParts = append(queryParts, fmt.Sprintf(` ORDER BY messages.timestamp %s`, order))
+	queryParts = append(queryParts, ` LIMIT ? OFFSET ?`)
+	params = append(params, limit, offset)
+
+	rows, err := store.db.Query(strings.Join(queryParts, ""), params...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	messages := make([]MessageResponse, 0)
+	for rows.Next() {
+		var m MessageResponse
+		var chatName sql.NullString
+		var mediaType sql.NullString
+		if err := rows.Scan(&m.Timestamp, &m.Sender, &chatName, &m.Content, &m.IsFromMe, &m.ChatJID, &m.ID, &mediaType); err != nil {
+			return nil, err
+		}
+		m.ChatName = nullableString(chatName)
+		m.MediaType = nullableString(mediaType)
+		messages = append(messages, m)
+	}
+	return messages, nil
+}
+
+// GetMessageContext returns a message and surrounding context.
+func (store *MessageStore) GetMessageContext(messageID string, beforeCount, afterCount int) (*MessageContextResponse, error) {
+	// Get target message
+	row := store.db.QueryRow(`
+		SELECT messages.timestamp, messages.sender, chats.name, messages.content,
+		       messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type
+		FROM messages
+		JOIN chats ON messages.chat_jid = chats.jid
+		WHERE messages.id = ?
+	`, messageID)
+
+	var target MessageResponse
+	var chatName sql.NullString
+	var mediaType sql.NullString
+	var chatJID string
+	var timestamp string
+
+	err := row.Scan(&timestamp, &target.Sender, &chatName, &target.Content, &target.IsFromMe, &target.ChatJID, &target.ID, &chatJID, &mediaType)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	target.Timestamp = timestamp
+	target.ChatName = nullableString(chatName)
+	target.MediaType = nullableString(mediaType)
+
+	// Get messages before
+	beforeRows, err := store.db.Query(`
+		SELECT messages.timestamp, messages.sender, chats.name, messages.content,
+		       messages.is_from_me, chats.jid, messages.id, messages.media_type
+		FROM messages
+		JOIN chats ON messages.chat_jid = chats.jid
+		WHERE messages.chat_jid = ? AND messages.timestamp < ?
+		ORDER BY messages.timestamp DESC
+		LIMIT ?
+	`, chatJID, timestamp, beforeCount)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = beforeRows.Close() }()
+
+	beforeMsgs := make([]MessageResponse, 0)
+	for beforeRows.Next() {
+		var m MessageResponse
+		var cn sql.NullString
+		var mt sql.NullString
+		if err := beforeRows.Scan(&m.Timestamp, &m.Sender, &cn, &m.Content, &m.IsFromMe, &m.ChatJID, &m.ID, &mt); err != nil {
+			return nil, err
+		}
+		m.ChatName = nullableString(cn)
+		m.MediaType = nullableString(mt)
+		beforeMsgs = append(beforeMsgs, m)
+	}
+	// Reverse before messages to chronological order
+	for i, j := 0, len(beforeMsgs)-1; i < j; i, j = i+1, j-1 {
+		beforeMsgs[i], beforeMsgs[j] = beforeMsgs[j], beforeMsgs[i]
+	}
+
+	// Get messages after
+	afterRows, err := store.db.Query(`
+		SELECT messages.timestamp, messages.sender, chats.name, messages.content,
+		       messages.is_from_me, chats.jid, messages.id, messages.media_type
+		FROM messages
+		JOIN chats ON messages.chat_jid = chats.jid
+		WHERE messages.chat_jid = ? AND messages.timestamp > ?
+		ORDER BY messages.timestamp ASC
+		LIMIT ?
+	`, chatJID, timestamp, afterCount)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = afterRows.Close() }()
+
+	afterMsgs := make([]MessageResponse, 0)
+	for afterRows.Next() {
+		var m MessageResponse
+		var cn sql.NullString
+		var mt sql.NullString
+		if err := afterRows.Scan(&m.Timestamp, &m.Sender, &cn, &m.Content, &m.IsFromMe, &m.ChatJID, &m.ID, &mt); err != nil {
+			return nil, err
+		}
+		m.ChatName = nullableString(cn)
+		m.MediaType = nullableString(mt)
+		afterMsgs = append(afterMsgs, m)
+	}
+
+	return &MessageContextResponse{
+		Message: &target,
+		Before:  beforeMsgs,
+		After:   afterMsgs,
+	}, nil
+}
+
+// GetLastInteraction returns the most recent message involving a contact.
+func (store *MessageStore) GetLastInteraction(jid string) (*MessageResponse, error) {
+	row := store.db.QueryRow(`
+		SELECT m.timestamp, m.sender, c.name, m.content, m.is_from_me,
+		       c.jid, m.id, m.media_type
+		FROM messages m
+		JOIN chats c ON m.chat_jid = c.jid
+		WHERE m.sender = ? OR c.jid = ?
+		ORDER BY m.timestamp DESC
+		LIMIT 1
+	`, jid, jid)
+
+	var m MessageResponse
+	var chatName sql.NullString
+	var mediaType sql.NullString
+
+	err := row.Scan(&m.Timestamp, &m.Sender, &chatName, &m.Content, &m.IsFromMe, &m.ChatJID, &m.ID, &mediaType)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	m.ChatName = nullableString(chatName)
+	m.MediaType = nullableString(mediaType)
+	return &m, nil
+}
+
+// SearchContacts searches contacts by name or phone number.
+func (store *MessageStore) SearchContacts(query string) ([]ContactResponse, error) {
+	pattern := "%" + query + "%"
+	rows, err := store.db.Query(`
+		SELECT DISTINCT jid, name
+		FROM chats
+		WHERE (LOWER(name) LIKE LOWER(?) OR LOWER(jid) LIKE LOWER(?))
+		  AND jid NOT LIKE '%@g.us'
+		ORDER BY name, jid
+		LIMIT 50
+	`, pattern, pattern)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	contacts := make([]ContactResponse, 0)
+	for rows.Next() {
+		var jid string
+		var name sql.NullString
+		if err := rows.Scan(&jid, &name); err != nil {
+			return nil, err
+		}
+		phone := jid
+		if idx := strings.Index(jid, "@"); idx >= 0 {
+			phone = jid[:idx]
+		}
+		contacts = append(contacts, ContactResponse{
+			PhoneNumber: phone,
+			Name:        nullableString(name),
+			JID:         jid,
+		})
+	}
+	return contacts, nil
+}
+
+// GetSenderName resolves a sender JID to a display name.
+func (store *MessageStore) GetSenderName(senderJID string) (string, error) {
+	// First try exact JID match
+	var name sql.NullString
+	err := store.db.QueryRow(`SELECT name FROM chats WHERE jid = ? LIMIT 1`, senderJID).Scan(&name)
+	if err == nil && name.Valid && name.String != "" {
+		return name.String, nil
+	}
+
+	// Try partial match by phone number
+	phonePart := senderJID
+	if idx := strings.Index(senderJID, "@"); idx >= 0 {
+		phonePart = senderJID[:idx]
+	}
+	err = store.db.QueryRow(`SELECT name FROM chats WHERE jid LIKE ? LIMIT 1`, "%"+phonePart+"%").Scan(&name)
+	if err == nil && name.Valid && name.String != "" {
+		return name.String, nil
+	}
+
+	return senderJID, nil
+}
+
 // Extract text content from a message
 func extractTextContent(msg *waProto.Message) string {
 	if msg == nil {
@@ -1285,6 +1770,246 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 				"message": fmt.Sprintf("Typing indicator set to %v", req.IsTyping),
 			})
 		}
+	})
+
+	// GET /api/chats - List chats from SQLite
+	http.HandleFunc("/api/chats", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		q := r.URL.Query()
+		query := q.Get("query")
+		limitStr := q.Get("limit")
+		pageStr := q.Get("page")
+		includeLast := q.Get("include_last_message")
+		sortBy := q.Get("sort_by")
+		jid := q.Get("jid")
+		contactJID := q.Get("contact_jid")
+		phone := q.Get("phone")
+
+		limit := 20
+		if limitStr != "" {
+			if v, err := strconv.Atoi(limitStr); err == nil && v > 0 {
+				limit = v
+			}
+		}
+		page := 0
+		if pageStr != "" {
+			if v, err := strconv.Atoi(pageStr); err == nil && v >= 0 {
+				page = v
+			}
+		}
+		includeLastMessage := true
+		if includeLast == "false" || includeLast == "0" {
+			includeLastMessage = false
+		}
+		if sortBy == "" {
+			sortBy = "last_active"
+		}
+		offset := page * limit
+
+		// Single chat lookup by JID
+		if jid != "" {
+			chat, err := messageStore.GetChatByJID(jid, includeLastMessage)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+				return
+			}
+			if chat == nil {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": "chat not found"})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(chat)
+			return
+		}
+
+		// Direct chat lookup by phone number
+		if phone != "" {
+			chat, err := messageStore.GetDirectChatByPhone(phone)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+				return
+			}
+			if chat == nil {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": "chat not found"})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(chat)
+			return
+		}
+
+		// Chats involving a specific contact
+		if contactJID != "" {
+			chats, err := messageStore.GetContactChats(contactJID, limit, offset)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(chats)
+			return
+		}
+
+		// General chat listing
+		chats, err := messageStore.ListChats(query, limit, offset, includeLastMessage, sortBy)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(chats)
+	})
+
+	// GET /api/messages - List messages with filters
+	http.HandleFunc("/api/messages", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		q := r.URL.Query()
+		chatJID := q.Get("chat_jid")
+		limitStr := q.Get("limit")
+		pageStr := q.Get("page")
+		after := q.Get("after")
+		before := q.Get("before")
+		sender := q.Get("sender")
+		query := q.Get("query")
+		sortBy := q.Get("sort_by")
+		messageID := q.Get("message_id")
+		jid := q.Get("jid")
+
+		limit := 20
+		if limitStr != "" {
+			if v, err := strconv.Atoi(limitStr); err == nil && v > 0 {
+				limit = v
+			}
+		}
+		page := 0
+		if pageStr != "" {
+			if v, err := strconv.Atoi(pageStr); err == nil && v >= 0 {
+				page = v
+			}
+		}
+		if sortBy == "" {
+			sortBy = "newest"
+		}
+		offset := page * limit
+
+		// Message context lookup
+		if messageID != "" {
+			beforeCount := 5
+			afterCount := 5
+			if v := q.Get("before_count"); v != "" {
+				if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+					beforeCount = n
+				}
+			}
+			if v := q.Get("after_count"); v != "" {
+				if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+					afterCount = n
+				}
+			}
+			ctx, err := messageStore.GetMessageContext(messageID, beforeCount, afterCount)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+				return
+			}
+			if ctx == nil {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": "message not found"})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(ctx)
+			return
+		}
+
+		// Last interaction with a contact
+		if jid != "" {
+			msg, err := messageStore.GetLastInteraction(jid)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+				return
+			}
+			if msg == nil {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": "no messages found"})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(msg)
+			return
+		}
+
+		// General message listing
+		messages, err := messageStore.ListMessages(chatJID, sender, query, after, before, sortBy, limit, offset)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(messages)
+	})
+
+	// GET /api/contacts - Search contacts by name or phone
+	http.HandleFunc("/api/contacts", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		query := r.URL.Query().Get("query")
+		if query == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": "query parameter is required"})
+			return
+		}
+
+		contacts, err := messageStore.SearchContacts(query)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(contacts)
+	})
+
+	// GET /api/sender-name - Resolve sender JID to display name
+	http.HandleFunc("/api/sender-name", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		jid := r.URL.Query().Get("jid")
+		if jid == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": "jid parameter is required"})
+			return
+		}
+
+		name, err := messageStore.GetSenderName(jid)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"name": name})
 	})
 
 	// Start the server with proper timeouts

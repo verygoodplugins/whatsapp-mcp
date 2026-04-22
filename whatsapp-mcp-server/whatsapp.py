@@ -1,7 +1,6 @@
 import json
 import os
 import os.path
-import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -11,10 +10,6 @@ import requests
 import audio
 
 # Configuration via environment variables with sensible defaults
-MESSAGES_DB_PATH = os.getenv(
-    "WHATSAPP_DB_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store", "messages.db"),
-)
 WHATSAPP_API_BASE_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:8080/api")
 
 
@@ -113,55 +108,33 @@ def contact_to_dict(contact: "Contact") -> dict[str, Any]:
     return {"phone_number": contact.phone_number, "name": contact.name, "jid": contact.jid}
 
 
+def _api_response_to_message(data: dict) -> Message:
+    """Convert an API message response dict to a Message dataclass."""
+    return Message(
+        timestamp=datetime.fromisoformat(data["timestamp"]),
+        sender=data["sender"],
+        chat_name=data.get("chat_name"),
+        content=data.get("content", ""),
+        is_from_me=data.get("is_from_me", False),
+        chat_jid=data.get("chat_jid", ""),
+        id=data.get("id", ""),
+        media_type=data.get("media_type"),
+    )
+
+
 def get_sender_name(sender_jid: str) -> str:
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
-        cursor = conn.cursor()
-
-        # First try matching by exact JID
-        cursor.execute(
-            """
-            SELECT name
-            FROM chats
-            WHERE jid = ?
-            LIMIT 1
-        """,
-            (sender_jid,),
+        response = requests.get(
+            f"{WHATSAPP_API_BASE_URL}/sender-name",
+            params={"jid": sender_jid},
         )
-
-        result = cursor.fetchone()
-
-        # If no result, try looking for the number within JIDs
-        if not result:
-            # Extract the phone number part if it's a JID
-            if "@" in sender_jid:
-                phone_part = sender_jid.split("@")[0]
-            else:
-                phone_part = sender_jid
-
-            cursor.execute(
-                """
-                SELECT name
-                FROM chats
-                WHERE jid LIKE ?
-                LIMIT 1
-            """,
-                (f"%{phone_part}%",),
-            )
-
-            result = cursor.fetchone()
-
-        if result and result[0]:
-            return result[0]
-        else:
-            return sender_jid
-
-    except sqlite3.Error as e:
-        print(f"Database error while getting sender name: {e}")
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("name", sender_jid)
         return sender_jid
-    finally:
-        if "conn" in locals():
-            conn.close()
+    except requests.RequestException as e:
+        print(f"API error while getting sender name: {e}")
+        return sender_jid
 
 
 def format_message(message: Message, show_chat_info: bool = True) -> None:
@@ -209,93 +182,38 @@ def list_messages(
     context_after: int = 1,
     sort_by: str = "newest",
 ) -> list[dict[str, Any]]:
-    """Get messages matching the specified criteria with optional context.
-
-    Args:
-        after: Optional ISO-8601 formatted string to only return messages after this date
-        before: Optional ISO-8601 formatted string to only return messages before this date
-        sender_phone_number: Optional phone number to filter messages by sender
-        chat_jid: Optional chat JID to filter messages by chat
-        query: Optional search term to filter messages by content
-        limit: Maximum number of messages to return (default 20)
-        page: Page number for pagination (default 0)
-        include_context: Whether to include messages before and after matches (default True)
-        context_before: Number of messages to include before each match (default 1)
-        context_after: Number of messages to include after each match (default 1)
-        sort_by: Sort order - "newest" (default) or "oldest" for chronological ordering
-
-    Returns:
-        List of message dictionaries with id, timestamp, sender, content, etc.
-    """
+    """Get messages matching the specified criteria with optional context."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
-        cursor = conn.cursor()
-
-        # Build base query
-        query_parts = [
-            "SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type FROM messages"
-        ]
-        query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
-        where_clauses = []
-        params = []
-
-        # Add filters
+        # Validate date formats before sending to API
         if after:
             try:
-                after = datetime.fromisoformat(after)
+                datetime.fromisoformat(after)
             except ValueError:
                 raise ValueError(f"Invalid date format for 'after': {after}. Please use ISO-8601 format.")
 
-            where_clauses.append("messages.timestamp > ?")
-            params.append(after)
-
         if before:
             try:
-                before = datetime.fromisoformat(before)
+                datetime.fromisoformat(before)
             except ValueError:
                 raise ValueError(f"Invalid date format for 'before': {before}. Please use ISO-8601 format.")
 
-            where_clauses.append("messages.timestamp < ?")
-            params.append(before)
-
+        params: dict[str, Any] = {"limit": limit, "page": page, "sort_by": sort_by}
+        if after:
+            params["after"] = after
+        if before:
+            params["before"] = before
         if sender_phone_number:
-            where_clauses.append("messages.sender = ?")
-            params.append(sender_phone_number)
-
+            params["sender"] = sender_phone_number
         if chat_jid:
-            where_clauses.append("messages.chat_jid = ?")
-            params.append(chat_jid)
-
+            params["chat_jid"] = chat_jid
         if query:
-            where_clauses.append("LOWER(messages.content) LIKE LOWER(?)")
-            params.append(f"%{query}%")
+            params["query"] = query
 
-        if where_clauses:
-            query_parts.append("WHERE " + " AND ".join(where_clauses))
+        response = requests.get(f"{WHATSAPP_API_BASE_URL}/messages", params=params)
+        response.raise_for_status()
+        messages_data = response.json()
 
-        # Add sorting and pagination
-        offset = page * limit
-        order = "DESC" if sort_by == "newest" else "ASC"
-        query_parts.append(f"ORDER BY messages.timestamp {order}")
-        query_parts.append("LIMIT ? OFFSET ?")
-        params.extend([limit, offset])
-
-        cursor.execute(" ".join(query_parts), tuple(params))
-        messages = cursor.fetchall()
-
-        result = []
-        for msg in messages:
-            message = Message(
-                timestamp=datetime.fromisoformat(msg[0]),
-                sender=msg[1],
-                chat_name=msg[2],
-                content=msg[3],
-                is_from_me=msg[4],
-                chat_jid=msg[5],
-                id=msg[6],
-                media_type=msg[7],
-            )
-            result.append(message)
+        result = [_api_response_to_message(m) for m in messages_data]
 
         if include_context and result:
             # Add context for each message, deduplicated by message ID
@@ -320,110 +238,34 @@ def list_messages(
         # Return messages without context
         return [msg_to_dict(msg) for msg in result]
 
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    except requests.RequestException as e:
+        print(f"API error: {e}")
         return []
-    finally:
-        if "conn" in locals():
-            conn.close()
 
 
 def get_message_context(message_id: str, before: int = 5, after: int = 5) -> MessageContext:
     """Get context around a specific message."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
-        cursor = conn.cursor()
-
-        # Get the target message first
-        cursor.execute(
-            """
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type
-            FROM messages
-            JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.id = ?
-        """,
-            (message_id,),
+        response = requests.get(
+            f"{WHATSAPP_API_BASE_URL}/messages",
+            params={"message_id": message_id, "before_count": before, "after_count": after},
         )
-        msg_data = cursor.fetchone()
+        response.raise_for_status()
+        data = response.json()
 
-        if not msg_data:
-            raise ValueError(f"Message with ID {message_id} not found")
+        if "error" in data:
+            raise ValueError(data["error"])
 
-        target_message = Message(
-            timestamp=datetime.fromisoformat(msg_data[0]),
-            sender=msg_data[1],
-            chat_name=msg_data[2],
-            content=msg_data[3],
-            is_from_me=msg_data[4],
-            chat_jid=msg_data[5],
-            id=msg_data[6],
-            media_type=msg_data[8],
-        )
+        target_message = _api_response_to_message(data["message"])
 
-        # Get messages before
-        cursor.execute(
-            """
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
-            FROM messages
-            JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.chat_jid = ? AND messages.timestamp < ?
-            ORDER BY messages.timestamp DESC
-            LIMIT ?
-        """,
-            (msg_data[7], msg_data[0], before),
-        )
-
-        before_messages = []
-        for msg in cursor.fetchall():
-            before_messages.append(
-                Message(
-                    timestamp=datetime.fromisoformat(msg[0]),
-                    sender=msg[1],
-                    chat_name=msg[2],
-                    content=msg[3],
-                    is_from_me=msg[4],
-                    chat_jid=msg[5],
-                    id=msg[6],
-                    media_type=msg[7],
-                )
-            )
-
-        # Get messages after
-        cursor.execute(
-            """
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
-            FROM messages
-            JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.chat_jid = ? AND messages.timestamp > ?
-            ORDER BY messages.timestamp ASC
-            LIMIT ?
-        """,
-            (msg_data[7], msg_data[0], after),
-        )
-
-        after_messages = []
-        for msg in cursor.fetchall():
-            after_messages.append(
-                Message(
-                    timestamp=datetime.fromisoformat(msg[0]),
-                    sender=msg[1],
-                    chat_name=msg[2],
-                    content=msg[3],
-                    is_from_me=msg[4],
-                    chat_jid=msg[5],
-                    id=msg[6],
-                    media_type=msg[7],
-                )
-            )
+        before_messages = [_api_response_to_message(m) for m in data.get("before", [])]
+        after_messages = [_api_response_to_message(m) for m in data.get("after", [])]
 
         return MessageContext(message=target_message, before=before_messages, after=after_messages)
 
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    except requests.RequestException as e:
+        print(f"API error: {e}")
         raise
-    finally:
-        if "conn" in locals():
-            conn.close()
 
 
 def list_chats(
@@ -433,331 +275,112 @@ def list_chats(
     include_last_message: bool = True,
     sort_by: str = "last_active",
 ) -> list[dict[str, Any]]:
-    """Get chats matching the specified criteria.
-
-    Returns:
-        List of chat dictionaries with jid, name, is_group, last_message, etc.
-    """
+    """Get chats matching the specified criteria."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
-        cursor = conn.cursor()
-
-        # Build base query
-        query_parts = [
-            """
-            SELECT
-                chats.jid,
-                chats.name,
-                chats.last_message_time,
-                messages.content as last_message,
-                messages.sender as last_sender,
-                messages.is_from_me as last_is_from_me
-            FROM chats
-        """
-        ]
-
-        if include_last_message:
-            query_parts.append("""
-                LEFT JOIN messages ON chats.jid = messages.chat_jid
-                AND chats.last_message_time = messages.timestamp
-            """)
-
-        where_clauses = []
-        params = []
-
+        params: dict[str, Any] = {
+            "limit": limit,
+            "page": page,
+            "include_last_message": "true" if include_last_message else "false",
+            "sort_by": sort_by,
+        }
         if query:
-            where_clauses.append("(LOWER(chats.name) LIKE LOWER(?) OR chats.jid LIKE ?)")
-            params.extend([f"%{query}%", f"%{query}%"])
+            params["query"] = query
 
-        if where_clauses:
-            query_parts.append("WHERE " + " AND ".join(where_clauses))
+        response = requests.get(f"{WHATSAPP_API_BASE_URL}/chats", params=params)
+        response.raise_for_status()
+        return response.json()
 
-        # Add sorting
-        order_by = "chats.last_message_time DESC" if sort_by == "last_active" else "chats.name"
-        query_parts.append(f"ORDER BY {order_by}")
-
-        # Add pagination
-        offset = (page) * limit
-        query_parts.append("LIMIT ? OFFSET ?")
-        params.extend([limit, offset])
-
-        cursor.execute(" ".join(query_parts), tuple(params))
-        chats = cursor.fetchall()
-
-        result = []
-        for chat_data in chats:
-            chat = Chat(
-                jid=chat_data[0],
-                name=chat_data[1],
-                last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-                last_message=chat_data[3],
-                last_sender=chat_data[4],
-                last_is_from_me=chat_data[5],
-            )
-            result.append(chat_to_dict(chat))
-
-        return result
-
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    except requests.RequestException as e:
+        print(f"API error: {e}")
         return []
-    finally:
-        if "conn" in locals():
-            conn.close()
 
 
 def search_contacts(query: str) -> list[dict[str, Any]]:
     """Search contacts by name or phone number."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
-        cursor = conn.cursor()
-
-        # Split query into characters to support partial matching
-        search_pattern = "%" + query + "%"
-
-        cursor.execute(
-            """
-            SELECT DISTINCT
-                jid,
-                name
-            FROM chats
-            WHERE
-                (LOWER(name) LIKE LOWER(?) OR LOWER(jid) LIKE LOWER(?))
-                AND jid NOT LIKE '%@g.us'
-            ORDER BY name, jid
-            LIMIT 50
-        """,
-            (search_pattern, search_pattern),
+        response = requests.get(
+            f"{WHATSAPP_API_BASE_URL}/contacts",
+            params={"query": query},
         )
+        response.raise_for_status()
+        return response.json()
 
-        contacts = cursor.fetchall()
-
-        result = []
-        for contact_data in contacts:
-            contact = Contact(phone_number=contact_data[0].split("@")[0], name=contact_data[1], jid=contact_data[0])
-            result.append(contact_to_dict(contact))
-
-        return result
-
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    except requests.RequestException as e:
+        print(f"API error: {e}")
         return []
-    finally:
-        if "conn" in locals():
-            conn.close()
 
 
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str, Any]]:
-    """Get all chats involving the contact.
-
-    Args:
-        jid: The contact's JID to search for
-        limit: Maximum number of chats to return (default 20)
-        page: Page number for pagination (default 0)
-    """
+    """Get all chats involving the contact."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
-        cursor = conn.cursor()
-
-        cursor.execute(
-            """
-            SELECT DISTINCT
-                c.jid,
-                c.name,
-                c.last_message_time,
-                m.content as last_message,
-                m.sender as last_sender,
-                m.is_from_me as last_is_from_me
-            FROM chats c
-            JOIN messages m ON c.jid = m.chat_jid
-            WHERE m.sender = ? OR c.jid = ?
-            ORDER BY c.last_message_time DESC
-            LIMIT ? OFFSET ?
-        """,
-            (jid, jid, limit, page * limit),
+        response = requests.get(
+            f"{WHATSAPP_API_BASE_URL}/chats",
+            params={"contact_jid": jid, "limit": limit, "page": page},
         )
+        response.raise_for_status()
+        return response.json()
 
-        chats = cursor.fetchall()
-
-        result = []
-        for chat_data in chats:
-            chat = Chat(
-                jid=chat_data[0],
-                name=chat_data[1],
-                last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-                last_message=chat_data[3],
-                last_sender=chat_data[4],
-                last_is_from_me=chat_data[5],
-            )
-            result.append(chat_to_dict(chat))
-
-        return result
-
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    except requests.RequestException as e:
+        print(f"API error: {e}")
         return []
-    finally:
-        if "conn" in locals():
-            conn.close()
 
 
 def get_last_interaction(jid: str) -> dict[str, Any] | None:
-    """Get most recent message involving the contact.
-
-    Args:
-        jid: The JID of the contact to search for
-
-    Returns:
-        Message dictionary or None if no messages found
-    """
+    """Get most recent message involving the contact."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
-        cursor = conn.cursor()
-
-        cursor.execute(
-            """
-            SELECT
-                m.timestamp,
-                m.sender,
-                c.name,
-                m.content,
-                m.is_from_me,
-                c.jid,
-                m.id,
-                m.media_type
-            FROM messages m
-            JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.sender = ? OR c.jid = ?
-            ORDER BY m.timestamp DESC
-            LIMIT 1
-        """,
-            (jid, jid),
+        response = requests.get(
+            f"{WHATSAPP_API_BASE_URL}/messages",
+            params={"jid": jid},
         )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        data = response.json()
 
-        msg_data = cursor.fetchone()
-
-        if not msg_data:
+        if "error" in data:
             return None
 
-        message = Message(
-            timestamp=datetime.fromisoformat(msg_data[0]),
-            sender=msg_data[1],
-            chat_name=msg_data[2],
-            content=msg_data[3],
-            is_from_me=msg_data[4],
-            chat_jid=msg_data[5],
-            id=msg_data[6],
-            media_type=msg_data[7],
-        )
-
+        message = _api_response_to_message(data)
         return msg_to_dict(message)
 
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    except requests.RequestException as e:
+        print(f"API error: {e}")
         return None
-    finally:
-        if "conn" in locals():
-            conn.close()
 
 
 def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any] | None:
-    """Get chat metadata by JID.
-
-    Returns:
-        Chat dictionary or None if not found
-    """
+    """Get chat metadata by JID."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
-        cursor = conn.cursor()
-
-        query = """
-            SELECT
-                c.jid,
-                c.name,
-                c.last_message_time,
-                m.content as last_message,
-                m.sender as last_sender,
-                m.is_from_me as last_is_from_me
-            FROM chats c
-        """
-
-        if include_last_message:
-            query += """
-                LEFT JOIN messages m ON c.jid = m.chat_jid
-                AND c.last_message_time = m.timestamp
-            """
-
-        query += " WHERE c.jid = ?"
-
-        cursor.execute(query, (chat_jid,))
-        chat_data = cursor.fetchone()
-
-        if not chat_data:
+        params: dict[str, Any] = {
+            "jid": chat_jid,
+            "include_last_message": "true" if include_last_message else "false",
+        }
+        response = requests.get(f"{WHATSAPP_API_BASE_URL}/chats", params=params)
+        if response.status_code == 404:
             return None
+        response.raise_for_status()
+        return response.json()
 
-        chat = Chat(
-            jid=chat_data[0],
-            name=chat_data[1],
-            last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-            last_message=chat_data[3],
-            last_sender=chat_data[4],
-            last_is_from_me=chat_data[5],
-        )
-        return chat_to_dict(chat)
-
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    except requests.RequestException as e:
+        print(f"API error: {e}")
         return None
-    finally:
-        if "conn" in locals():
-            conn.close()
 
 
 def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | None:
     """Get chat metadata by sender phone number."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
-        cursor = conn.cursor()
-
-        cursor.execute(
-            """
-            SELECT
-                c.jid,
-                c.name,
-                c.last_message_time,
-                m.content as last_message,
-                m.sender as last_sender,
-                m.is_from_me as last_is_from_me
-            FROM chats c
-            LEFT JOIN messages m ON c.jid = m.chat_jid
-                AND c.last_message_time = m.timestamp
-            WHERE c.jid LIKE ? AND c.jid NOT LIKE '%@g.us'
-            LIMIT 1
-        """,
-            (f"%{sender_phone_number}%",),
+        response = requests.get(
+            f"{WHATSAPP_API_BASE_URL}/chats",
+            params={"phone": sender_phone_number},
         )
-
-        chat_data = cursor.fetchone()
-
-        if not chat_data:
+        if response.status_code == 404:
             return None
+        response.raise_for_status()
+        return response.json()
 
-        chat = Chat(
-            jid=chat_data[0],
-            name=chat_data[1],
-            last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-            last_message=chat_data[3],
-            last_sender=chat_data[4],
-            last_is_from_me=chat_data[5],
-        )
-        return chat_to_dict(chat)
-
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    except requests.RequestException as e:
+        print(f"API error: {e}")
         return None
-    finally:
-        if "conn" in locals():
-            conn.close()
 
 
 def send_message(recipient: str, message: str) -> tuple[bool, str]:
