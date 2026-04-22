@@ -394,8 +394,10 @@ def list_messages(
             params.append(chat_jid)
 
         if query:
-            where_clauses.append("LOWER(messages.content) LIKE LOWER(?)")
-            params.append(f"%{query}%")
+            # SQLite's LOWER() only handles ASCII, so LIKE LOWER(...) silently
+            # excludes Unicode matches. instr() on the raw column preserves them.
+            where_clauses.append("(instr(LOWER(messages.content), LOWER(?)) > 0 OR instr(messages.content, ?) > 0)")
+            params.extend([query, query])
 
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
@@ -593,8 +595,11 @@ def list_chats(
         params = []
 
         if query:
-            where_clauses.append("(LOWER(chats.name) LIKE LOWER(?) OR chats.jid LIKE ?)")
-            params.extend([f"%{query}%", f"%{query}%"])
+            # instr() on the raw column matches Unicode; LOWER()+LIKE only covers ASCII.
+            where_clauses.append(
+                "(instr(LOWER(chats.name), LOWER(?)) > 0 OR instr(chats.name, ?) > 0 OR chats.jid LIKE ?)"
+            )
+            params.extend([query, query, f"%{query}%"])
 
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
@@ -641,7 +646,9 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     """
     seen_jids: set[str] = set()
     result: list[dict[str, Any]] = []
-    search_pattern = "%" + query + "%"
+    # JIDs are all ASCII so LIKE is safe; names use instr() because SQLite's
+    # LOWER() only folds case for ASCII and would drop Unicode matches.
+    jid_pattern = "%" + query + "%"
 
     # 1) Search messages.db chats table (existing behavior)
     try:
@@ -652,12 +659,12 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
             SELECT DISTINCT jid, name
             FROM chats
             WHERE
-                (LOWER(name) LIKE LOWER(?) OR LOWER(jid) LIKE LOWER(?))
+                (instr(LOWER(name), LOWER(?)) > 0 OR instr(name, ?) > 0 OR jid LIKE ?)
                 AND jid NOT LIKE '%@g.us'
             ORDER BY name, jid
             LIMIT 50
         """,
-            (search_pattern, search_pattern),
+            (query, query, jid_pattern),
         )
         for jid, name in cursor.fetchall():
             if jid not in seen_jids:
@@ -680,14 +687,14 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
                 SELECT their_jid, full_name, push_name, first_name, business_name
                 FROM whatsmeow_contacts
                 WHERE
-                    LOWER(full_name) LIKE LOWER(?)
-                    OR LOWER(push_name) LIKE LOWER(?)
-                    OR LOWER(first_name) LIKE LOWER(?)
-                    OR LOWER(business_name) LIKE LOWER(?)
+                    instr(LOWER(full_name), LOWER(?)) > 0 OR instr(full_name, ?) > 0
+                    OR instr(LOWER(push_name), LOWER(?)) > 0 OR instr(push_name, ?) > 0
+                    OR instr(LOWER(first_name), LOWER(?)) > 0 OR instr(first_name, ?) > 0
+                    OR instr(LOWER(business_name), LOWER(?)) > 0 OR instr(business_name, ?) > 0
                     OR their_jid LIKE ?
                 LIMIT 50
             """,
-                (search_pattern, search_pattern, search_pattern, search_pattern, search_pattern),
+                (query, query, query, query, query, query, query, query, jid_pattern),
             )
             for their_jid, full_name, push_name, first_name, business_name in cursor2.fetchall():
                 if their_jid not in seen_jids:
