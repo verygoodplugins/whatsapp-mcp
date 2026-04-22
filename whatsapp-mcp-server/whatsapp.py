@@ -130,15 +130,11 @@ def _sender_aliases(value: str) -> list[str]:
         try:
             conn = sqlite3.connect(WHATSMEOW_DB_PATH)
             try:
-                row = conn.execute(
-                    "SELECT lid FROM whatsmeow_lid_map WHERE pn = ?", (bare,)
-                ).fetchone()
+                row = conn.execute("SELECT lid FROM whatsmeow_lid_map WHERE pn = ?", (bare,)).fetchone()
                 if row:
                     pn, lid = bare, row[0]
                 else:
-                    row = conn.execute(
-                        "SELECT pn FROM whatsmeow_lid_map WHERE lid = ?", (bare,)
-                    ).fetchone()
+                    row = conn.execute("SELECT pn FROM whatsmeow_lid_map WHERE lid = ?", (bare,)).fetchone()
                     if row:
                         lid, pn = bare, row[0]
             finally:
