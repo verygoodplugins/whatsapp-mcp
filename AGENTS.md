@@ -57,7 +57,7 @@ If unsure whether something is in scope, **open an issue first**. Do not open a 
 ```bash
 # Go bridge
 cd whatsapp-bridge
-go run main.go              # dev
+go run .                    # dev
 go build -o whatsapp-bridge && ./whatsapp-bridge   # release-ish
 golangci-lint run           # lint
 go test ./...               # tests (sparse today)

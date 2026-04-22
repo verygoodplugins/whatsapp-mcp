@@ -389,7 +389,7 @@ Windows requires CGO for go-sqlite3. Install [MSYS2](https://www.msys2.org/) and
 
 ```bash
 go env -w CGO_ENABLED=1
-go run main.go
+go run .
 ```
 
 ## Security Notice

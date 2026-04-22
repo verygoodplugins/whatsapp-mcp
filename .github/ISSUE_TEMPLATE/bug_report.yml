@@ -23,7 +23,7 @@ body:
       label: Steps to reproduce
       description: Exact, minimal steps. Include commands, tool calls, or curl invocations.
       placeholder: |
-        1. Start the bridge: `go run main.go`
+        1. Start the bridge: `go run .`
         2. From Claude Desktop, call `send_message` with `{...}`
         3. Observe ...
     validations:
