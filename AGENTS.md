@@ -92,7 +92,7 @@ A red CI is a hard block. Fix the failure or explain in the PR why it's unrelate
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `WHATSAPP_DB_PATH` | `../whatsapp-bridge/store/messages.db` | SQLite path used by the MCP server |
-| `WHATSAPP_API_URL` | `http://localhost:8080/api` | Bridge REST endpoint |
+| `WHATSAPP_API_URL` | `http://127.0.0.1:8080/api` | Bridge REST endpoint |
 | `WHATSAPP_BRIDGE_PORT` | `8080` | Port the bridge binds to |
 | `WEBHOOK_URL` | `http://localhost:8769/whatsapp/webhook` | Outgoing webhook for incoming messages (empty = disabled) |
 | `FORWARD_SELF` | `false` | Whether self-sent messages are forwarded |

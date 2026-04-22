@@ -66,7 +66,7 @@ These are not goals of this fork. PRs implementing them will likely be closed wi
 
 1. **Open an issue first** describing the problem you're solving and the smallest change that solves it. Don't open a PR with > ~300 LOC of new code without discussion.
 2. **Reference this roadmap** in the issue. Say which "in scope" bucket the work fits in (or argue why it should be added).
-3. **Split big work into atomic PRs.** One concern per PR, each independently reviewable and revertable.
+3. **Split big work into atomic PRs.** One concern per PR, each independently reviewable and revertible.
 4. **Expect "no" sometimes.** A small maintained surface is worth more than a large unmaintained one.
 
 ## Release cadence
