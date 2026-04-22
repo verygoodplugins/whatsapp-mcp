@@ -811,6 +811,27 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		return
 	}
 
+	// Store message in database first so that downloadMedia (which queries the DB
+	// by message ID) can find the row when we call it synchronously below.
+	err = messageStore.StoreMessage(
+		msg.Info.ID,
+		chatJID,
+		sender,
+		content,
+		msg.Info.Timestamp,
+		msg.Info.IsFromMe,
+		mediaType,
+		filename,
+		url,
+		mediaKey,
+		fileSHA256,
+		fileEncSHA256,
+		fileLength,
+	)
+	if err != nil {
+		logger.Warnf("Failed to store message: %v", err)
+	}
+
 	// For image messages, download media synchronously so we can include the base64
 	// payload in the webhook. Other media types (video, audio, document) are still
 	// downloaded asynchronously since they are not passed to the AI vision pipeline.
@@ -818,22 +839,20 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	var imageMimeType string
 	if mediaType == "image" && url != "" && len(mediaKey) > 0 {
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
-		success, _, dlFilename, dlPath, dlErr := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+		success, _, _, dlPath, dlErr := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
 		if success && dlErr == nil {
 			imageDownloadPath = dlPath
-			// Derive MIME type from filename extension
-			ext := strings.ToLower(filepath.Ext(dlFilename))
-			switch ext {
-			case ".jpg", ".jpeg":
-				imageMimeType = "image/jpeg"
-			case ".png":
-				imageMimeType = "image/png"
-			case ".gif":
-				imageMimeType = "image/gif"
-			case ".webp":
-				imageMimeType = "image/webp"
-			default:
-				imageMimeType = "image/jpeg"
+			// Detect MIME type by sniffing the actual file bytes rather than
+			// trusting the generated filename extension (always .jpg).
+			if f, openErr := os.Open(dlPath); openErr == nil {
+				buf := make([]byte, 512)
+				if n, readErr := f.Read(buf); readErr == nil || n > 0 {
+					imageMimeType = http.DetectContentType(buf[:n])
+				}
+				_ = f.Close()
+			}
+			if imageMimeType == "" {
+				imageMimeType = "application/octet-stream"
 			}
 			logger.Infof("✅ Image downloaded: %s (%s)", dlPath, imageMimeType)
 		} else {
@@ -856,23 +875,6 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}()
 	}
 
-	// Store message in database
-	err = messageStore.StoreMessage(
-		msg.Info.ID,
-		chatJID,
-		sender,
-		content,
-		msg.Info.Timestamp,
-		msg.Info.IsFromMe,
-		mediaType,
-		filename,
-		url,
-		mediaKey,
-		fileSHA256,
-		fileEncSHA256,
-		fileLength,
-	)
-
 	// Send webhook for incoming messages.
 	// Forward self-messages when FORWARD_SELF=true.
 	// Always forward image messages (even without a text caption) so the AI vision
@@ -893,9 +895,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}
 	}
 
-	if err != nil {
-		logger.Warnf("Failed to store message: %v", err)
-	} else {
+	if err == nil {
 		// Log message reception
 		timestamp := msg.Info.Timestamp.Format("2006-01-02 15:04:05")
 		direction := "←"

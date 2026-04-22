@@ -7,7 +7,18 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 )
+
+// maxMediaBase64Bytes is the maximum file size that will be base64-encoded and
+// included in a webhook payload. Files larger than this limit are skipped to
+// avoid excessive memory use and oversized HTTP requests.
+const maxMediaBase64Bytes = 10 * 1024 * 1024 // 10 MB
+
+// webhookClient is used for all outbound webhook POSTs. The 30-second timeout
+// prevents a slow or unreachable endpoint from blocking message handling
+// indefinitely.
+var webhookClient = &http.Client{Timeout: 30 * time.Second}
 
 // WebhookPayload represents the data sent to the webhook
 type WebhookPayload struct {
@@ -39,7 +50,7 @@ func sendWebhookPayload(payload WebhookPayload) {
 		return
 	}
 
-	resp, err := http.Post(webhookURL, "application/json", bytes.NewBuffer(jsonData))
+	resp, err := webhookClient.Post(webhookURL, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		fmt.Printf("Error sending webhook: %v\n", err)
 		return
@@ -77,7 +88,12 @@ func SendWebhookWithMedia(
 ) {
 	var mediaBase64 string
 	if localPath != "" {
-		if data, err := os.ReadFile(localPath); err == nil {
+		info, statErr := os.Stat(localPath)
+		if statErr != nil {
+			fmt.Printf("⚠ Could not stat media file for base64 encoding: %v\n", statErr)
+		} else if info.Size() > maxMediaBase64Bytes {
+			fmt.Printf("⚠ Media file too large for base64 encoding (%d bytes), skipping MediaBase64\n", info.Size())
+		} else if data, err := os.ReadFile(localPath); err == nil {
 			mediaBase64 = base64.StdEncoding.EncodeToString(data)
 		} else {
 			fmt.Printf("⚠ Could not read media file for base64 encoding: %v\n", err)
