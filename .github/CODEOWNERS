@@ -4,6 +4,14 @@
 # Default — every PR
 *                               @jack-arturo
 
+# Go bridge — Ed has deep knowledge of whatsmeow internals (LIDs, history sync,
+# stream events, media handling). Auto-request his review on bridge changes.
+/whatsapp-bridge/               @jack-arturo @edmenendez
+
+# MCP server's whatsapp.py also touches whatsmeow's SQLite (LID resolution,
+# contact store) — same domain expertise applies.
+/whatsapp-mcp-server/whatsapp.py @jack-arturo @edmenendez
+
 # CI / release / governance — owner only
 /.github/                       @jack-arturo
 /release-please-config.json     @jack-arturo
