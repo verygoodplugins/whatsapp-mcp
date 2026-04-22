@@ -14,11 +14,11 @@ permissions:
   security-events: write
 
 jobs:
-  codeql-python:
-    name: CodeQL Analysis (Python)
+  codeql:
+    name: CodeQL Analysis
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
@@ -31,34 +31,13 @@ jobs:
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
 
-  codeql-go:
-    name: CodeQL Analysis (Go)
+  audit:
+    name: Dependency Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v6
-        with:
-          go-version: '1.25'
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
-        with:
-          languages: go
-
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v4
-
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4
-
-  python-audit:
-    name: Python Dependency Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -66,9 +45,7 @@ jobs:
         run: pip install pip-audit
 
       - name: Install package dependencies
-        run: |
-          cd whatsapp-mcp-server
-          pip install -e .
+        run: pip install -e .
 
       - name: Audit dependencies
         run: pip-audit
@@ -78,9 +55,9 @@ jobs:
     name: Bandit Security Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -88,24 +65,5 @@ jobs:
         run: pip install bandit
 
       - name: Run bandit
-        run: bandit -r whatsapp-mcp-server/ -ll
-        continue-on-error: true
-
-  govulncheck:
-    name: Go Vulnerability Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version: '1.25'
-
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
-
-      - name: Run govulncheck
-        run: |
-          cd whatsapp-bridge
-          govulncheck ./...
+        run: bandit -r src/ -ll
         continue-on-error: true

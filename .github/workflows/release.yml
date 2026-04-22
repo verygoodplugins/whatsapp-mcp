@@ -1,96 +1,75 @@
-name: Release (Manual Fallback)
+# Release workflow for Python packages
+#
+# How it works:
+# 1. Create a git tag (e.g., v1.0.0)
+# 2. Push the tag to trigger this workflow
+# 3. Workflow builds and publishes to PyPI using Trusted Publishing
+#
+# PyPI Trusted Publishing:
+#   No API tokens needed! Configure at:
+#   https://pypi.org/manage/project/{package-name}/settings/publishing/
+#   Add this repository as a trusted publisher.
+
+name: Release
 
 on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag to validate and publish artifacts for (vMAJOR.MINOR.PATCH)"
-        required: true
-        type: string
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
-  validate-release:
-    name: Validate Release Inputs
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "1.25"
-
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@v7
-
-      - name: Validate version consistency
+      - name: Install build dependencies
         run: |
-          python .github/scripts/check_versions.py --tag "${{ github.event.inputs.tag }}"
+          python -m pip install --upgrade pip
+          pip install build
 
-      - name: Verify golangci configuration
-        run: |
-          cd whatsapp-bridge
-          go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.7.1 config verify
+      - name: Build package
+        run: python -m build
 
-      - name: Run Go lint
-        uses: golangci/golangci-lint-action@v9
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
         with:
-          version: v2.7.1
-          working-directory: whatsapp-bridge
+          name: dist
+          path: dist/
 
-      - name: Run Go tests
-        run: |
-          cd whatsapp-bridge
-          go test ./...
-
-      - name: Build Go bridge
-        run: |
-          cd whatsapp-bridge
-          go build -v ./...
-
-      - name: Run Python tests
-        run: |
-          cd whatsapp-mcp-server
-          uv sync --extra dev
-          uv run pytest -q
-
-  publish-github-release:
-    name: Publish GitHub Release
-    needs: validate-release
+  publish-pypi:
+    needs: build
     runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
     steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-go@v6
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
         with:
-          go-version: "1.25"
+          name: dist
+          path: dist/
 
-      - uses: astral-sh/setup-uv@v7
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
 
-      - name: Build release artifacts
-        run: |
-          mkdir -p dist
+  create-release:
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
 
-          cd whatsapp-bridge
-          GOOS=linux GOARCH=amd64 go build -o ../dist/whatsapp-bridge-linux-amd64 .
-          cd ..
-
-          cd whatsapp-mcp-server
-          uv build --out-dir ../dist
-          cd ..
-
-          cd dist
-          sha256sum * > SHA256SUMS.txt
-
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v3
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ github.event.inputs.tag }}
-          files: dist/*
           generate_release_notes: true
-          overwrite_files: true

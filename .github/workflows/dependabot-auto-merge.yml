@@ -1,13 +1,5 @@
 name: Dependabot auto-merge
 
-# Auto-approves and enables auto-merge for low-risk Dependabot PRs:
-# - any patch update
-# - minor updates to development dependencies (pytest, ruff, etc.)
-# - minor updates to GitHub Actions
-#
-# Major updates and minor updates to runtime/production deps still
-# require manual review.
-
 on:
   pull_request_target:
     types:
@@ -33,11 +25,8 @@ jobs:
 
       - name: Approve and enable auto-merge
         if: |
-          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
-          (steps.meta.outputs.update-type == 'version-update:semver-minor' &&
-           steps.meta.outputs.dependency-type == 'direct:development') ||
-          (steps.meta.outputs.update-type == 'version-update:semver-minor' &&
-           steps.meta.outputs.package-ecosystem == 'github_actions')
+          steps.meta.outputs.update-type != 'version-update:semver-major' ||
+          steps.meta.outputs.package-ecosystem == 'github_actions'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}

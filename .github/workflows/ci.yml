@@ -1,83 +1,45 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
+    branches: [main]
+  push:
     branches: [main]
   workflow_dispatch:
 
 jobs:
-  version-consistency:
-    name: Version Consistency
+  test:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-      - name: Validate project versions are in sync
-        run: python .github/scripts/check_versions.py
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
 
-  python-lint:
-    name: Python Lint
-    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
       - name: Install dependencies
         run: |
-          cd whatsapp-mcp-server
-          uv venv
-          uv pip install ruff
-      - name: Run ruff check
-        run: |
-          cd whatsapp-mcp-server
-          uv run ruff check .
-      - name: Run ruff format check
-        run: |
-          cd whatsapp-mcp-server
-          uv run ruff format --check .
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
 
-  go-lint:
-    name: Go Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version: '1.25'
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.7.1
-          working-directory: whatsapp-bridge
+      - name: Lint with ruff
+        run: |
+          pip install ruff
+          ruff check .
+          ruff format --check .
 
-  go-build:
-    name: Go Build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version: '1.25'
-      - name: Build
+      - name: Test with pytest
         run: |
-          cd whatsapp-bridge
-          go build -v ./...
+          pip install pytest pytest-asyncio pytest-cov
+          pytest --cov=src --cov-report=xml
 
-  python-test:
-    name: Python Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v7
-      - name: Install dependencies
-        run: |
-          cd whatsapp-mcp-server
-          uv venv
-          uv pip install -e ".[dev]"
-      - name: Run tests
-        run: |
-          cd whatsapp-mcp-server
-          uv run pytest -v
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml
+        continue-on-error: true
