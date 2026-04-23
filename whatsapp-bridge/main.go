@@ -403,6 +403,73 @@ func (store *MessageStore) GetMessages(chatJID string, limit int) ([]Message, er
 	return messages, nil
 }
 
+// DeleteMessage removes a single message row from the local store by its ID.
+// GTM-1204: "delete-for-me" cleanup for WhatsApp-to-self spam. Does NOT send a
+// revocation to WhatsApp servers — the message stays in other participants'
+// views. Suited for self-chat noise cleanup where "delete-for-everyone" is a
+// no-op (only one participant).
+//
+// Returns the number of rows deleted (0 or 1) and any SQL error.
+func (store *MessageStore) DeleteMessage(id, chatJID string) (int64, error) {
+	res, err := store.db.Exec(
+		"DELETE FROM messages WHERE id = ? AND chat_jid = ?",
+		id, chatJID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// BulkDeleteMessages removes messages matching a chat + optional time range +
+// optional sender/content prefix. GTM-1204: built for scrubbing ~200 duplicate
+// "⚠️ LinkedIn scraper: session expired" rows from Diraj's self-chat.
+//
+// All filter parameters are optional (zero value = no filter on that field).
+// At minimum `chatJID` is required so we never accidentally nuke the whole DB.
+// Returns rows deleted + any SQL error.
+//
+// Safety: this method is intentionally NOT exposed via a DELETE handler with a
+// wildcard URL — it requires an explicit POST body so a stray curl can't wipe
+// the store.
+func (store *MessageStore) BulkDeleteMessages(
+	chatJID string,
+	sinceTS, untilTS time.Time,
+	senderFilter, contentPrefix string,
+) (int64, error) {
+	if chatJID == "" {
+		return 0, fmt.Errorf("chat_jid is required for bulk delete")
+	}
+
+	query := "DELETE FROM messages WHERE chat_jid = ?"
+	args := []interface{}{chatJID}
+
+	if !sinceTS.IsZero() {
+		query += " AND timestamp >= ?"
+		args = append(args, sinceTS)
+	}
+	if !untilTS.IsZero() {
+		query += " AND timestamp <= ?"
+		args = append(args, untilTS)
+	}
+	if senderFilter != "" {
+		query += " AND sender = ?"
+		args = append(args, senderFilter)
+	}
+	if contentPrefix != "" {
+		// LIKE with a prefix match — no trailing %-escape because the caller
+		// provides the literal prefix and we want case-sensitive strict match.
+		query += " AND content LIKE ?"
+		args = append(args, contentPrefix+"%")
+	}
+
+	res, err := store.db.Exec(query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // Get all chats
 func (store *MessageStore) GetChats() (map[string]time.Time, error) {
 	rows, err := store.db.Query("SELECT jid, last_message_time FROM chats ORDER BY last_message_time DESC")
@@ -450,13 +517,14 @@ type SendMessageResponse struct {
 
 // SendMessageRequest represents the request body for the send message API
 type SendMessageRequest struct {
-	Recipient string `json:"recipient"`
-	Message   string `json:"message"`
-	MediaPath string `json:"media_path,omitempty"`
+	Recipient string   `json:"recipient"`
+	Message   string   `json:"message"`
+	MediaPath string   `json:"media_path,omitempty"`
+	Mentions  []string `json:"mentions,omitempty"` // JIDs of users to @-mention; body must contain literal "@<phone_user_part>" for each
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string, mentions []string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -553,7 +621,21 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 			mediaType = whatsmeow.MediaVideo
 			mimeType = "video/quicktime"
 
-		// Document types (for any other file type)
+		// Document types
+		case "pdf":
+			mediaType = whatsmeow.MediaDocument
+			mimeType = "application/pdf"
+		case "doc", "docx":
+			mediaType = whatsmeow.MediaDocument
+			mimeType = "application/msword"
+		case "xls", "xlsx":
+			mediaType = whatsmeow.MediaDocument
+			mimeType = "application/vnd.ms-excel"
+		case "csv":
+			mediaType = whatsmeow.MediaDocument
+			mimeType = "text/csv"
+
+		// Default document type
 		default:
 			mediaType = whatsmeow.MediaDocument
 			mimeType = "application/octet-stream"
@@ -622,8 +704,10 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 				FileLength:    &resp.FileLength,
 			}
 		case whatsmeow.MediaDocument:
+			fileName := mediaPath[strings.LastIndex(mediaPath, "/")+1:]
 			msg.DocumentMessage = &waProto.DocumentMessage{
-				Title:         proto.String(mediaPath[strings.LastIndex(mediaPath, "/")+1:]),
+				Title:         proto.String(fileName),
+				FileName:      proto.String(fileName),
 				Caption:       proto.String(message),
 				Mimetype:      proto.String(mimeType),
 				URL:           &resp.URL,
@@ -635,7 +719,20 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 			}
 		}
 	} else {
-		msg.Conversation = proto.String(message)
+		// If mentions are present, use ExtendedTextMessage with ContextInfo so
+		// WhatsApp clients render the @-tags + fire mention notifications.
+		// The message body must already contain literal "@<phone_user_part>"
+		// for each mentioned JID; the ContextInfo wires it to the protocol.
+		if len(mentions) > 0 {
+			msg.ExtendedTextMessage = &waProto.ExtendedTextMessage{
+				Text: proto.String(message),
+				ContextInfo: &waProto.ContextInfo{
+					MentionedJID: mentions,
+				},
+			}
+		} else {
+			msg.Conversation = proto.String(message)
+		}
 	}
 
 	// Send message
@@ -1129,7 +1226,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
+		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath, req.Mentions)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -1285,6 +1382,121 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 				"message": fmt.Sprintf("Typing indicator set to %v", req.IsTyping),
 			})
 		}
+	})
+
+	// GTM-1204: delete a single message from the local store by id + chat_jid.
+	// "Delete-for-me" semantics only — this is a local-SQLite mutation, not a
+	// WhatsApp server revocation. Suitable for cleaning self-chat bot noise
+	// where the chat has a single participant.
+	//
+	// Request:   DELETE /api/message/{chat_jid}/{message_id}
+	// Response:  {"success": bool, "rows_affected": int, "message": string}
+	http.HandleFunc("/api/message/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodDelete {
+			http.Error(w, "Method not allowed — use DELETE", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Parse URL: /api/message/{chat_jid}/{message_id}
+		path := strings.TrimPrefix(r.URL.Path, "/api/message/")
+		parts := strings.SplitN(path, "/", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			http.Error(w,
+				`Path must be /api/message/{chat_jid}/{message_id}`,
+				http.StatusBadRequest)
+			return
+		}
+		chatJID, msgID := parts[0], parts[1]
+
+		rows, err := messageStore.DeleteMessage(msgID, chatJID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":       false,
+				"rows_affected": 0,
+				"message":       fmt.Sprintf("Delete failed: %v", err),
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":       true,
+			"rows_affected": rows,
+			"message":       fmt.Sprintf("Deleted %d row(s) for message %s in %s", rows, msgID, chatJID),
+		})
+	})
+
+	// GTM-1204: bulk delete by chat + optional filters (time window, sender,
+	// content prefix). POST body avoids DELETE-with-body client incompat and
+	// prevents accidental wildcard deletes.
+	//
+	// Request body:
+	//   {
+	//     "chat_jid": "<required>",
+	//     "since": "RFC3339 timestamp",  // optional
+	//     "until": "RFC3339 timestamp",  // optional
+	//     "sender": "<JID>",             // optional — matches exact sender
+	//     "content_prefix": "⚠️ LinkedIn scraper:"  // optional — LIKE 'prefix%'
+	//   }
+	// Response: {"success": bool, "rows_affected": int, "message": string}
+	http.HandleFunc("/api/messages/delete", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed — use POST", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			ChatJID       string `json:"chat_jid"`
+			Since         string `json:"since"`
+			Until         string `json:"until"`
+			Sender        string `json:"sender"`
+			ContentPrefix string `json:"content_prefix"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		if req.ChatJID == "" {
+			http.Error(w, "chat_jid is required", http.StatusBadRequest)
+			return
+		}
+
+		var sinceTS, untilTS time.Time
+		if req.Since != "" {
+			t, err := time.Parse(time.RFC3339, req.Since)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("invalid since timestamp: %v", err), http.StatusBadRequest)
+				return
+			}
+			sinceTS = t
+		}
+		if req.Until != "" {
+			t, err := time.Parse(time.RFC3339, req.Until)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("invalid until timestamp: %v", err), http.StatusBadRequest)
+				return
+			}
+			untilTS = t
+		}
+
+		rows, err := messageStore.BulkDeleteMessages(
+			req.ChatJID, sinceTS, untilTS, req.Sender, req.ContentPrefix,
+		)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":       false,
+				"rows_affected": 0,
+				"message":       fmt.Sprintf("Bulk delete failed: %v", err),
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":       true,
+			"rows_affected": rows,
+			"message":       fmt.Sprintf("Bulk delete removed %d row(s) from %s", rows, req.ChatJID),
+		})
 	})
 
 	// Start the server with proper timeouts
