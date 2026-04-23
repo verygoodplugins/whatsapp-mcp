@@ -9,4 +9,5 @@ permissions:
   pull-requests: write
 jobs:
   auto-merge:
+    if: github.actor == 'dependabot[bot]'
     uses: verygoodplugins/.github/.github/workflows/dependabot-auto-merge.yml@main
