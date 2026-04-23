@@ -10,4 +10,3 @@ permissions:
 jobs:
   auto-merge:
     uses: verygoodplugins/.github/.github/workflows/dependabot-auto-merge.yml@main
-    secrets: inherit
