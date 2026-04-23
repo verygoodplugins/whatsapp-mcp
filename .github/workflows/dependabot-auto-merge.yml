@@ -42,9 +42,5 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
-          CURRENT_LOGIN="$(gh api user --jq .login)"
-          ALREADY_APPROVED="$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews" --jq '[.[] | select(.user.login == "'"$CURRENT_LOGIN"'" and .state == "APPROVED")] | length')"
-          if [ "$ALREADY_APPROVED" -eq 0 ]; then
-            gh pr review --approve "$PR_URL"
-          fi
+          gh pr review --approve "$PR_URL" 2>/dev/null || true
           gh pr merge --auto --squash "$PR_URL"
