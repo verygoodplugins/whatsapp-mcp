@@ -1,39 +1,52 @@
 version: 2
 updates:
-  # Python dependencies
   - package-ecosystem: "pip"
     directory: "/whatsapp-mcp-server"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 2
     groups:
-      production-dependencies:
+      pip-version-updates:
+        applies-to: version-updates
         patterns:
           - "*"
-        exclude-patterns:
-          - "pytest*"
-          - "ruff"
+      pip-security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
     commit-message:
       prefix: "chore(deps)"
-    open-pull-requests-limit: 10
 
-  # Go dependencies
   - package-ecosystem: "gomod"
     directory: "/whatsapp-bridge"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 2
     groups:
-      go-dependencies:
+      gomod-version-updates:
+        applies-to: version-updates
+        patterns:
+          - "*"
+      gomod-security-updates:
+        applies-to: security-updates
         patterns:
           - "*"
     commit-message:
       prefix: "chore(deps)"
-    open-pull-requests-limit: 10
 
-  # GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 2
+    groups:
+      actions-version-updates:
+        applies-to: version-updates
+        patterns:
+          - "*"
+      actions-security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
     commit-message:
       prefix: "chore(deps)"
-    open-pull-requests-limit: 5

@@ -71,6 +71,22 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 
 4. **Restart Claude Desktop**
 
+### Updating
+
+Pull the latest changes, then refresh whichever components moved:
+
+```bash
+git pull
+```
+
+| You changed                                                              | What to do                                                                                                                                            |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Bridge code** (`whatsapp-bridge/*.go`) and you run `go run .`          | Nothing — `go run` recompiles each launch. Just restart the bridge.                                                                                   |
+| **Bridge code** and you run a built binary                               | `cd whatsapp-bridge && go build -o whatsapp-bridge && ./whatsapp-bridge`                                                                              |
+| **MCP server** (`whatsapp-mcp-server/*.py`, `pyproject.toml`, `uv.lock`) | Restart Claude Desktop / Cursor — `uv` re-resolves from the lockfile on next launch. Force a sync with `cd whatsapp-mcp-server && uv sync` if needed. |
+
+Updates do **not** require re-pairing or deleting `whatsapp.db` — your session and message history are preserved. Re-pairing is only needed when explicitly requesting full history (see [Requesting full history](#requesting-full-history)).
+
 ### Cursor IDE Configuration
 
 Add to your Cursor MCP settings (`~/.cursor/mcp.json`):
@@ -104,9 +120,11 @@ Messages include `sender_display` showing "Name (phone)" format for easy identif
 Search contacts by name or phone number.
 
 **Parameters:**
+
 - `query` (required): Name or phone number to search
 
 **Natural Language Examples:**
+
 - "Find contacts named John"
 - "Search for phone number 555-1234"
 - "Who has the phone number starting with +1?"
@@ -116,10 +134,12 @@ Search contacts by name or phone number.
 Resolve a WhatsApp contact name from a phone number, LID, or full JID.
 
 **Parameters:**
+
 - `identifier` (required): Phone number, LID, or full JID (aliases: `phone_number`, `phone`)
   - Examples: `12025551234`, `184125298348272`, `12025551234@s.whatsapp.net`, `184125298348272@lid`
 
 **Natural Language Examples:**
+
 - "What's the name for phone number 5551234567?"
 - "Look up who owns this number"
 - "Who is 184125298348272@lid?"
@@ -131,6 +151,7 @@ Resolve a WhatsApp contact name from a phone number, LID, or full JID.
 Get messages with filters, date ranges, and sorting.
 
 **Parameters:**
+
 - `chat_jid` (optional): Filter by specific chat JID
 - `limit` (optional): Number of messages (default 50, max 500)
 - `before_date` (optional): Messages before this date (YYYY-MM-DD)
@@ -138,6 +159,7 @@ Get messages with filters, date ranges, and sorting.
 - `sort_by` (optional): "newest" or "oldest" (default "newest")
 
 **Natural Language Examples:**
+
 - "Show me the last 100 messages from today"
 - "Get messages from the family group chat"
 - "Find messages from last week"
@@ -147,10 +169,12 @@ Get messages with filters, date ranges, and sorting.
 Send a text message to a contact or group.
 
 **Parameters:**
+
 - `recipient` (required): Phone number or group JID
 - `message` (required): Text content to send
 
 **Natural Language Examples:**
+
 - "Send 'Hello!' to +1234567890"
 - "Message the team group saying 'Meeting at 3pm'"
 
@@ -159,6 +183,7 @@ Send a text message to a contact or group.
 Send a media file (image, video, document).
 
 **Parameters:**
+
 - `recipient` (required): Phone number or group JID
 - `file_path` (required): Path to the file
 - `caption` (optional): Caption for the media
@@ -168,6 +193,7 @@ Send a media file (image, video, document).
 Send a voice message (automatically converts to Opus .ogg format).
 
 **Parameters:**
+
 - `recipient` (required): Phone number or group JID
 - `file_path` (required): Path to audio file
 
@@ -176,6 +202,7 @@ Send a voice message (automatically converts to Opus .ogg format).
 Download media from a received message.
 
 **Parameters:**
+
 - `message_id` (required): ID of the message with media
 - `chat_jid` (required): JID of the chat containing the message
 
@@ -186,6 +213,7 @@ Download media from a received message.
 List all chats with metadata.
 
 **Parameters:**
+
 - `limit` (optional): Number of chats (default 50, max 200)
 
 #### `get_chat`
@@ -193,6 +221,7 @@ List all chats with metadata.
 Get specific chat metadata by JID.
 
 **Parameters:**
+
 - `jid` (required): Chat JID
 
 #### `get_direct_chat_by_contact`
@@ -200,6 +229,7 @@ Get specific chat metadata by JID.
 Find a direct message chat with a contact.
 
 **Parameters:**
+
 - `phone` (required): Phone number of the contact
 
 #### `get_contact_chats`
@@ -207,6 +237,7 @@ Find a direct message chat with a contact.
 List all chats involving a specific contact.
 
 **Parameters:**
+
 - `phone` (required): Phone number of the contact
 
 #### `get_last_interaction`
@@ -214,6 +245,7 @@ List all chats involving a specific contact.
 Get the last message exchanged with a contact.
 
 **Parameters:**
+
 - `phone` (required): Phone number of the contact
 
 #### `get_message_context`
@@ -221,6 +253,7 @@ Get the last message exchanged with a contact.
 Get messages around a specific message for context.
 
 **Parameters:**
+
 - `message_id` (required): ID of the target message
 - `chat_jid` (required): JID of the chat
 - `before` (optional): Number of messages before (default 5)
@@ -230,19 +263,19 @@ Get messages around a specific message for context.
 
 Copy `.env.example` to `.env` and configure as needed:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WHATSAPP_BRIDGE_PORT` | `8080` | Port for Go bridge REST API |
-| `WEBHOOK_URL` | `http://localhost:8769/whatsapp/webhook` | Webhook for incoming messages |
-| `FORWARD_SELF` | `false` | Forward messages sent by self |
-| `WHATSAPP_DB_PATH` | `../whatsapp-bridge/store/messages.db` | Path to SQLite database |
-| `WHATSMEOW_DB_PATH` | `../whatsapp-bridge/store/whatsapp.db` | whatsmeow DB used for LID ↔ phone resolution |
-| `WHATSAPP_API_URL` | `http://localhost:8080/api` | Go bridge REST API URL |
+| Variable               | Default                                  | Description                                  |
+| ---------------------- | ---------------------------------------- | -------------------------------------------- |
+| `WHATSAPP_BRIDGE_PORT` | `8080`                                   | Port for Go bridge REST API                  |
+| `WEBHOOK_URL`          | `http://localhost:8769/whatsapp/webhook` | Webhook for incoming messages                |
+| `FORWARD_SELF`         | `false`                                  | Forward messages sent by self                |
+| `WHATSAPP_DB_PATH`     | `../whatsapp-bridge/store/messages.db`   | Path to SQLite database                      |
+| `WHATSMEOW_DB_PATH`    | `../whatsapp-bridge/store/whatsapp.db`   | whatsmeow DB used for LID ↔ phone resolution |
+| `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
 
 ### CLI flags (Go bridge)
 
-| Flag | Default | Description |
-|------|---------|-------------|
+| Flag                  | Default | Description                                                                                                                                                                                                                                                       |
+| --------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--full-history-pair` | `false` | Request full history at pair time. Only takes effect on a fresh pair (no existing `whatsapp.db`); no-op for already-paired sessions. The phone ultimately decides the actual history window sent — see [Requesting full history](#requesting-full-history) below. |
 
 ### Requesting full history
@@ -266,9 +299,11 @@ cd whatsapp-bridge
 ```
 
 Caveats:
+
 - **The phone decides the actual cap.** The flag requests up to 10 years / 100 GB, but WhatsApp's iOS primary device enforces its own retention policy. iPad companion is documented at ~1 year max; other linked devices appear to follow similar logic.
 - **Only effective on a fresh pair.** With `whatsapp.db` already present, no new pair handshake fires and the flag is a no-op.
 - **Messages the phone has deleted are not recoverable** — auto-expire, low-storage cleanup, and manual delete all leave no trace for the phone to share.
+
 ## Call History
 
 The bridge captures incoming WhatsApp voice and video calls live into a
@@ -481,20 +516,27 @@ This project is a maintained fork of [lharries/whatsapp-mcp](https://github.com/
 
 **Why we forked:** The original repository hasn't been updated since April 2025. We needed continued maintenance, bug fixes, and new features for production use.
 
-**What we changed:**
+**Highlights since the fork:**
 
-- Added `/api/typing` endpoint for typing indicators
-- Added `/api/health` endpoint for connection status
-- Added webhook system for incoming messages (with reply context)
-- Added auto-download of media files
-- Added `get_contact` tool for phone → name resolution
-- Added `sender_display` field showing "Name (phone)" format
-- Improved message querying (sorting, larger batches up to 500)
-- Fixed compilation issues from whatsmeow API changes
-- Fixed media filename consistency (uses message timestamp)
-- Added CI/CD pipeline with GitHub Actions
+- `/api/typing`, `/api/health`, and webhook forwarding (with reply context + image media)
+- Auto-download of incoming media with collision-safe filenames
+- `get_contact` tool, `sender_display` field, and LID ↔ phone resolution via the whatsmeow store
+- Live capture of incoming voice/video calls into a `calls` table
+- `--full-history-pair` flag to request extended history at pair time
+- Resilience: recovers from `StreamReplaced` session conflicts; pinned `anyio` to dodge a cancel-scope regression
+- CI/CD with GitHub Actions, Release Please for automated versioning, and Dependabot
 
-We're grateful to Luke for creating the original project!
+The full release-by-release list lives in [CHANGELOG.md](CHANGELOG.md).
+
+**Recent contributors** (huge thanks):
+
+- [@edmenendez](https://github.com/edmenendez) — call capture (#39), full-history flag (#37), caption surfacing (#42), media filename collisions (#40), download race fix (#41), LID matching (#43), contact resolution via whatsmeow store (#30)
+- [@davidsimoes](https://github.com/davidsimoes) — `StreamReplaced` recovery (#27)
+- [@davidggphy](https://github.com/davidggphy) — LID → phone JID consistency (#12)
+- [@maikol-solis](https://github.com/maikol-solis) — bridge run command fix (#23)
+- [@DeetBot](https://github.com/DeetBot) — `anyio` cancel-scope pin (#44)
+
+And to Luke for creating the original project. See [CONTRIBUTING.md](CONTRIBUTING.md) if you'd like to join in.
 
 ## Links
 
