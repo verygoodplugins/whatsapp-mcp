@@ -3,7 +3,7 @@
   "name": "io.github.verygoodplugins/whatsapp-mcp",
   "title": "WhatsApp MCP",
   "description": "Read, search, and send WhatsApp messages via Claude",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "websiteUrl": "https://verygoodplugins.com/?utm_source=mcp-registry",
   "repository": {
     "url": "https://github.com/verygoodplugins/whatsapp-mcp",
@@ -13,7 +13,7 @@
     {
       "registryType": "pypi",
       "identifier": "whatsapp-mcp-server",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "transport": {
         "type": "stdio"
       }
