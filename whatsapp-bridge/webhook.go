@@ -5,8 +5,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -37,11 +41,82 @@ type WebhookPayload struct {
 	MediaBase64   string `json:"mediaBase64,omitempty"`
 }
 
+// validateWebhookURL parses the configured webhook URL and rejects values that
+// would silently send chat content (and base64 image data) somewhere unsafe.
+//
+// Rules:
+//   - scheme must be http or https
+//   - host must be present and parseable
+//   - if the host is non-loopback, scheme MUST be https (no plain-HTTP message
+//     content over the network). Set WEBHOOK_ALLOW_INSECURE=true to override
+//     for local-network/dev setups; this is logged loudly at startup.
+func validateWebhookURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("WEBHOOK_URL is not a valid URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("WEBHOOK_URL scheme must be http or https, got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("WEBHOOK_URL is missing a host")
+	}
+
+	host := u.Hostname()
+	loopback := host == "localhost" || host == "::1"
+	if !loopback {
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			loopback = true
+		}
+	}
+
+	if !loopback && u.Scheme != "https" {
+		allow := strings.EqualFold(strings.TrimSpace(os.Getenv("WEBHOOK_ALLOW_INSECURE")), "true")
+		if !allow {
+			return nil, fmt.Errorf(
+				"WEBHOOK_URL points to a non-loopback host %q over plain HTTP; "+
+					"refusing to leak message content. Use https:// or set "+
+					"WEBHOOK_ALLOW_INSECURE=true to override at your own risk",
+				host,
+			)
+		}
+		fmt.Printf("⚠ WEBHOOK_ALLOW_INSECURE=true: sending message content over plain HTTP to %s\n", host)
+	}
+	return u, nil
+}
+
+// webhookURLOnce caches the validated webhook URL so we don't re-validate (and
+// re-log) for every message. validateErr is sticky: if the configured URL is
+// invalid we log once and skip webhook delivery for the lifetime of the process.
+var (
+	webhookURLOnce  sync.Once
+	webhookURLValue string
+	webhookURLErr   error
+)
+
+func resolveWebhookURL() (string, error) {
+	webhookURLOnce.Do(func() {
+		raw := os.Getenv("WEBHOOK_URL")
+		if raw == "" {
+			raw = "http://localhost:8769/whatsapp/webhook"
+		}
+		u, err := validateWebhookURL(raw)
+		if err != nil {
+			webhookURLErr = err
+			fmt.Printf("⚠ Disabling webhook: %v\n", err)
+			return
+		}
+		webhookURLValue = u.String()
+	})
+	return webhookURLValue, webhookURLErr
+}
+
 // sendWebhookPayload marshals and POSTs a WebhookPayload to the configured webhook URL.
 func sendWebhookPayload(payload WebhookPayload) {
-	webhookURL := os.Getenv("WEBHOOK_URL")
-	if webhookURL == "" {
-		webhookURL = "http://localhost:8769/whatsapp/webhook"
+	webhookURL, err := resolveWebhookURL()
+	if err != nil {
+		// Already logged once in resolveWebhookURL; stay quiet on the hot path.
+		return
 	}
 
 	jsonData, err := json.Marshal(payload)

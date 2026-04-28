@@ -1,6 +1,30 @@
 import os
+import shutil
 import subprocess
 import tempfile
+
+
+def _resolve_ffmpeg() -> str:
+    """Return an absolute path to the ffmpeg binary.
+
+    Resolving via shutil.which() at call time (and rejecting a missing binary)
+    means we surface a clear error instead of silently invoking an unexpected
+    "ffmpeg" found earlier on PATH. Setting FFMPEG_PATH lets users pin a
+    known-good absolute path (e.g. /opt/homebrew/bin/ffmpeg) and bypass PATH
+    lookup entirely.
+    """
+    pinned = os.environ.get("FFMPEG_PATH", "").strip()
+    if pinned:
+        if not os.path.isabs(pinned):
+            raise RuntimeError(f"FFMPEG_PATH must be an absolute path, got: {pinned!r}")
+        if not os.path.isfile(pinned) or not os.access(pinned, os.X_OK):
+            raise RuntimeError(f"FFMPEG_PATH does not point to an executable file: {pinned}")
+        return pinned
+
+    found = shutil.which("ffmpeg")
+    if not found:
+        raise RuntimeError("ffmpeg not found on PATH. Install ffmpeg or set FFMPEG_PATH to an absolute binary path.")
+    return found
 
 
 def convert_to_opus_ogg(input_file, output_file=None, bitrate="32k", sample_rate=24000):
@@ -33,9 +57,11 @@ def convert_to_opus_ogg(input_file, output_file=None, bitrate="32k", sample_rate
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    # Build the ffmpeg command
+    # Build the ffmpeg command. Resolve to an absolute binary path so we don't
+    # silently pick up an unintended "ffmpeg" earlier on PATH.
+    ffmpeg_bin = _resolve_ffmpeg()
     cmd = [
-        "ffmpeg",
+        ffmpeg_bin,
         "-i",
         input_file,
         "-c:a",

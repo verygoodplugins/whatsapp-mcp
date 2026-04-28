@@ -1296,8 +1296,28 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	}
 	filename := fmt.Sprintf("%s_%s_%s%s", mediaType, timestamp.Format("20060102_150405"), messageID, ext)
 
-	// First, check if we already have this file
-	chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
+	// Build the per-chat storage directory under store/.
+	//
+	// chatJID is normally produced by whatsmeow and well-formed, but it
+	// originates upstream from the WhatsApp protocol and ends up in a
+	// filesystem path here. We sanitize it defensively so a malformed or
+	// crafted JID can never escape the store/ directory via "../" or
+	// absolute-path components.
+	safeChatJID := strings.ReplaceAll(chatJID, ":", "_")
+	chatDir := filepath.Join("store", safeChatJID)
+	storeAbs, err := filepath.Abs("store")
+	if err != nil {
+		return false, "", "", "", fmt.Errorf("failed to resolve store path: %v", err)
+	}
+	chatDirAbs, err := filepath.Abs(chatDir)
+	if err != nil {
+		return false, "", "", "", fmt.Errorf("failed to resolve chat dir path: %v", err)
+	}
+	// Ensure the resolved chatDir is strictly inside store/ (defence in depth
+	// against future refactors or unexpected JID formats).
+	if chatDirAbs != storeAbs && !strings.HasPrefix(chatDirAbs, storeAbs+string(os.PathSeparator)) {
+		return false, "", "", "", fmt.Errorf("invalid chat JID: resolved path escapes store directory")
+	}
 
 	// Create directory for the chat if it doesn't exist
 	if err := os.MkdirAll(chatDir, 0755); err != nil {
@@ -1305,7 +1325,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	}
 
 	// Generate a local path for the file
-	localPath := fmt.Sprintf("%s/%s", chatDir, filename)
+	localPath := filepath.Join(chatDir, filename)
 
 	// Get absolute path
 	absPath, err := filepath.Abs(localPath)
@@ -1390,10 +1410,23 @@ func extractDirectPathFromURL(url string) string {
 	return "/" + pathPart
 }
 
+// withSecureHeaders wraps an http.HandlerFunc and sets a small set of
+// defensive response headers on every reply. These don't add functionality but
+// reduce the blast radius if something local tries to abuse the API surface
+// (e.g. a browser tab making a same-origin-bypassed request).
+func withSecureHeaders(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		h(w, r)
+	}
+}
+
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
 	// Health check endpoint
-	http.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/health", withSecureHeaders(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		status := map[string]interface{}{
 			"status":    "ok",
@@ -1405,10 +1438,10 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 		_ = json.NewEncoder(w).Encode(status)
-	})
+	}))
 
 	// Handler for sending messages
-	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/send", withSecureHeaders(func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1433,11 +1466,18 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			return
 		}
 
-		fmt.Println("Received request to send message", req.Message, req.MediaPath)
+		// Avoid logging req.Message verbatim — it's user content and may contain
+		// secrets (passwords, OTPs, tokens) the user pasted into a chat. Log only
+		// shape/metadata so operators can debug without leaking message bodies to
+		// stdout/log aggregators. The status string returned by sendWhatsAppMessage
+		// is bridge-controlled, so it's safe to log.
+		hasMedia := req.MediaPath != ""
+		fmt.Printf("→ /api/send recipient=%q message_len=%d has_media=%v\n",
+			req.Recipient, len(req.Message), hasMedia)
 
 		// Send the message
 		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
-		fmt.Println("Message sent", success, message)
+		fmt.Printf("← /api/send success=%v status=%q\n", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
 
@@ -1451,10 +1491,10 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			Success: success,
 			Message: message,
 		})
-	})
+	}))
 
 	// Handler for downloading media
-	http.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/download", withSecureHeaders(func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1516,10 +1556,10 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			Filename: filename,
 			Path:     path,
 		})
-	})
+	}))
 
 	// Handler for sending typing indicator
-	http.HandleFunc("/api/typing", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/typing", withSecureHeaders(func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1592,7 +1632,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 				"message": fmt.Sprintf("Typing indicator set to %v", req.IsTyping),
 			})
 		}
-	})
+	}))
 
 	// Start the server with proper timeouts. Bind to loopback so the bridge is
 	// not reachable from the LAN; MCP clients talk to it over localhost.
