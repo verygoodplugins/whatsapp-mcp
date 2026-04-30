@@ -572,24 +572,37 @@ def list_chats(
         cursor = conn.cursor()
 
         # Build base query
-        query_parts = [
-            """
-            SELECT
-                chats.jid,
-                chats.name,
-                chats.last_message_time,
-                messages.content as last_message,
-                messages.sender as last_sender,
-                messages.is_from_me as last_is_from_me
-            FROM chats
-        """
-        ]
-
+        # Bug fix: cuando include_last_message=False, no podemos referenciar columnas
+        # de messages.* sin JOIN (resulta en "no such column: messages.content").
+        # Bug presente tanto en lharries/whatsapp-mcp como en verygoodplugins/whatsapp-mcp.
         if include_last_message:
-            query_parts.append("""
+            query_parts = [
+                """
+                SELECT
+                    chats.jid,
+                    chats.name,
+                    chats.last_message_time,
+                    messages.content as last_message,
+                    messages.sender as last_sender,
+                    messages.is_from_me as last_is_from_me
+                FROM chats
                 LEFT JOIN messages ON chats.jid = messages.chat_jid
                 AND chats.last_message_time = messages.timestamp
-            """)
+            """
+            ]
+        else:
+            query_parts = [
+                """
+                SELECT
+                    chats.jid,
+                    chats.name,
+                    chats.last_message_time,
+                    NULL as last_message,
+                    NULL as last_sender,
+                    NULL as last_is_from_me
+                FROM chats
+            """
+            ]
 
         where_clauses = []
         params = []
