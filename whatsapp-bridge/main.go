@@ -667,7 +667,7 @@ type SendMessageRequest struct {
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -692,6 +692,12 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 			Server: "s.whatsapp.net", // For personal chats
 		}
 	}
+
+	// LOCAL PATCH: capture pre-LID-resolution JID for SQLite storage.
+	// handleMessage uses resolveLIDChat to map LID→phone for incoming events;
+	// for outbound we keep the pre-resolution form so the chat stays unified
+	// under @s.whatsapp.net (matches what list_chats / list_messages expect).
+	storageJID := recipientJID
 
 	// For personal chats, resolve phone number JID to LID (Linked Identity).
 	// WhatsApp is migrating to LID-based addressing; messages sent to the
@@ -850,10 +856,55 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	}
 
 	// Send message
-	_, err = client.SendMessage(context.Background(), recipientJID, msg)
+	resp, err := client.SendMessage(context.Background(), recipientJID, msg)
 
 	if err != nil {
 		return false, fmt.Sprintf("Error sending message: %v", err)
+	}
+
+	// LOCAL PATCH (Comunicaciones project): whatsmeow does not re-emit
+	// events.Message for messages this client itself just sent, so without
+	// an explicit StoreMessage call here list_messages / get_last_interaction
+	// never see our own outbound traffic. Same bug exists upstream in
+	// verygoodplugins/whatsapp-mcp (and lharries/whatsapp-mcp). See
+	// docs/SETUP.md "Outbound no se persiste en SQLite local".
+	if messageStore != nil && client.Store != nil && client.Store.ID != nil {
+		chatJID := storageJID.String()
+		senderUser := client.Store.ID.User
+		timestamp := resp.Timestamp
+		if timestamp.IsZero() {
+			timestamp = time.Now()
+		}
+
+		var mediaType, filename string
+		if mediaPath != "" {
+			if idx := strings.LastIndex(mediaPath, "/"); idx >= 0 {
+				filename = mediaPath[idx+1:]
+			} else {
+				filename = mediaPath
+			}
+			ext := strings.ToLower(mediaPath[strings.LastIndex(mediaPath, ".")+1:])
+			switch ext {
+			case "jpg", "jpeg", "png", "gif", "webp":
+				mediaType = "image"
+			case "ogg":
+				mediaType = "audio"
+			case "mp4", "avi", "mov":
+				mediaType = "video"
+			default:
+				mediaType = "document"
+			}
+		}
+
+		if chatErr := messageStore.StoreChat(chatJID, storageJID.User, timestamp); chatErr != nil {
+			fmt.Printf("Warning: failed to store outbound chat metadata: %v\n", chatErr)
+		}
+		if storeErr := messageStore.StoreMessage(
+			resp.ID, chatJID, senderUser, message, timestamp, true,
+			mediaType, filename, "", nil, nil, nil, 0,
+		); storeErr != nil {
+			fmt.Printf("Warning: failed to persist outbound message: %v\n", storeErr)
+		}
 	}
 
 	return true, fmt.Sprintf("Message sent to %s", recipient)
@@ -1436,7 +1487,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
+		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, req.MediaPath)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
