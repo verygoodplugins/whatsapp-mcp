@@ -571,16 +571,31 @@ def list_chats(
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
 
-        # Build base query
+        # Build base query. The last-message columns are referenced by tuple
+        # index downstream, so we keep the result shape constant and emit
+        # static NULLs when the messages table is not joined — otherwise the
+        # SELECT references messages.* with no FROM/JOIN and SQLite errors
+        # out with "no such column: messages.content".
+        if include_last_message:
+            last_message_select = (
+                "messages.content as last_message, "
+                "messages.sender as last_sender, "
+                "messages.is_from_me as last_is_from_me"
+            )
+        else:
+            last_message_select = (
+                "NULL as last_message, "
+                "NULL as last_sender, "
+                "NULL as last_is_from_me"
+            )
+
         query_parts = [
-            """
+            f"""
             SELECT
                 chats.jid,
                 chats.name,
                 chats.last_message_time,
-                messages.content as last_message,
-                messages.sender as last_sender,
-                messages.is_from_me as last_is_from_me
+                {last_message_select}
             FROM chats
         """
         ]
@@ -838,14 +853,28 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
 
-        query = """
+        # See list_chats: keep result tuple shape stable across the
+        # include_last_message branch by emitting static NULLs when we
+        # don't JOIN the messages table.
+        if include_last_message:
+            last_message_select = (
+                "m.content as last_message, "
+                "m.sender as last_sender, "
+                "m.is_from_me as last_is_from_me"
+            )
+        else:
+            last_message_select = (
+                "NULL as last_message, "
+                "NULL as last_sender, "
+                "NULL as last_is_from_me"
+            )
+
+        query = f"""
             SELECT
                 c.jid,
                 c.name,
                 c.last_message_time,
-                m.content as last_message,
-                m.sender as last_sender,
-                m.is_from_me as last_is_from_me
+                {last_message_select}
             FROM chats c
         """
 
