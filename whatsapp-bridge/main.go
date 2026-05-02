@@ -855,6 +855,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 
 	// Create JID for recipient
 	var recipientJID types.JID
+	var settingsLookupJID types.JID
 	var err error
 
 	// Check if recipient is a JID
@@ -873,6 +874,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 			Server: "s.whatsapp.net", // For personal chats
 		}
 	}
+	settingsLookupJID = recipientJID
 
 	// Capture pre-LID-resolution JID for SQLite storage.
 	// handleMessage uses resolveLIDChat to map LID→phone for incoming events;
@@ -995,7 +997,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		msg.Conversation = proto.String(message)
 	}
 
-	settings, err := messageStore.GetChatEphemeralSettings(recipientJID.String())
+	settings, err := messageStore.GetChatEphemeralSettings(settingsLookupJID.String())
 	if err != nil && err != sql.ErrNoRows {
 		return false, fmt.Sprintf("Error loading chat settings: %v", err)
 	}
