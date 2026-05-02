@@ -555,13 +555,27 @@ func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time
 	return err
 }
 
+// UpdateChatEphemeralSettings records the chat's disappearing-message timer.
+// Writes are gated on settingTimestamp so that low-information events don't
+// clobber authoritative ones:
+//
+//   - settingTimestamp == 0: skip entirely. Sparse history-sync chunks and
+//     plain (non-ephemeral) messages deliver records with no ephemeral fields,
+//     and we must not interpret that absence as "the user turned it off".
+//   - settingTimestamp older than the stored one: skip. Out-of-order delivery
+//     (replays, late history-sync chunks, old messages flowing in) would
+//     otherwise downgrade newer state to older state.
 func (store *MessageStore) UpdateChatEphemeralSettings(jid string, expiration uint32, settingTimestamp int64) error {
+	if settingTimestamp == 0 {
+		return nil
+	}
 	_, err := store.db.Exec(
 		`INSERT INTO chats (jid, name, last_message_time, ephemeral_expiration, ephemeral_setting_timestamp)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(jid) DO UPDATE SET
 			ephemeral_expiration = excluded.ephemeral_expiration,
-			ephemeral_setting_timestamp = excluded.ephemeral_setting_timestamp`,
+			ephemeral_setting_timestamp = excluded.ephemeral_setting_timestamp
+		WHERE excluded.ephemeral_setting_timestamp >= chats.ephemeral_setting_timestamp`,
 		jid, jid, time.Time{}, expiration, settingTimestamp,
 	)
 	return err
@@ -823,6 +837,41 @@ func applyChatEphemeralSettings(msg *waProto.Message, settings ChatEphemeralSett
 			Text:        proto.String(text),
 			ContextInfo: mergeEphemeralContextInfo(nil, settings),
 		}
+	}
+}
+
+// extractChatEphemeralFromMessage reads the chat's ephemeral state off an
+// inbound message's ContextInfo. Every regular message in an ephemeral chat
+// stamps Expiration / EphemeralSettingTimestamp on the sub-message's
+// ContextInfo, which lets the bridge backfill chats whose disappearing state
+// was set before the bridge ever saw an EPHEMERAL_SETTING toggle or a
+// fresh history sync. Returns the zero ChatEphemeralSettings when no
+// ContextInfo is present (e.g. plain Conversation, ProtocolMessage).
+func extractChatEphemeralFromMessage(msg *waProto.Message) ChatEphemeralSettings {
+	if msg == nil {
+		return ChatEphemeralSettings{}
+	}
+	var ctx *waProto.ContextInfo
+	switch {
+	case msg.ExtendedTextMessage != nil:
+		ctx = msg.ExtendedTextMessage.GetContextInfo()
+	case msg.ImageMessage != nil:
+		ctx = msg.ImageMessage.GetContextInfo()
+	case msg.AudioMessage != nil:
+		ctx = msg.AudioMessage.GetContextInfo()
+	case msg.VideoMessage != nil:
+		ctx = msg.VideoMessage.GetContextInfo()
+	case msg.DocumentMessage != nil:
+		ctx = msg.DocumentMessage.GetContextInfo()
+	case msg.StickerMessage != nil:
+		ctx = msg.StickerMessage.GetContextInfo()
+	}
+	if ctx == nil {
+		return ChatEphemeralSettings{}
+	}
+	return ChatEphemeralSettings{
+		Expiration:       ctx.GetExpiration(),
+		SettingTimestamp: ctx.GetEphemeralSettingTimestamp(),
 	}
 }
 
@@ -1261,6 +1310,17 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	}
 
 	updateChatEphemeralSettingsFromProtocolMessage(messageStore, chatJID, msg.Message, logger)
+
+	// Backfill ephemeral state from any regular message's ContextInfo.
+	// EPHEMERAL_SETTING ProtocolMessages and GroupInfo events only fire on
+	// changes, so chats whose disappearing timer was set before the bridge
+	// started (or before this code shipped) would otherwise stay invisible
+	// to outgoing-message logic.
+	if backfill := extractChatEphemeralFromMessage(msg.Message); backfill.SettingTimestamp != 0 {
+		if err := messageStore.UpdateChatEphemeralSettings(chatJID, backfill.Expiration, backfill.SettingTimestamp); err != nil {
+			logger.Warnf("Failed to backfill ephemeral settings for %s: %v", chatJID, err)
+		}
+	}
 
 	// Extract text content
 	content := extractTextContent(msg.Message)
