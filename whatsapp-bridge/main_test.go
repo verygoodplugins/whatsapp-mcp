@@ -76,7 +76,9 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 		CREATE TABLE chats (
 			jid TEXT PRIMARY KEY,
 			name TEXT,
-			last_message_time TIMESTAMP
+			last_message_time TIMESTAMP,
+			ephemeral_expiration INTEGER NOT NULL DEFAULT 0,
+			ephemeral_setting_timestamp INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE TABLE messages (
 			id TEXT,
@@ -115,6 +117,60 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return &MessageStore{db: db}
+}
+
+func TestStoreChatPreservesEphemeralSettings(t *testing.T) {
+	ms := newTestMessageStore(t)
+
+	chatJID := "15551234567@s.whatsapp.net"
+	if err := ms.UpdateChatEphemeralSettings(chatJID, 604800, 1710000000); err != nil {
+		t.Fatalf("failed to seed ephemeral settings: %v", err)
+	}
+
+	if err := ms.StoreChat(chatJID, "Alice", time.Unix(1710000100, 0)); err != nil {
+		t.Fatalf("failed to store chat: %v", err)
+	}
+
+	settings, err := ms.GetChatEphemeralSettings(chatJID)
+	if err != nil {
+		t.Fatalf("failed to load ephemeral settings: %v", err)
+	}
+	if settings.Expiration != 604800 {
+		t.Fatalf("expected expiration 604800, got %d", settings.Expiration)
+	}
+	if settings.SettingTimestamp != 1710000000 {
+		t.Fatalf("expected setting timestamp 1710000000, got %d", settings.SettingTimestamp)
+	}
+}
+
+func TestApplyChatEphemeralSettingsConvertsConversation(t *testing.T) {
+	msg := &waProto.Message{
+		Conversation: proto.String("hello"),
+	}
+
+	applyChatEphemeralSettings(msg, ChatEphemeralSettings{
+		Expiration:       604800,
+		SettingTimestamp: 1710000000,
+	})
+
+	if msg.Conversation != nil {
+		t.Fatalf("expected conversation to be converted to extended text")
+	}
+	if msg.GetExtendedTextMessage() == nil {
+		t.Fatalf("expected extended text message to be set")
+	}
+	if got := msg.GetExtendedTextMessage().GetText(); got != "hello" {
+		t.Fatalf("expected text hello, got %q", got)
+	}
+	if got := msg.GetExtendedTextMessage().GetContextInfo().GetExpiration(); got != 604800 {
+		t.Fatalf("expected expiration 604800, got %d", got)
+	}
+	if got := msg.GetExtendedTextMessage().GetContextInfo().GetEphemeralSettingTimestamp(); got != 1710000000 {
+		t.Fatalf("expected setting timestamp 1710000000, got %d", got)
+	}
+	if got := msg.GetExtendedTextMessage().GetContextInfo().GetDisappearingMode().GetTrigger(); got != waProto.DisappearingMode_CHAT_SETTING {
+		t.Fatalf("expected disappearing mode trigger CHAT_SETTING, got %v", got)
+	}
 }
 
 func testLogger() waLog.Logger {
