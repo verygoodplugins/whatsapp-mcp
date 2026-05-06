@@ -43,6 +43,9 @@ from whatsapp import (
 from whatsapp import (
     send_message as whatsapp_send_message,
 )
+from whatsapp import (
+    send_poll as whatsapp_send_poll,
+)
 
 # Initialize FastMCP server
 mcp = FastMCP("whatsapp")
@@ -310,6 +313,33 @@ def send_message(recipient: str, message: str) -> dict[str, Any]:
 
     # Call the whatsapp_send_message function with the unified recipient parameter
     success, status_message = whatsapp_send_message(recipient, message)
+    return {"success": success, "message": status_message}
+
+
+@mcp.tool()
+def send_poll(
+    recipient: str,
+    name: str,
+    options: list[str],
+    selectable_option_count: int = 1,
+) -> dict[str, Any]:
+    """Send a WhatsApp poll to a person or group. For group chats use the JID.
+
+    Args:
+        recipient: The recipient - either a phone number with country code but no + or other symbols,
+                 or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
+        name: The poll question / title
+        options: List of answer options (2-12 entries, each non-empty)
+        selectable_option_count: Maximum number of options a voter may select.
+                 Use 1 for a single-choice poll (default), or len(options) for multi-select.
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    if not recipient:
+        return {"success": False, "message": "Recipient must be provided"}
+
+    success, status_message = whatsapp_send_poll(recipient, name, options, selectable_option_count)
     return {"success": success, "message": status_message}
 
 

@@ -974,6 +974,55 @@ def send_message(recipient: str, message: str) -> tuple[bool, str]:
         return False, f"Unexpected error: {str(e)}"
 
 
+def send_poll(
+    recipient: str,
+    name: str,
+    options: list[str],
+    selectable_option_count: int = 1,
+) -> tuple[bool, str]:
+    try:
+        if not recipient:
+            return False, "Recipient must be provided"
+
+        if not name or not name.strip():
+            return False, "Poll name must be provided"
+
+        if not options or len(options) < 2:
+            return False, "At least two poll options are required"
+
+        if len(options) > 12:
+            return False, "WhatsApp supports at most 12 poll options"
+
+        if any(not opt or not opt.strip() for opt in options):
+            return False, "Poll options must not be empty"
+
+        if selectable_option_count < 0 or selectable_option_count > len(options):
+            return False, "selectable_option_count must be between 0 and len(options)"
+
+        url = f"{WHATSAPP_API_BASE_URL}/send/poll"
+        payload = {
+            "recipient": recipient,
+            "name": name,
+            "options": options,
+            "selectable_option_count": selectable_option_count,
+        }
+
+        response = requests.post(url, json=payload)
+
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "Unknown response")
+        else:
+            return False, f"Error: HTTP {response.status_code} - {response.text}"
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
 def send_file(recipient: str, media_path: str) -> tuple[bool, str]:
     try:
         # Validate input

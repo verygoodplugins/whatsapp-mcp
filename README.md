@@ -178,6 +178,21 @@ Send a text message to a contact or group.
 - "Send 'Hello!' to +1234567890"
 - "Message the team group saying 'Meeting at 3pm'"
 
+#### `send_poll`
+
+Send a poll to a contact or group.
+
+**Parameters:**
+
+- `recipient` (required): Phone number or group JID
+- `name` (required): Poll question / title
+- `options` (required): List of 2-12 answer options
+- `selectable_option_count` (optional): Max options each voter can pick. `1` (default) for single-choice, `len(options)` for multi-select.
+
+**Natural Language Examples:**
+
+- "Send a poll to the team asking 'Lunch?' with options pizza, salad, sushi"
+
 #### `send_file`
 
 Send a media file (image, video, document).

@@ -1140,6 +1140,74 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 	return true, fmt.Sprintf("Message sent to %s", recipient)
 }
 
+// SendPollRequest represents the request body for the send poll API
+type SendPollRequest struct {
+	Recipient             string   `json:"recipient"`
+	Name                  string   `json:"name"`
+	Options               []string `json:"options"`
+	SelectableOptionCount int      `json:"selectable_option_count,omitempty"`
+}
+
+// resolveRecipientJID parses a phone number or JID string and resolves PN -> LID
+// for personal chats, matching the behavior used when sending text/media messages.
+func resolveRecipientJID(client *whatsmeow.Client, recipient string) (types.JID, error) {
+	var recipientJID types.JID
+	var err error
+
+	if strings.Contains(recipient, "@") {
+		recipientJID, err = types.ParseJID(recipient)
+		if err != nil {
+			return types.JID{}, fmt.Errorf("error parsing JID: %w", err)
+		}
+	} else {
+		recipientJID = types.JID{
+			User:   recipient,
+			Server: "s.whatsapp.net",
+		}
+	}
+
+	if recipientJID.Server == types.DefaultUserServer {
+		ctx := context.Background()
+		lid, lidErr := client.Store.LIDs.GetLIDForPN(ctx, recipientJID)
+		if lidErr == nil && !lid.IsEmpty() {
+			fmt.Printf("Resolved %s -> %s (LID)\n", recipientJID, lid)
+			recipientJID = lid
+		} else {
+			if lidErr != nil {
+				fmt.Printf("Warning: LID cache lookup failed for %s: %v, falling back to server\n", recipientJID, lidErr)
+			}
+			info, infoErr := client.GetUserInfo(ctx, []types.JID{recipientJID})
+			if infoErr != nil {
+				fmt.Printf("Warning: server LID lookup failed for %s: %v\n", recipientJID, infoErr)
+			} else if userInfo, ok := info[recipientJID]; ok && !userInfo.LID.IsEmpty() {
+				fmt.Printf("Resolved %s -> %s (LID via server)\n", recipientJID, userInfo.LID)
+				recipientJID = userInfo.LID
+			}
+		}
+	}
+
+	return recipientJID, nil
+}
+
+// sendWhatsAppPoll builds and sends a poll creation message.
+func sendWhatsAppPoll(client *whatsmeow.Client, recipient, name string, options []string, selectableOptionCount int) (bool, string) {
+	if !client.IsConnected() {
+		return false, "Not connected to WhatsApp"
+	}
+
+	recipientJID, err := resolveRecipientJID(client, recipient)
+	if err != nil {
+		return false, err.Error()
+	}
+
+	msg := client.BuildPollCreation(name, options, selectableOptionCount)
+	if _, err := client.SendMessage(context.Background(), recipientJID, msg); err != nil {
+		return false, fmt.Sprintf("Error sending poll: %v", err)
+	}
+
+	return true, fmt.Sprintf("Poll sent to %s", recipient)
+}
+
 // Extract quoted message info from ContextInfo
 func extractQuotedMessageInfo(msg *waProto.Message) (quotedMessageId string, quotedSender string, quotedContent string) {
 	if msg == nil {
@@ -1741,6 +1809,58 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		}
 
 		// Send response
+		_ = json.NewEncoder(w).Encode(SendMessageResponse{
+			Success: success,
+			Message: message,
+		})
+	})
+
+	// Handler for sending polls
+	http.HandleFunc("/api/send/poll", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req SendPollRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		if req.Recipient == "" {
+			http.Error(w, "Recipient is required", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.Name) == "" {
+			http.Error(w, "Poll name is required", http.StatusBadRequest)
+			return
+		}
+		if len(req.Options) < 2 {
+			http.Error(w, "At least two options are required", http.StatusBadRequest)
+			return
+		}
+		if len(req.Options) > 12 {
+			http.Error(w, "WhatsApp supports at most 12 poll options", http.StatusBadRequest)
+			return
+		}
+		for _, opt := range req.Options {
+			if strings.TrimSpace(opt) == "" {
+				http.Error(w, "Poll options must not be empty", http.StatusBadRequest)
+				return
+			}
+		}
+		if req.SelectableOptionCount < 0 || req.SelectableOptionCount > len(req.Options) {
+			http.Error(w, "selectable_option_count must be between 0 and len(options)", http.StatusBadRequest)
+			return
+		}
+
+		success, message := sendWhatsAppPoll(client, req.Recipient, req.Name, req.Options, req.SelectableOptionCount)
+
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
 		_ = json.NewEncoder(w).Encode(SendMessageResponse{
 			Success: success,
 			Message: message,
