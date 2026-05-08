@@ -583,11 +583,7 @@ def list_chats(
                 "messages.is_from_me as last_is_from_me"
             )
         else:
-            last_message_select = (
-                "NULL as last_message, "
-                "NULL as last_sender, "
-                "NULL as last_is_from_me"
-            )
+            last_message_select = "NULL as last_message, NULL as last_sender, NULL as last_is_from_me"
 
         query_parts = [
             f"""
@@ -857,17 +853,9 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
         # include_last_message branch by emitting static NULLs when we
         # don't JOIN the messages table.
         if include_last_message:
-            last_message_select = (
-                "m.content as last_message, "
-                "m.sender as last_sender, "
-                "m.is_from_me as last_is_from_me"
-            )
+            last_message_select = "m.content as last_message, m.sender as last_sender, m.is_from_me as last_is_from_me"
         else:
-            last_message_select = (
-                "NULL as last_message, "
-                "NULL as last_sender, "
-                "NULL as last_is_from_me"
-            )
+            last_message_select = "NULL as last_message, NULL as last_sender, NULL as last_is_from_me"
 
         query = f"""
             SELECT
