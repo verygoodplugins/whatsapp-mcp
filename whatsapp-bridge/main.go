@@ -1481,6 +1481,38 @@ func extractPollCreation(msg *waProto.Message) *pollCreationInfo {
 	return nil
 }
 
+// pollChatJIDCandidates returns the set of JID forms a poll could plausibly
+// be stored under, in lookup order: the literal value, the LID->PN mapping,
+// and the PN->LID mapping. Outbound polls land under the recipient's LID
+// (resolveRecipientJID converts PN->LID at send time) while inbound vote
+// events may carry the chat in either form, so we try both.
+func pollChatJIDCandidates(client *whatsmeow.Client, raw string) []string {
+	seen := map[string]struct{}{raw: {}}
+	out := []string{raw}
+	parsed, err := types.ParseJID(raw)
+	if err != nil || client == nil || client.Store == nil || client.Store.LIDs == nil {
+		return out
+	}
+	add := func(s string) {
+		if _, ok := seen[s]; ok {
+			return
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	ctx := context.Background()
+	if parsed.Server == types.HiddenUserServer {
+		if pn, lerr := client.Store.LIDs.GetPNForLID(ctx, parsed); lerr == nil && !pn.IsEmpty() {
+			add(pn.ToNonAD().String())
+		}
+	} else if parsed.Server == types.DefaultUserServer {
+		if lid, lerr := client.Store.LIDs.GetLIDForPN(ctx, parsed); lerr == nil && !lid.IsEmpty() {
+			add(lid.ToNonAD().String())
+		}
+	}
+	return out
+}
+
 // handlePollVote decrypts an incoming PollUpdateMessage and persists the
 // voter's selection to `poll_votes`. The vote payload is encrypted with a
 // per-poll secret that whatsmeow stored when the original poll-creation
@@ -1500,23 +1532,32 @@ func handlePollVote(client *whatsmeow.Client, messageStore *MessageStore,
 		return
 	}
 
-	// Resolve the poll's chat JID through the same LID -> phone mapping the
-	// rest of the bridge uses, so we look up the poll under the canonical key.
-	if parsed, err := types.ParseJID(pollChatJID); err == nil {
-		resolved := resolveLIDChat(client, parsed, types.EmptyJID, types.EmptyJID, false)
-		pollChatJID = resolved.String()
-	}
+	// The vote's PollCreationMessageKey references the chat in whatever form
+	// the sender's client used (PN or LID), but our outbound polls are stored
+	// under the LID and inbound polls under whatever form handleMessage saw.
+	// Try every reasonable form before giving up.
+	candidates := pollChatJIDCandidates(client, pollChatJID)
 
-	poll, err := messageStore.GetPoll(pollMsgID, pollChatJID)
-	if err != nil {
-		logger.Warnf("Failed to look up poll %s/%s: %v", pollChatJID, pollMsgID, err)
-		return
+	var (
+		poll *PollRecord
+		err  error
+	)
+	for _, candidate := range candidates {
+		poll, err = messageStore.GetPoll(pollMsgID, candidate)
+		if err != nil {
+			logger.Warnf("Failed to look up poll %s/%s: %v", candidate, pollMsgID, err)
+			return
+		}
+		if poll != nil {
+			pollChatJID = candidate
+			break
+		}
 	}
 	if poll == nil {
 		// We never saw the original poll creation — typically because the
 		// bridge wasn't running when the poll was sent. Without the option
 		// list we cannot decode the SHA-256 hashes back to names.
-		logger.Warnf("Received vote for unknown poll %s/%s — ignoring", pollChatJID, pollMsgID)
+		logger.Warnf("Received vote for unknown poll %s/%s (tried %v) — ignoring", pollChatJID, pollMsgID, candidates)
 		return
 	}
 
