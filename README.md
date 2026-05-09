@@ -193,6 +193,37 @@ Send a poll to a contact or group.
 
 - "Send a poll to the team asking 'Lunch?' with options pizza, salad, sushi"
 
+#### `vote_poll`
+
+Cast (or clear) a vote on an existing poll. The poll must already be in the bridge's local store — i.e. you sent it via `send_poll`, or the bridge was running when it arrived from another participant.
+
+**Parameters:**
+
+- `poll_message_id` (required): Message ID of the original poll creation message (returned by `send_poll`, or visible via `list_polls`).
+- `poll_chat_jid` (required): Chat JID where the poll lives.
+- `selected_options` (required): List of option names to vote for (must be a subset of the poll's options). Pass `[]` to clear a previous vote.
+
+#### `list_polls`
+
+List polls captured by the bridge, newest first.
+
+**Parameters:**
+
+- `chat_jid` (optional): Filter to a single chat.
+- `limit` (optional): Max polls to return (default `20`).
+- `page` (optional): Zero-indexed page for pagination.
+
+#### `get_poll_results`
+
+Aggregate vote counts for a single poll.
+
+**Parameters:**
+
+- `poll_message_id` (required)
+- `poll_chat_jid` (required)
+
+Returns a `poll` block, an `options` array (each with `name`, `vote_count`, `voters`), and `total_voters`. **Note:** only votes received while the bridge was running are decryptable — whatsmeow needs the per-poll secret stored when the original creation message is processed live, so polls created before the bridge started will list correctly via `list_polls` but their votes won't be recoverable.
+
 #### `send_file`
 
 Send a media file (image, video, document).

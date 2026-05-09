@@ -46,6 +46,15 @@ from whatsapp import (
 from whatsapp import (
     send_poll as whatsapp_send_poll,
 )
+from whatsapp import (
+    vote_poll as whatsapp_vote_poll,
+)
+from whatsapp import (
+    list_polls as whatsapp_list_polls,
+)
+from whatsapp import (
+    get_poll_results as whatsapp_get_poll_results,
+)
 
 # Initialize FastMCP server
 mcp = FastMCP("whatsapp")
@@ -341,6 +350,84 @@ def send_poll(
 
     success, status_message = whatsapp_send_poll(recipient, name, options, selectable_option_count)
     return {"success": success, "message": status_message}
+
+
+@mcp.tool()
+def vote_poll(
+    poll_message_id: str,
+    poll_chat_jid: str,
+    selected_options: list[str],
+) -> dict[str, Any]:
+    """Cast a vote on an existing WhatsApp poll.
+
+    The poll must already be in the bridge's local store — i.e. either you sent
+    it via send_poll, or the bridge was running when it arrived from another
+    participant. Use list_polls to discover polls and their options.
+
+    Args:
+        poll_message_id: The message ID of the original poll creation message.
+        poll_chat_jid: The chat JID where the poll was sent (e.g.
+                 "123456789@s.whatsapp.net" or "123456789@g.us").
+        selected_options: List of option names to vote for. Must be a subset of
+                 the poll's option list (case-sensitive). Pass an empty list to
+                 clear a previous vote. For single-choice polls pass exactly
+                 one option; for multi-choice polls pass up to the poll's
+                 selectable_option_count.
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    if selected_options is None:
+        selected_options = []
+    success, status_message = whatsapp_vote_poll(poll_message_id, poll_chat_jid, selected_options)
+    return {"success": success, "message": status_message}
+
+
+@mcp.tool()
+def list_polls(
+    chat_jid: str | None = None,
+    limit: int = 20,
+    page: int = 0,
+) -> list[dict[str, Any]]:
+    """List polls captured by the bridge, newest first.
+
+    Polls created before the bridge was started may surface via WhatsApp's
+    history sync but their votes are not recoverable.
+
+    Args:
+        chat_jid: If provided, only polls in this chat are returned.
+        limit: Maximum number of polls to return.
+        page: Zero-indexed page number for pagination.
+
+    Returns:
+        A list of poll dictionaries with message_id, chat_jid, sender, name,
+        options, selectable_option_count, and timestamp.
+    """
+    return whatsapp_list_polls(chat_jid=chat_jid, limit=limit, page=page)
+
+
+@mcp.tool()
+def get_poll_results(poll_message_id: str, poll_chat_jid: str) -> dict[str, Any]:
+    """Get aggregated vote counts for a poll.
+
+    Returns vote counts for each poll option along with the list of voters per
+    option. Only votes received while the bridge was running are counted —
+    decryption needs a per-poll secret that whatsmeow stores when the
+    creation message is processed live.
+
+    Args:
+        poll_message_id: The message ID of the original poll creation message.
+        poll_chat_jid: The chat JID where the poll was sent.
+
+    Returns:
+        A dictionary with `poll`, `options` (each with name, vote_count, voters),
+        and `total_voters`. Returns `{"success": False, "message": "Poll not
+        found"}` if the poll is not in the local store.
+    """
+    result = whatsapp_get_poll_results(poll_message_id, poll_chat_jid)
+    if result is None:
+        return {"success": False, "message": "Poll not found in local store"}
+    return result
 
 
 @mcp.tool()
