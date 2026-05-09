@@ -1805,7 +1805,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			return
 		}
 		if len(req.Options) < 2 {
-			http.Error(w, "At least two options are required", http.StatusBadRequest)
+			http.Error(w, "At least two poll options are required", http.StatusBadRequest)
 			return
 		}
 		if len(req.Options) > 12 {

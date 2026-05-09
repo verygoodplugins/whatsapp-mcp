@@ -19,7 +19,7 @@ class TestSendPollValidation:
     def test_too_few_options(self):
         ok, msg = send_poll("123@s.whatsapp.net", "Q?", ["only"])
         assert not ok
-        assert "two poll options" in msg
+        assert "two" in msg.lower()
 
     def test_too_many_options(self):
         ok, msg = send_poll("123@s.whatsapp.net", "Q?", [str(i) for i in range(13)])

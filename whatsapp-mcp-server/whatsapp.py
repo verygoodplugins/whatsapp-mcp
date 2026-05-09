@@ -980,6 +980,9 @@ def send_poll(
     options: list[str],
     selectable_option_count: int = 1,
 ) -> tuple[bool, str]:
+    # Validation is intentionally duplicated in whatsapp-bridge/main.go's
+    # /api/send/poll handler so each layer is safe at its boundary. Keep the
+    # two in sync if you change the rules here.
     try:
         if not recipient:
             return False, "Recipient must be provided"
@@ -996,8 +999,11 @@ def send_poll(
         if any(not opt or not opt.strip() for opt in options):
             return False, "Poll options must not be empty"
 
-        if selectable_option_count < 1 or selectable_option_count > len(options):
-            return False, "selectable_option_count must be between 1 and len(options)"
+        # whatsmeow semantics: 0 = multi-select with no limit, 1 = single-select,
+        # N (1 < N <= len(options)) = multi-select up to N. Out-of-range values
+        # are silently coerced to 0 by the library, so reject them upfront.
+        if selectable_option_count < 0 or selectable_option_count > len(options):
+            return False, "selectable_option_count must be 0 (unlimited) or between 1 and len(options)"
 
         url = f"{WHATSAPP_API_BASE_URL}/send/poll"
         payload = {
