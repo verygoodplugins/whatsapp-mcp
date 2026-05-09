@@ -731,12 +731,19 @@ func (store *MessageStore) GetChats() (map[string]time.Time, error) {
 	chats := make(map[string]time.Time)
 	for rows.Next() {
 		var jid string
-		var lastMessageTime time.Time
+		// last_message_time can be NULL — UpdateChatEphemeralSettings can
+		// create a chat row from a GroupInfo / ephemeral-setting event
+		// before any message has landed for that chat.
+		var lastMessageTime sql.NullTime
 		err := rows.Scan(&jid, &lastMessageTime)
 		if err != nil {
 			return nil, err
 		}
-		chats[jid] = lastMessageTime
+		if lastMessageTime.Valid {
+			chats[jid] = lastMessageTime.Time
+		} else {
+			chats[jid] = time.Time{}
+		}
 	}
 
 	return chats, nil
