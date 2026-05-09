@@ -481,10 +481,17 @@ func (store *MessageStore) Close() error {
 	return store.db.Close()
 }
 
-// Store a chat in the database
+// Store a chat in the database. An empty `name` preserves any existing
+// resolved contact/group name on the row — outbound-message persistence
+// doesn't have a friendly name available at send time and must not clobber
+// names set by inbound handling or history sync.
 func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time) error {
 	_, err := store.db.Exec(
-		"INSERT OR REPLACE INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)",
+		`INSERT INTO chats (jid, name, last_message_time)
+		VALUES (?, ?, ?)
+		ON CONFLICT(jid) DO UPDATE SET
+			name = CASE WHEN excluded.name = '' THEN chats.name ELSE excluded.name END,
+			last_message_time = excluded.last_message_time`,
 		jid, name, lastMessageTime,
 	)
 	return err
@@ -867,7 +874,12 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 	// list_messages / get_last_interaction never see our own outbound
 	// traffic until WhatsApp's multi-device sync echoes them back.
 	if messageStore != nil && client.Store != nil && client.Store.ID != nil {
-		chatJID := storageJID.String()
+		// Normalize @lid recipients to phone JID so outbound rows land in
+		// the same chat row as inbound (which handleMessage normalizes via
+		// resolveLIDChat). Otherwise sending to an @lid input would
+		// fragment the chat under a separate jid.
+		persistJID := resolveUserJID(client, storageJID, types.EmptyJID)
+		chatJID := persistJID.String()
 		senderUser := client.Store.ID.User
 		timestamp := resp.Timestamp
 		if timestamp.IsZero() {
@@ -876,12 +888,8 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 
 		var mediaType, filename string
 		if mediaPath != "" {
-			if idx := strings.LastIndex(mediaPath, "/"); idx >= 0 {
-				filename = mediaPath[idx+1:]
-			} else {
-				filename = mediaPath
-			}
-			ext := strings.ToLower(mediaPath[strings.LastIndex(mediaPath, ".")+1:])
+			filename = filepath.Base(mediaPath)
+			ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(mediaPath), "."))
 			switch ext {
 			case "jpg", "jpeg", "png", "gif", "webp":
 				mediaType = "image"
@@ -894,7 +902,10 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 			}
 		}
 
-		if chatErr := messageStore.StoreChat(chatJID, storageJID.User, timestamp); chatErr != nil {
+		// Pass empty name so StoreChat preserves any existing resolved
+		// contact/group name; we don't have one available here and
+		// must not clobber names from inbound handling or history sync.
+		if chatErr := messageStore.StoreChat(chatJID, "", timestamp); chatErr != nil {
 			fmt.Printf("Warning: failed to store outbound chat metadata: %v\n", chatErr)
 		}
 		if storeErr := messageStore.StoreMessage(
