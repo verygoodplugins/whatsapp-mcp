@@ -889,7 +889,7 @@ func extractChatEphemeralFromMessage(msg *waProto.Message) ChatEphemeralSettings
 	}
 }
 
-func updateChatEphemeralSettingsFromProtocolMessage(messageStore *MessageStore, chatJID string, msg *waProto.Message, logger waLog.Logger) {
+func updateChatEphemeralSettingsFromProtocolMessage(messageStore *MessageStore, chatJID string, msg *waProto.Message, eventTimestamp int64, logger waLog.Logger) {
 	if msg == nil || msg.GetProtocolMessage() == nil {
 		return
 	}
@@ -901,8 +901,12 @@ func updateChatEphemeralSettingsFromProtocolMessage(messageStore *MessageStore, 
 
 	expiration := protoMsg.GetEphemeralExpiration()
 	settingTimestamp := protoMsg.GetEphemeralSettingTimestamp()
+	// Fall back to the carrier event's timestamp rather than time.Now() so a
+	// late-arriving older event doesn't get stamped "newer than" subsequent
+	// updates and then block them via the monotonic WHERE clause in
+	// UpdateChatEphemeralSettings.
 	if settingTimestamp == 0 {
-		settingTimestamp = time.Now().Unix()
+		settingTimestamp = eventTimestamp
 	}
 
 	if err := messageStore.UpdateChatEphemeralSettings(chatJID, expiration, settingTimestamp); err != nil {
@@ -1323,7 +1327,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		logger.Warnf("Failed to store chat: %v", err)
 	}
 
-	updateChatEphemeralSettingsFromProtocolMessage(messageStore, chatJID, msg.Message, logger)
+	updateChatEphemeralSettingsFromProtocolMessage(messageStore, chatJID, msg.Message, msg.Info.Timestamp.Unix(), logger)
 
 	// Backfill ephemeral state from any regular message's ContextInfo.
 	// EPHEMERAL_SETTING ProtocolMessages and GroupInfo events only fire on
