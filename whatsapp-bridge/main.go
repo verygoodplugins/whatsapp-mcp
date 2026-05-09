@@ -1344,23 +1344,23 @@ type VotePollRequest struct {
 // message), since whatsmeow.Client.BuildPollVote needs the original poll's
 // MessageInfo to derive the per-poll secret.
 func voteOnWhatsAppPoll(client *whatsmeow.Client, messageStore *MessageStore,
-	pollMsgID, pollChatJID string, selectedOptions []string) (bool, string) {
+	pollMsgID, pollChatJID string, selectedOptions []string) (bool, int, string) {
 	if !client.IsConnected() {
-		return false, "Not connected to WhatsApp"
+		return false, http.StatusServiceUnavailable, "Not connected to WhatsApp"
 	}
 	if pollMsgID == "" {
-		return false, "poll_message_id is required"
+		return false, http.StatusBadRequest, "poll_message_id is required"
 	}
 	if pollChatJID == "" {
-		return false, "poll_chat_jid is required"
+		return false, http.StatusBadRequest, "poll_chat_jid is required"
 	}
 
 	poll, err := messageStore.GetPoll(pollMsgID, pollChatJID)
 	if err != nil {
-		return false, fmt.Sprintf("Failed to look up poll: %v", err)
+		return false, http.StatusInternalServerError, fmt.Sprintf("Failed to look up poll: %v", err)
 	}
 	if poll == nil {
-		return false, "Poll not found in local store. The poll must have been observed live by the bridge."
+		return false, http.StatusNotFound, "Poll not found in local store. The poll must have been observed live by the bridge."
 	}
 
 	// Validate that every selected option exists on the poll, and that the
@@ -1371,16 +1371,16 @@ func voteOnWhatsAppPoll(client *whatsmeow.Client, messageStore *MessageStore,
 	}
 	for _, o := range selectedOptions {
 		if _, ok := known[o]; !ok {
-			return false, fmt.Sprintf("Option %q is not part of this poll", o)
+			return false, http.StatusBadRequest, fmt.Sprintf("Option %q is not part of this poll", o)
 		}
 	}
 	if poll.SelectableCount > 0 && len(selectedOptions) > poll.SelectableCount {
-		return false, fmt.Sprintf("This poll allows at most %d selections", poll.SelectableCount)
+		return false, http.StatusBadRequest, fmt.Sprintf("This poll allows at most %d selections", poll.SelectableCount)
 	}
 
 	chatJID, err := types.ParseJID(poll.ChatJID)
 	if err != nil {
-		return false, fmt.Sprintf("Invalid poll chat JID %q: %v", poll.ChatJID, err)
+		return false, http.StatusInternalServerError, fmt.Sprintf("Invalid poll chat JID %q: %v", poll.ChatJID, err)
 	}
 
 	// Reconstruct the original poll's MessageInfo. Sender is stored as the
@@ -1401,11 +1401,11 @@ func voteOnWhatsAppPoll(client *whatsmeow.Client, messageStore *MessageStore,
 	ctx := context.Background()
 	voteMsg, err := client.BuildPollVote(ctx, info, selectedOptions)
 	if err != nil {
-		return false, fmt.Sprintf("Failed to build poll vote: %v", err)
+		return false, http.StatusInternalServerError, fmt.Sprintf("Failed to build poll vote: %v", err)
 	}
 
 	if _, err := client.SendMessage(ctx, chatJID, voteMsg); err != nil {
-		return false, fmt.Sprintf("Failed to send poll vote: %v", err)
+		return false, http.StatusInternalServerError, fmt.Sprintf("Failed to send poll vote: %v", err)
 	}
 
 	// whatsmeow does not deliver our own outgoing PollUpdateMessage as an
@@ -1420,9 +1420,9 @@ func voteOnWhatsAppPoll(client *whatsmeow.Client, messageStore *MessageStore,
 	}
 
 	if len(selectedOptions) == 0 {
-		return true, "Cleared vote on poll"
+		return true, http.StatusOK, "Cleared vote on poll"
 	}
-	return true, fmt.Sprintf("Voted on poll (%d selection(s))", len(selectedOptions))
+	return true, http.StatusOK, fmt.Sprintf("Voted on poll (%d selection(s))", len(selectedOptions))
 }
 
 // pollCreationInfo is a normalised view of WhatsApp's five PollCreationMessage
@@ -2274,11 +2274,11 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			}
 		}
 
-		success, message := voteOnWhatsAppPoll(client, messageStore, req.PollMessageID, req.PollChatJID, req.SelectedOptions)
+		success, status, message := voteOnWhatsAppPoll(client, messageStore, req.PollMessageID, req.PollChatJID, req.SelectedOptions)
 
 		w.Header().Set("Content-Type", "application/json")
 		if !success {
-			w.WriteHeader(http.StatusInternalServerError)
+			w.WriteHeader(status)
 		}
 		_ = json.NewEncoder(w).Encode(SendMessageResponse{
 			Success: success,
