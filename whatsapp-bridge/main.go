@@ -1106,14 +1106,17 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 	return true, fmt.Sprintf("Message sent to %s", recipient)
 }
 
-// SendPollRequest represents the request body for the send poll API
+// SendPollRequest represents the request body for the send poll API.
+// SelectableOptionCount follows whatsmeow semantics:
+//
+//	0 = multi-select with no limit (also the zero-value default when omitted)
+//	1 = single-select
+//	N = multi-select up to N (1 < N <= len(Options))
 type SendPollRequest struct {
-	Recipient string   `json:"recipient"`
-	Name      string   `json:"name"`
-	Options   []string `json:"options"`
-	// Pointer so we can distinguish "omitted" (nil → default to 1)
-	// from "explicitly set to 0" (rejected by validation).
-	SelectableOptionCount *int `json:"selectable_option_count,omitempty"`
+	Recipient             string   `json:"recipient"`
+	Name                  string   `json:"name"`
+	Options               []string `json:"options"`
+	SelectableOptionCount int      `json:"selectable_option_count,omitempty"`
 }
 
 // resolveRecipientJID parses a phone number or JID string and resolves PN -> LID
@@ -1818,16 +1821,14 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 				return
 			}
 		}
-		selectable := 1
-		if req.SelectableOptionCount != nil {
-			selectable = *req.SelectableOptionCount
-		}
-		if selectable < 1 || selectable > len(req.Options) {
-			http.Error(w, "selectable_option_count must be between 1 and len(options)", http.StatusBadRequest)
+		// whatsmeow coerces out-of-range values to 0, which silently changes the
+		// poll's selection mode. Reject them upfront so the caller knows.
+		if req.SelectableOptionCount < 0 || req.SelectableOptionCount > len(req.Options) {
+			http.Error(w, "selectable_option_count must be 0 (unlimited) or between 1 and len(options)", http.StatusBadRequest)
 			return
 		}
 
-		success, message := sendWhatsAppPoll(client, req.Recipient, req.Name, req.Options, selectable)
+		success, message := sendWhatsAppPoll(client, req.Recipient, req.Name, req.Options, req.SelectableOptionCount)
 
 		w.Header().Set("Content-Type", "application/json")
 		if !success {

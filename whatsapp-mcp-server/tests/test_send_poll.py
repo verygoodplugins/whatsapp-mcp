@@ -36,10 +36,21 @@ class TestSendPollValidation:
         assert not ok
         assert "selectable_option_count" in msg
 
-    def test_selectable_count_zero_rejected(self):
-        ok, msg = send_poll("123@s.whatsapp.net", "Q?", ["a", "b"], selectable_option_count=0)
+    def test_selectable_count_negative_rejected(self):
+        ok, msg = send_poll("123@s.whatsapp.net", "Q?", ["a", "b"], selectable_option_count=-1)
         assert not ok
         assert "selectable_option_count" in msg
+
+    def test_selectable_count_zero_allowed_unlimited(self):
+        # whatsmeow treats 0 as "multi-select with no limit" — must remain valid.
+        with patch("whatsapp.requests.post") as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {"success": True, "message": "Poll sent to 123"}
+
+            ok, _ = send_poll("123@s.whatsapp.net", "Q?", ["a", "b"], selectable_option_count=0)
+
+            assert ok
+            assert mock_post.call_args.kwargs["json"]["selectable_option_count"] == 0
 
     def test_valid_request_calls_bridge(self):
         with patch("whatsapp.requests.post") as mock_post:
