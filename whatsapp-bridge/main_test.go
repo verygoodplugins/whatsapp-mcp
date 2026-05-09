@@ -242,6 +242,11 @@ func TestExtractChatEphemeralFromMessage(t *testing.T) {
 			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
 		},
 		{
+			name: "StickerMessage",
+			msg:  &waProto.Message{StickerMessage: &waProto.StickerMessage{ContextInfo: ctx}},
+			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
+		},
+		{
 			name: "Conversation (no ContextInfo at all)",
 			msg:  &waProto.Message{Conversation: proto.String("plain text")},
 			want: ChatEphemeralSettings{},

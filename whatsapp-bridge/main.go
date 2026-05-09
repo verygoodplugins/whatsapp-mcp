@@ -169,8 +169,8 @@ func ensureColumn(db *sql.DB, tableName, columnName, columnSpec string) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = rows.Close() }()
 
+	exists := false
 	for rows.Next() {
 		var cid int
 		var name string
@@ -179,14 +179,24 @@ func ensureColumn(db *sql.DB, tableName, columnName, columnSpec string) error {
 		var dfltValue sql.NullString
 		var pk int
 		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			_ = rows.Close()
 			return err
 		}
 		if name == columnName {
-			return nil
+			exists = true
 		}
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
 		return err
+	}
+	// Close before ALTER: SQLite holds a read lock while rows are open,
+	// which would make the schema change fail with "database is locked".
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if exists {
+		return nil
 	}
 
 	_, err = db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", tableName, columnName, columnSpec))
@@ -569,14 +579,18 @@ func (store *MessageStore) UpdateChatEphemeralSettings(jid string, expiration ui
 	if settingTimestamp == 0 {
 		return nil
 	}
+	// INSERT only the ephemeral columns; leave name/last_message_time NULL
+	// so a `GroupInfo` event firing before any StoreChat call doesn't
+	// fabricate placeholder metadata (raw JID as name, year-0001 timestamp)
+	// that would leak into list_chats output.
 	_, err := store.db.Exec(
-		`INSERT INTO chats (jid, name, last_message_time, ephemeral_expiration, ephemeral_setting_timestamp)
-		VALUES (?, ?, ?, ?, ?)
+		`INSERT INTO chats (jid, ephemeral_expiration, ephemeral_setting_timestamp)
+		VALUES (?, ?, ?)
 		ON CONFLICT(jid) DO UPDATE SET
 			ephemeral_expiration = excluded.ephemeral_expiration,
 			ephemeral_setting_timestamp = excluded.ephemeral_setting_timestamp
 		WHERE excluded.ephemeral_setting_timestamp >= chats.ephemeral_setting_timestamp`,
-		jid, jid, time.Time{}, expiration, settingTimestamp,
+		jid, expiration, settingTimestamp,
 	)
 	return err
 }
