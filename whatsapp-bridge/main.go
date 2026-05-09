@@ -693,7 +693,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		}
 	}
 
-	// LOCAL PATCH: capture pre-LID-resolution JID for SQLite storage.
+	// Capture pre-LID-resolution JID for SQLite storage.
 	// handleMessage uses resolveLIDChat to map LID→phone for incoming events;
 	// for outbound we keep the pre-resolution form so the chat stays unified
 	// under @s.whatsapp.net (matches what list_chats / list_messages expect).
@@ -862,12 +862,10 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		return false, fmt.Sprintf("Error sending message: %v", err)
 	}
 
-	// LOCAL PATCH (Comunicaciones project): whatsmeow does not re-emit
-	// events.Message for messages this client itself just sent, so without
-	// an explicit StoreMessage call here list_messages / get_last_interaction
-	// never see our own outbound traffic. Same bug exists upstream in
-	// verygoodplugins/whatsapp-mcp (and lharries/whatsapp-mcp). See
-	// docs/SETUP.md "Outbound no se persiste en SQLite local".
+	// whatsmeow does not re-emit events.Message for messages this client
+	// itself just sent, so without an explicit StoreMessage call here
+	// list_messages / get_last_interaction never see our own outbound
+	// traffic until WhatsApp's multi-device sync echoes them back.
 	if messageStore != nil && client.Store != nil && client.Store.ID != nil {
 		chatJID := storageJID.String()
 		senderUser := client.Store.ID.User
