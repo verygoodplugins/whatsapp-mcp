@@ -1071,7 +1071,11 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		msg.Conversation = proto.String(message)
 	}
 
-	settings, err := messageStore.GetChatEphemeralSettings(settingsLookupJID.String())
+	// Normalize @lid recipients to phone JID before the lookup. Chats are
+	// persisted under @s.whatsapp.net (handleMessage normalizes via
+	// resolveLIDChat); without this step, an API caller passing an @lid
+	// recipient would silently miss the disappearing-message settings row.
+	settings, err := messageStore.GetChatEphemeralSettings(resolveUserJID(client, settingsLookupJID, types.EmptyJID).String())
 	if err != nil && err != sql.ErrNoRows {
 		return false, fmt.Sprintf("Error loading chat settings: %v", err)
 	}
