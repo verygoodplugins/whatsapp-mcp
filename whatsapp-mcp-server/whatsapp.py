@@ -996,8 +996,8 @@ def send_poll(
         if any(not opt or not opt.strip() for opt in options):
             return False, "Poll options must not be empty"
 
-        if selectable_option_count < 0 or selectable_option_count > len(options):
-            return False, "selectable_option_count must be between 0 and len(options)"
+        if selectable_option_count < 1 or selectable_option_count > len(options):
+            return False, "selectable_option_count must be between 1 and len(options)"
 
         url = f"{WHATSAPP_API_BASE_URL}/send/poll"
         payload = {

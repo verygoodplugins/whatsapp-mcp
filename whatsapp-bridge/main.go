@@ -927,57 +927,23 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		return false, "Not connected to WhatsApp"
 	}
 
-	// Create JID for recipient
-	var recipientJID types.JID
-	var settingsLookupJID types.JID
-	var err error
-
-	// Check if recipient is a JID
-	isJID := strings.Contains(recipient, "@")
-
-	if isJID {
-		// Parse the JID string
-		recipientJID, err = types.ParseJID(recipient)
-		if err != nil {
-			return false, fmt.Sprintf("Error parsing JID: %v", err)
+	// Parse the raw JID (pre-LID resolution) for settings lookup and SQLite
+	// storage: rows are keyed by @s.whatsapp.net, not @lid.
+	var storageJID types.JID
+	if strings.Contains(recipient, "@") {
+		var parseErr error
+		storageJID, parseErr = types.ParseJID(recipient)
+		if parseErr != nil {
+			return false, fmt.Sprintf("Error parsing JID: %v", parseErr)
 		}
 	} else {
-		// Create JID from phone number
-		recipientJID = types.JID{
-			User:   recipient,
-			Server: "s.whatsapp.net", // For personal chats
-		}
+		storageJID = types.JID{User: recipient, Server: "s.whatsapp.net"}
 	}
-	settingsLookupJID = recipientJID
+	settingsLookupJID := storageJID
 
-	// Capture pre-LID-resolution JID for SQLite storage.
-	// handleMessage uses resolveLIDChat to map LID→phone for incoming events;
-	// for outbound we keep the pre-resolution form so the chat stays unified
-	// under @s.whatsapp.net (matches what list_chats / list_messages expect).
-	storageJID := recipientJID
-
-	// For personal chats, resolve phone number JID to LID (Linked Identity).
-	// WhatsApp is migrating to LID-based addressing; messages sent to the
-	// phone JID silently fail for migrated contacts.
-	if recipientJID.Server == types.DefaultUserServer {
-		ctx := context.Background()
-		lid, lidErr := client.Store.LIDs.GetLIDForPN(ctx, recipientJID)
-		if lidErr == nil && !lid.IsEmpty() {
-			fmt.Printf("Resolved %s -> %s (LID)\n", recipientJID, lid)
-			recipientJID = lid
-		} else {
-			// Cache miss or cache error — ask the WhatsApp server.
-			if lidErr != nil {
-				fmt.Printf("Warning: LID cache lookup failed for %s: %v, falling back to server\n", recipientJID, lidErr)
-			}
-			info, infoErr := client.GetUserInfo(ctx, []types.JID{recipientJID})
-			if infoErr != nil {
-				fmt.Printf("Warning: server LID lookup failed for %s: %v\n", recipientJID, infoErr)
-			} else if userInfo, ok := info[recipientJID]; ok && !userInfo.LID.IsEmpty() {
-				fmt.Printf("Resolved %s -> %s (LID via server)\n", recipientJID, userInfo.LID)
-				recipientJID = userInfo.LID
-			}
-		}
+	recipientJID, err := resolveRecipientJID(client, recipient)
+	if err != nil {
+		return false, err.Error()
 	}
 
 	msg := &waProto.Message{}
@@ -1142,10 +1108,12 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 
 // SendPollRequest represents the request body for the send poll API
 type SendPollRequest struct {
-	Recipient             string   `json:"recipient"`
-	Name                  string   `json:"name"`
-	Options               []string `json:"options"`
-	SelectableOptionCount int      `json:"selectable_option_count,omitempty"`
+	Recipient string   `json:"recipient"`
+	Name      string   `json:"name"`
+	Options   []string `json:"options"`
+	// Pointer so we can distinguish "omitted" (nil → default to 1)
+	// from "explicitly set to 0" (rejected by validation).
+	SelectableOptionCount *int `json:"selectable_option_count,omitempty"`
 }
 
 // resolveRecipientJID parses a phone number or JID string and resolves PN -> LID
@@ -1850,12 +1818,16 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 				return
 			}
 		}
-		if req.SelectableOptionCount < 0 || req.SelectableOptionCount > len(req.Options) {
-			http.Error(w, "selectable_option_count must be between 0 and len(options)", http.StatusBadRequest)
+		selectable := 1
+		if req.SelectableOptionCount != nil {
+			selectable = *req.SelectableOptionCount
+		}
+		if selectable < 1 || selectable > len(req.Options) {
+			http.Error(w, "selectable_option_count must be between 1 and len(options)", http.StatusBadRequest)
 			return
 		}
 
-		success, message := sendWhatsAppPoll(client, req.Recipient, req.Name, req.Options, req.SelectableOptionCount)
+		success, message := sendWhatsAppPoll(client, req.Recipient, req.Name, req.Options, selectable)
 
 		w.Header().Set("Content-Type", "application/json")
 		if !success {

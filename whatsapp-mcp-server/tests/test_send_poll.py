@@ -36,6 +36,11 @@ class TestSendPollValidation:
         assert not ok
         assert "selectable_option_count" in msg
 
+    def test_selectable_count_zero_rejected(self):
+        ok, msg = send_poll("123@s.whatsapp.net", "Q?", ["a", "b"], selectable_option_count=0)
+        assert not ok
+        assert "selectable_option_count" in msg
+
     def test_valid_request_calls_bridge(self):
         with patch("whatsapp.requests.post") as mock_post:
             mock_post.return_value.status_code = 200
