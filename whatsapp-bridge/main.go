@@ -484,14 +484,21 @@ func (store *MessageStore) Close() error {
 // Store a chat in the database. An empty `name` preserves any existing
 // resolved contact/group name on the row — outbound-message persistence
 // doesn't have a friendly name available at send time and must not clobber
-// names set by inbound handling or history sync.
+// names set by inbound handling or history sync. last_message_time is
+// merged monotonically so out-of-order delivery (history sync, backfill)
+// can't move it backwards.
 func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time) error {
 	_, err := store.db.Exec(
 		`INSERT INTO chats (jid, name, last_message_time)
 		VALUES (?, ?, ?)
 		ON CONFLICT(jid) DO UPDATE SET
 			name = CASE WHEN excluded.name = '' THEN chats.name ELSE excluded.name END,
-			last_message_time = excluded.last_message_time`,
+			last_message_time = CASE
+				WHEN chats.last_message_time IS NULL THEN excluded.last_message_time
+				WHEN excluded.last_message_time IS NULL THEN chats.last_message_time
+				WHEN excluded.last_message_time > chats.last_message_time THEN excluded.last_message_time
+				ELSE chats.last_message_time
+			END`,
 		jid, name, lastMessageTime,
 	)
 	return err
@@ -673,6 +680,34 @@ type SendMessageRequest struct {
 	MediaPath string `json:"media_path,omitempty"`
 }
 
+// classifyMediaPath maps a file extension to (whatsmeow upload type, MIME
+// type, persist-side category). Single source of truth for the upload path
+// (which needs the whatsmeow.MediaType + MIME) and the SQLite persist path
+// (which stores the short category string).
+func classifyMediaPath(mediaPath string) (whatsmeow.MediaType, string, string) {
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(mediaPath), "."))
+	switch ext {
+	case "jpg", "jpeg":
+		return whatsmeow.MediaImage, "image/jpeg", "image"
+	case "png":
+		return whatsmeow.MediaImage, "image/png", "image"
+	case "gif":
+		return whatsmeow.MediaImage, "image/gif", "image"
+	case "webp":
+		return whatsmeow.MediaImage, "image/webp", "image"
+	case "ogg":
+		return whatsmeow.MediaAudio, "audio/ogg; codecs=opus", "audio"
+	case "mp4":
+		return whatsmeow.MediaVideo, "video/mp4", "video"
+	case "avi":
+		return whatsmeow.MediaVideo, "video/avi", "video"
+	case "mov":
+		return whatsmeow.MediaVideo, "video/quicktime", "video"
+	default:
+		return whatsmeow.MediaDocument, "application/octet-stream", "document"
+	}
+}
+
 // Function to send a WhatsApp message
 func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string) (bool, string) {
 	if !client.IsConnected() {
@@ -740,48 +775,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 			return false, fmt.Sprintf("Error reading media file: %v", err)
 		}
 
-		// Determine media type and mime type based on file extension
-		fileExt := strings.ToLower(mediaPath[strings.LastIndex(mediaPath, ".")+1:])
-		var mediaType whatsmeow.MediaType
-		var mimeType string
-
-		// Handle different media types
-		switch fileExt {
-		// Image types
-		case "jpg", "jpeg":
-			mediaType = whatsmeow.MediaImage
-			mimeType = "image/jpeg"
-		case "png":
-			mediaType = whatsmeow.MediaImage
-			mimeType = "image/png"
-		case "gif":
-			mediaType = whatsmeow.MediaImage
-			mimeType = "image/gif"
-		case "webp":
-			mediaType = whatsmeow.MediaImage
-			mimeType = "image/webp"
-
-		// Audio types
-		case "ogg":
-			mediaType = whatsmeow.MediaAudio
-			mimeType = "audio/ogg; codecs=opus"
-
-		// Video types
-		case "mp4":
-			mediaType = whatsmeow.MediaVideo
-			mimeType = "video/mp4"
-		case "avi":
-			mediaType = whatsmeow.MediaVideo
-			mimeType = "video/avi"
-		case "mov":
-			mediaType = whatsmeow.MediaVideo
-			mimeType = "video/quicktime"
-
-		// Document types (for any other file type)
-		default:
-			mediaType = whatsmeow.MediaDocument
-			mimeType = "application/octet-stream"
-		}
+		mediaType, mimeType, _ := classifyMediaPath(mediaPath)
 
 		// Upload media to WhatsApp servers
 		resp, err := client.Upload(context.Background(), mediaData, mediaType)
