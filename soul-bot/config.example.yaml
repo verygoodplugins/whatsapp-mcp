@@ -7,6 +7,17 @@ operators:
 
 bot:
   auto_reply: false
+  default_action: "ignore"
+  question_action: "group_reply"
+  weight_action: "ack"
+  casual_action: "ignore"
+  photo_action: "operator_review"
+  sensitive_action: "operator_review"
+  vision_enabled: false
+  vision_provider: "none" # none | claude_code
+  media_dir: "/data/media"
+  claude_code_cwd: "/tmp"
+  claude_code_timeout_seconds: 90
   language: "he"
   require_operator_approval_for_sensitive: true
   soul_prompt_path: "/app/SOUL.md"

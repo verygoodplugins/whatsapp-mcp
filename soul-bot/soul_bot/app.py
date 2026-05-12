@@ -14,8 +14,17 @@ from .bridge import WhatsAppBridge
 from .config import AppConfig, load_config, normalize_jid
 from .db import BotStore
 from .llm import SoulResponder
+from .media import save_media_base64
+from .vision import analyze_weight_photo
 
 WEIGHT_RE = re.compile(r"(?<!\d)([4-9]\d(?:[.,]\d)?|1[0-9]{2}(?:[.,]\d)?|2[0-4]\d(?:[.,]\d)?)(?:\s*(?:kg|קג|ק\"ג|קילו))?", re.I)
+QUESTION_RE = re.compile(r"\\?|מה|איך|כמה|למה|אפשר|כדאי|עזרה|תקוע|תקועה|help|how|what|why|should", re.I)
+CASUAL_RE = re.compile(r"^(תודה|תודה רבה|חח+|חחח|👍|🙏|❤️|סבבה|אוקיי|ok|thanks|thank you|lol|haha)[.!\\s]*$", re.I)
+SENSITIVE_RE = re.compile(
+    r"הקאה|להקיא|צום|לא לאכול|משלשל|כדורים|אוזמפיק|ווגובי|סוכרת|הריון|בהריון|דיכאון|אובד|פגיעה עצמית|"
+    r"purge|vomit|fasting|laxative|ozempic|wegovy|diabetes|pregnan|suicid|self harm|eating disorder",
+    re.I,
+)
 WEEKDAYS = {
     "monday": 0,
     "tuesday": 1,
@@ -92,6 +101,9 @@ def create_app(config: AppConfig | None = None, store: BotStore | None = None) -
         role = classify_sender(config, sender, payload.isFromMe)
         store.upsert_member(payload.chatJID, sender, role)
         message_id = store.store_message(payload.model_dump(), role)
+        media_path = save_payload_media(config, payload, message_id)
+        if media_path:
+            store.set_message_media_path(message_id, media_path)
 
         weight = extract_weight(payload.content)
         if weight is not None and role == "participant":
@@ -102,17 +114,51 @@ def create_app(config: AppConfig | None = None, store: BotStore | None = None) -
         if role == "operator":
             action, reply = await handle_operator_command(payload, store, bridge)
         elif config.bot.auto_reply and role == "participant":
-            reply = await responder.maybe_reply(
-                sender_role=role,
-                sender=sender,
-                content=payload.content,
-                chat_history=format_history(store, payload.chatJID),
-            )
+            decision = decide_participant_action(config, payload, weight)
+            action = decision
+            if decision == "ack_weight":
+                reply = "נרשם, תודה ❤️"
+            elif decision == "vision_review" and media_path:
+                vision = await analyze_weight_photo(config.bot, media_path, sender)
+                store.store_vision_review(
+                    message_id=message_id,
+                    provider=config.bot.vision_provider,
+                    status=vision.status,
+                    weight_kg=vision.weight_kg,
+                    confidence=vision.confidence,
+                    explanation=vision.explanation,
+                    raw_response=vision.raw_response,
+                )
+                if vision.is_weight:
+                    store.store_weight(payload.chatJID, sender, vision.weight_kg or 0, message_id, "auto-detected from image")
+                    reply = vision.reply or f"נרשם, תודה ❤️ קלטתי {vision.weight_kg:g} ק״ג."
+                elif vision.status in {"not_readable", "not_scale_photo"}:
+                    reply = vision.reply or "קיבלתי את התמונה, אבל לא הצלחתי לקרוא ממנה משקל ברור. אפשר לשלוח שוב תמונה חדה יותר או לכתוב את המשקל?"
+                else:
+                    action = vision.status
+            elif decision == "operator_review_photo":
+                reply = None
+            elif decision == "group_reply":
+                reply = await responder.maybe_reply(
+                    sender_role=role,
+                    sender=sender,
+                    content=payload.content,
+                    chat_history=format_history(store, payload.chatJID),
+                    intent=decision,
+                )
             if reply:
                 await bridge.send_message(payload.chatJID, reply)
-                action = "auto_replied"
+                action = f"{decision}_sent"
 
-        return {"ok": True, "role": role, "action": action, "message_id": message_id, "weight_kg": weight, "reply": reply}
+        return {
+            "ok": True,
+            "role": role,
+            "action": action,
+            "message_id": message_id,
+            "weight_kg": weight,
+            "media_path": media_path,
+            "reply": reply,
+        }
 
     @app.get("/admin/groups/{chat_jid}/members")
     def list_members(chat_jid: str) -> dict:
@@ -151,6 +197,49 @@ def extract_weight(content: str) -> float | None:
     if not match:
         return None
     return float(match.group(1).replace(",", "."))
+
+
+def save_payload_media(config: AppConfig, payload: WebhookPayload, message_id: int) -> str | None:
+    if not payload.mediaBase64:
+        return None
+    return save_media_base64(
+        payload.mediaBase64,
+        media_dir=config.bot.media_dir,
+        message_id=message_id,
+        filename=payload.mediaFilename,
+    )
+
+
+def classify_participant_intent(payload: WebhookPayload, weight: float | None = None) -> str:
+    content = payload.content or ""
+    if SENSITIVE_RE.search(content):
+        return "sensitive"
+    if payload.mediaType:
+        return "photo" if payload.mediaType == "image" else "media"
+    if weight is not None:
+        return "weight"
+    if CASUAL_RE.search(content.strip()):
+        return "casual"
+    if QUESTION_RE.search(content):
+        return "question"
+    return "unknown"
+
+
+def decide_participant_action(config: AppConfig, payload: WebhookPayload, weight: float | None = None) -> str:
+    intent = classify_participant_intent(payload, weight)
+    if intent == "sensitive":
+        return "operator_review_sensitive"
+    if intent == "photo":
+        if config.bot.vision_enabled:
+            return "vision_review"
+        return "operator_review_photo"
+    if intent == "weight":
+        return "ack_weight" if config.bot.weight_action == "ack" else config.bot.weight_action
+    if intent == "casual":
+        return config.bot.casual_action
+    if intent == "question":
+        return config.bot.question_action
+    return config.bot.default_action
 
 
 async def handle_operator_command(payload: WebhookPayload, store: BotStore, bridge: WhatsAppBridge) -> tuple[str, str | None]:

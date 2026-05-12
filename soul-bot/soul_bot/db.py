@@ -57,6 +57,7 @@ class BotStore:
                     is_from_me INTEGER NOT NULL DEFAULT 0,
                     media_type TEXT,
                     media_filename TEXT,
+                    media_path TEXT,
                     media_base64 TEXT,
                     quoted_message_id TEXT,
                     quoted_sender TEXT,
@@ -81,8 +82,26 @@ class BotStore:
                     sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     message TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS vision_reviews (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id INTEGER NOT NULL,
+                    provider TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    weight_kg REAL,
+                    confidence REAL,
+                    explanation TEXT NOT NULL DEFAULT '',
+                    raw_response TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
                 """
             )
+            self._ensure_column(conn, "messages", "media_path", "TEXT")
+
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def upsert_group(self, jid: str, name: str = "") -> None:
         with self.connect() as conn:
@@ -111,9 +130,9 @@ class BotStore:
                 """
                 INSERT INTO messages (
                     source_message_id, chat_jid, sender_jid, role, content, is_from_me,
-                    media_type, media_filename, media_base64,
+                    media_type, media_filename, media_path, media_base64,
                     quoted_message_id, quoted_sender, quoted_content
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload.get("messageId"),
@@ -124,6 +143,7 @@ class BotStore:
                     1 if payload.get("isFromMe") else 0,
                     payload.get("mediaType"),
                     payload.get("mediaFilename"),
+                    payload.get("mediaPath"),
                     payload.get("mediaBase64"),
                     payload.get("quotedMessageId"),
                     payload.get("quotedSender"),
@@ -131,6 +151,10 @@ class BotStore:
                 ),
             )
             return int(cursor.lastrowid)
+
+    def set_message_media_path(self, message_id: int, media_path: str) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE messages SET media_path = ? WHERE id = ?", (media_path, message_id))
 
     def store_weight(self, chat_jid: str, member_jid: str, weight_kg: float, message_id: int | None, note: str = "") -> int:
         with self.connect() as conn:
@@ -140,6 +164,26 @@ class BotStore:
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (chat_jid, member_jid, weight_kg, message_id, note),
+            )
+            return int(cursor.lastrowid)
+
+    def store_vision_review(
+        self,
+        message_id: int,
+        provider: str,
+        status: str,
+        weight_kg: float | None,
+        confidence: float | None,
+        explanation: str,
+        raw_response: str = "",
+    ) -> int:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO vision_reviews (message_id, provider, status, weight_kg, confidence, explanation, raw_response)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (message_id, provider, status, weight_kg, confidence, explanation, raw_response),
             )
             return int(cursor.lastrowid)
 

@@ -17,6 +17,17 @@ class WatchedGroup:
 @dataclass(frozen=True)
 class BotConfig:
     auto_reply: bool = False
+    default_action: str = "ignore"
+    question_action: str = "group_reply"
+    weight_action: str = "ack"
+    casual_action: str = "ignore"
+    photo_action: str = "operator_review"
+    sensitive_action: str = "operator_review"
+    vision_enabled: bool = False
+    vision_provider: str = "none"
+    media_dir: str = "data/media"
+    claude_code_cwd: str = "/tmp"
+    claude_code_timeout_seconds: int = 90
     language: str = "he"
     require_operator_approval_for_sensitive: bool = True
     soul_prompt_path: str = "SOUL.md"
@@ -82,6 +93,19 @@ def load_config(path: str | None = None) -> AppConfig:
 
     bot = BotConfig(
         auto_reply=bool(_env_or_raw("SOUL_BOT_AUTO_REPLY", bot_raw, "auto_reply", False)),
+        default_action=str(_env_or_raw("SOUL_BOT_DEFAULT_ACTION", bot_raw, "default_action", "ignore")),
+        question_action=str(_env_or_raw("SOUL_BOT_QUESTION_ACTION", bot_raw, "question_action", "group_reply")),
+        weight_action=str(_env_or_raw("SOUL_BOT_WEIGHT_ACTION", bot_raw, "weight_action", "ack")),
+        casual_action=str(_env_or_raw("SOUL_BOT_CASUAL_ACTION", bot_raw, "casual_action", "ignore")),
+        photo_action=str(_env_or_raw("SOUL_BOT_PHOTO_ACTION", bot_raw, "photo_action", "operator_review")),
+        sensitive_action=str(_env_or_raw("SOUL_BOT_SENSITIVE_ACTION", bot_raw, "sensitive_action", "operator_review")),
+        vision_enabled=bool(_env_or_raw("SOUL_BOT_VISION_ENABLED", bot_raw, "vision_enabled", False)),
+        vision_provider=str(_env_or_raw("SOUL_BOT_VISION_PROVIDER", bot_raw, "vision_provider", "none")),
+        media_dir=str(_env_or_raw("SOUL_BOT_MEDIA_DIR", bot_raw, "media_dir", "data/media")),
+        claude_code_cwd=str(_env_or_raw("SOUL_BOT_CLAUDE_CODE_CWD", bot_raw, "claude_code_cwd", "/tmp")),
+        claude_code_timeout_seconds=int(
+            _env_or_raw("SOUL_BOT_CLAUDE_CODE_TIMEOUT_SECONDS", bot_raw, "claude_code_timeout_seconds", 90)
+        ),
         language=str(_env_or_raw("SOUL_BOT_LANGUAGE", bot_raw, "language", "he")),
         require_operator_approval_for_sensitive=bool(
             _env_or_raw(

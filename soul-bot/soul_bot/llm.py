@@ -17,7 +17,7 @@ class SoulResponder:
             return ""
         return self.prompt_path.read_text(encoding="utf-8")
 
-    async def maybe_reply(self, *, sender_role: str, sender: str, content: str, chat_history: str) -> str | None:
+    async def maybe_reply(self, *, sender_role: str, sender: str, content: str, chat_history: str, intent: str) -> str | None:
         if not self.api_key or sender_role != "participant" or not content.strip():
             return None
 
@@ -32,6 +32,7 @@ class SoulResponder:
                     "content": (
                         f"Sender: {sender}\n"
                         f"Recent group history:\n{chat_history}\n\n"
+                        f"Detected intent: {intent}\n\n"
                         f"Participant message:\n{content}\n\n"
                         "Reply as the support-group admin assistant. Keep it short and WhatsApp-friendly."
                     ),
