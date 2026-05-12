@@ -1,0 +1,6 @@
+store/
+*.db
+*.log
+whatsapp-bridge
+whatsapp-client
+.venv/

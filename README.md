@@ -272,6 +272,26 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSMEOW_DB_PATH`    | `../whatsapp-bridge/store/whatsapp.db`   | whatsmeow DB used for LID ↔ phone resolution |
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
 
+## Docker + Support-Group Bot
+
+This fork includes an optional `soul-bot/` sidecar for a Weight Watchers-style WhatsApp support group. It receives bridge webhooks, stores group history in SQLite, separates operators from participants, tracks text-submitted weights, and sends weekly weigh-in reminders using the `SOUL.md` persona prompt.
+
+Create a local bot config, then start the bridge and bot:
+
+```bash
+cp soul-bot/config.example.yaml soul-bot/config.yaml
+# Edit soul-bot/config.yaml with your group JID and operator phone/JIDs.
+docker compose up --build
+```
+
+Scan the WhatsApp QR from:
+
+```bash
+docker compose logs -f whatsapp-bridge
+```
+
+See `soul-bot/README.md` for the bot commands and deployment notes.
+
 ### CLI flags (Go bridge)
 
 | Flag                  | Default | Description                                                                                                                                                                                                                                                       |

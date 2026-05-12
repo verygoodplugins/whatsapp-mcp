@@ -1,0 +1,32 @@
+services:
+  whatsapp-bridge:
+    build:
+      context: ./whatsapp-bridge
+    environment:
+      WHATSAPP_BRIDGE_PORT: "8080"
+      WEBHOOK_URL: "http://soul-bot:8769/whatsapp/webhook"
+      FORWARD_SELF: "false"
+    ports:
+      - "8080:8080"
+    volumes:
+      - whatsapp-bridge-store:/app/store
+    restart: unless-stopped
+
+  soul-bot:
+    build:
+      context: ./soul-bot
+    depends_on:
+      - whatsapp-bridge
+    environment:
+      SOUL_BOT_CONFIG: "/config/config.yaml"
+      WHATSAPP_API_URL: "http://whatsapp-bridge:8080/api"
+    ports:
+      - "8769:8769"
+    volumes:
+      - ./soul-bot/config.yaml:/config/config.yaml:ro
+      - soul-bot-data:/data
+    restart: unless-stopped
+
+volumes:
+  whatsapp-bridge-store:
+  soul-bot-data:

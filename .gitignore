@@ -47,6 +47,8 @@ build/
 # Environment
 .env
 .env.local
+soul-bot/config.yaml
+soul-bot/data/
 
 # Testing
 .pytest_cache/

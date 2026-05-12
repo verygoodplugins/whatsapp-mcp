@@ -1,0 +1,21 @@
+watched_groups:
+  - jid: "YOUR_GROUP_JID@g.us"
+    name: "Your support group"
+
+operators:
+  - "YOUR_OPERATOR_PHONE@s.whatsapp.net"
+
+bot:
+  auto_reply: false
+  language: "he"
+  require_operator_approval_for_sensitive: true
+  soul_prompt_path: "/app/SOUL.md"
+  database_path: "/data/soul-bot.db"
+  bridge_api_url: "http://whatsapp-bridge:8080/api"
+
+weekly_weigh_in:
+  enabled: true
+  day: "sunday"
+  time: "08:30"
+  timezone: "Asia/Jerusalem"
+  message: "בוקר טוב ❤️ זמן שקילה שבועית. כשתוכלו, שלחו תמונה חיה עם המשקל שלכם או כתבו את המשקל בפרטי."
