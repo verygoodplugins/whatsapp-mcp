@@ -128,73 +128,71 @@ def create_app(config: AppConfig | None = None, store: BotStore | None = None) -
             action, reply = await handle_operator_command(payload, store, config.weekly_weigh_in.timezone)
         elif config.bot.auto_reply and role == "participant":
             if payload.mediaType == "image" and config.bot.vision_enabled and media_path:
-                async with bridge.typing(payload.chatJID):
-                    vision = await analyze_weight_photo(config.bot, media_path, sender)
-                    store.store_vision_review(
-                        message_id=message_id,
-                        provider=config.bot.vision_provider,
-                        status=vision.status,
-                        weight_kg=vision.weight_kg,
-                        confidence=vision.confidence,
-                        explanation=vision.explanation,
-                        raw_response=vision.raw_response,
+                vision = await analyze_weight_photo(config.bot, media_path, sender)
+                store.store_vision_review(
+                    message_id=message_id,
+                    provider=config.bot.vision_provider,
+                    status=vision.status,
+                    weight_kg=vision.weight_kg,
+                    confidence=vision.confidence,
+                    explanation=vision.explanation,
+                    raw_response=vision.raw_response,
+                )
+                if vision.is_weight:
+                    store.store_weight(payload.chatJID, sender, vision.weight_kg or 0, message_id, "auto-detected from image")
+                caption = (payload.content or "").strip()
+                if caption:
+                    vision_context = (
+                        f"status={vision.status}; "
+                        f"weight_kg={vision.weight_kg}; "
+                        f"confidence={vision.confidence}; "
+                        f"explanation={vision.explanation}"
                     )
+                    decision = await responder.decide_and_reply(
+                        config=config.bot,
+                        sender=sender,
+                        sender_role=role,
+                        content=caption,
+                        chat_history=format_history(store, payload.chatJID, config.weekly_weigh_in.timezone),
+                        detected_weight=vision.weight_kg if vision.is_weight else weight,
+                        member_role=role,
+                        vision_context=vision_context,
+                        current_time=current_local_time(config.weekly_weigh_in.timezone),
+                    )
+                    action = f"vision+llm_{decision.action}"
+                    decision_reason = f"vision={vision.status}; llm={decision.reason}"
+                    if decision.action == "reply":
+                        reply = decision.reply
+                else:
+                    action = f"vision_{vision.status}"
+                    decision_reason = vision.explanation
                     if vision.is_weight:
-                        store.store_weight(payload.chatJID, sender, vision.weight_kg or 0, message_id, "auto-detected from image")
-                    caption = (payload.content or "").strip()
-                    if caption:
-                        vision_context = (
-                            f"status={vision.status}; "
-                            f"weight_kg={vision.weight_kg}; "
-                            f"confidence={vision.confidence}; "
-                            f"explanation={vision.explanation}"
-                        )
-                        decision = await responder.decide_and_reply(
-                            config=config.bot,
-                            sender=sender,
-                            sender_role=role,
-                            content=caption,
-                            chat_history=format_history(store, payload.chatJID, config.weekly_weigh_in.timezone),
-                            detected_weight=vision.weight_kg if vision.is_weight else weight,
-                            member_role=role,
-                            vision_context=vision_context,
-                            current_time=current_local_time(config.weekly_weigh_in.timezone),
-                        )
-                        action = f"vision+llm_{decision.action}"
-                        decision_reason = f"vision={vision.status}; llm={decision.reason}"
-                        if decision.action == "reply":
-                            reply = decision.reply
-                    else:
-                        action = f"vision_{vision.status}"
-                        decision_reason = vision.explanation
-                        if vision.is_weight:
-                            reply = vision.reply or f"נרשם, תודה ❤️ קלטתי {vision.weight_kg:g} ק״ג."
-                        elif vision.status in {"not_readable", "not_scale_photo"}:
-                            reply = vision.reply or "קיבלתי את התמונה, אבל לא הצלחתי לקרוא ממנה משקל ברור. אפשר לשלוח שוב תמונה חדה יותר או לכתוב את המשקל?"
+                        reply = vision.reply or f"נרשם, תודה ❤️ קלטתי {vision.weight_kg:g} ק״ג."
+                    elif vision.status in {"not_readable", "not_scale_photo"}:
+                        reply = vision.reply or "קיבלתי את התמונה, אבל לא הצלחתי לקרוא ממנה משקל ברור. אפשר לשלוח שוב תמונה חדה יותר או לכתוב את המשקל?"
             elif payload.mediaType == "image":
                 action = "operator_review_photo"
             elif SENSITIVE_RE.search(payload.content or ""):
                 action = "operator_review_sensitive"
                 decision_reason = "sensitive_regex_match"
             else:
-                async with bridge.typing(payload.chatJID):
-                    decision = await responder.decide_and_reply(
-                        config=config.bot,
-                        sender=sender,
-                        sender_role=role,
-                        content=payload.content,
-                        chat_history=format_history(store, payload.chatJID, config.weekly_weigh_in.timezone),
-                        detected_weight=weight,
-                        member_role=role,
-                        current_time=current_local_time(config.weekly_weigh_in.timezone),
-                    )
+                decision = await responder.decide_and_reply(
+                    config=config.bot,
+                    sender=sender,
+                    sender_role=role,
+                    content=payload.content,
+                    chat_history=format_history(store, payload.chatJID, config.weekly_weigh_in.timezone),
+                    detected_weight=weight,
+                    member_role=role,
+                    current_time=current_local_time(config.weekly_weigh_in.timezone),
+                )
                 action = f"llm_{decision.action}"
                 decision_reason = decision.reason
                 if decision.action == "reply":
                     reply = decision.reply
 
         if reply:
-            await bridge.send_message(payload.chatJID, reply)
+            await send_with_typing(bridge, payload.chatJID, reply)
             store.store_message(
                 {"chatJID": payload.chatJID, "sender": "soul-bot", "content": reply, "isFromMe": True},
                 role="self",
@@ -246,6 +244,13 @@ def create_app(config: AppConfig | None = None, store: BotStore | None = None) -
     return app
 
 
+async def send_with_typing(bridge: WhatsAppBridge, chat_jid: str, reply: str) -> None:
+    visible_seconds = min(4.0, max(1.0, len(reply) / 45))
+    async with bridge.typing(chat_jid):
+        await asyncio.sleep(visible_seconds)
+        await bridge.send_message(chat_jid, reply)
+
+
 def classify_sender(config: AppConfig, sender: str, is_from_me: bool) -> str:
     if is_from_me:
         return "self"
@@ -290,8 +295,7 @@ async def handle_group_event(payload: WebhookPayload, store: BotStore, bridge: W
     action = f"event_{payload.eventType}"
     if payload.eventType == "group_join" and auto_reply:
         reply = WELCOME_TEMPLATE
-        async with bridge.typing(payload.chatJID):
-            await bridge.send_message(payload.chatJID, reply)
+        await send_with_typing(bridge, payload.chatJID, reply)
         store.store_message(
             {"chatJID": payload.chatJID, "sender": "soul-bot", "content": reply, "isFromMe": True},
             role="self",
