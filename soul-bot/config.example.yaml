@@ -17,6 +17,7 @@ bot:
   vision_provider: "none" # none | claude_code
   media_dir: "/data/media"
   claude_code_cwd: "/tmp"
+  claude_code_model: "" # empty means use the local Claude Code default; e.g. "claude-opus-4-6"
   claude_code_timeout_seconds: 90
   language: "he"
   require_operator_approval_for_sensitive: true

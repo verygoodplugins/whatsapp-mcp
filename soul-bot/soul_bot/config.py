@@ -27,6 +27,7 @@ class BotConfig:
     vision_provider: str = "none"
     media_dir: str = "data/media"
     claude_code_cwd: str = "/tmp"
+    claude_code_model: str = ""
     claude_code_timeout_seconds: int = 90
     language: str = "he"
     require_operator_approval_for_sensitive: bool = True
@@ -36,12 +37,21 @@ class BotConfig:
 
 
 @dataclass(frozen=True)
+class WeighInNudge:
+    kind: str
+    offset_hours: float
+    intent: str = ""
+    message: str = ""  # fallback used only if the LLM fails or is unavailable
+
+
+@dataclass(frozen=True)
 class WeeklyWeighInConfig:
     enabled: bool = True
     day: str = "sunday"
     time: str = "08:30"
     timezone: str = "Asia/Jerusalem"
     message: str = "בוקר טוב ❤️ זמן שקילה שבועית. שלחו תמונה חיה עם המשקל שלכם."
+    nudges: tuple[WeighInNudge, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -103,6 +113,7 @@ def load_config(path: str | None = None) -> AppConfig:
         vision_provider=str(_env_or_raw("SOUL_BOT_VISION_PROVIDER", bot_raw, "vision_provider", "none")),
         media_dir=str(_env_or_raw("SOUL_BOT_MEDIA_DIR", bot_raw, "media_dir", "data/media")),
         claude_code_cwd=str(_env_or_raw("SOUL_BOT_CLAUDE_CODE_CWD", bot_raw, "claude_code_cwd", "/tmp")),
+        claude_code_model=str(_env_or_raw("SOUL_BOT_CLAUDE_CODE_MODEL", bot_raw, "claude_code_model", "")),
         claude_code_timeout_seconds=int(
             _env_or_raw("SOUL_BOT_CLAUDE_CODE_TIMEOUT_SECONDS", bot_raw, "claude_code_timeout_seconds", 90)
         ),
@@ -119,12 +130,23 @@ def load_config(path: str | None = None) -> AppConfig:
         database_path=str(_env_or_raw("SOUL_BOT_DB_PATH", bot_raw, "database_path", "data/soul-bot.db")),
         bridge_api_url=str(_env_or_raw("WHATSAPP_API_URL", bot_raw, "bridge_api_url", "http://localhost:8080/api")),
     )
+    nudges = tuple(
+        WeighInNudge(
+            kind=str(nudge.get("kind", f"nudge_{i + 1}")),
+            offset_hours=float(nudge.get("offset_hours", 0)),
+            intent=str(nudge.get("intent", "")),
+            message=str(nudge.get("message", "")),
+        )
+        for i, nudge in enumerate(weekly_raw.get("nudges", []) or [])
+        if nudge.get("intent") or nudge.get("message")
+    )
     weekly = WeeklyWeighInConfig(
         enabled=bool(_env_or_raw("SOUL_BOT_WEEKLY_ENABLED", weekly_raw, "enabled", True)),
         day=str(_env_or_raw("SOUL_BOT_WEEKLY_DAY", weekly_raw, "day", "sunday")),
         time=str(_env_or_raw("SOUL_BOT_WEEKLY_TIME", weekly_raw, "time", "08:30")),
         timezone=str(_env_or_raw("SOUL_BOT_TIMEZONE", weekly_raw, "timezone", "Asia/Jerusalem")),
         message=str(_env_or_raw("SOUL_BOT_WEEKLY_MESSAGE", weekly_raw, "message", WeeklyWeighInConfig.message)),
+        nudges=nudges,
     )
     return AppConfig(watched_groups=watched_groups, operators=operators, bot=bot, weekly_weigh_in=weekly)
 
@@ -136,3 +158,8 @@ def _env_or_raw(env_name: str, raw: dict[str, Any], key: str, default: Any) -> A
     if isinstance(default, bool):
         return value.lower() in {"1", "true", "yes", "on"}
     return value
+
+
+def claude_code_model_args(config: BotConfig) -> list[str]:
+    model = config.claude_code_model.strip()
+    return ["--model", model] if model else []

@@ -41,9 +41,10 @@ bot:
   vision_provider: "claude_code"
   media_dir: "/Users/or/projects/Whasr/soul-bot/data/media"
   claude_code_cwd: "/Users/or/projects/whatsapp-mcp-test-sandbox"
+  claude_code_model: "claude-opus-4-6"
 ```
 
-`claude_code` shells out to your local `claude -p` CLI and asks it to inspect the saved image path. This is useful for a laptop demo. For a 24/7 server, use a server-friendly API/provider instead of relying on an interactive Claude Code install.
+`claude_code` shells out to your local `claude -p` CLI and asks it to inspect the saved image path. Set `claude_code_model` (or `SOUL_BOT_CLAUDE_CODE_MODEL`) to pin a Claude Code model instead of using the CLI default. This is useful for a laptop demo. For a 24/7 server, use a server-friendly API/provider instead of relying on an interactive Claude Code install.
 
 ## Local Docker Demo
 

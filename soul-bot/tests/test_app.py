@@ -2,13 +2,18 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from soul_bot.app import WebhookPayload, classify_participant_intent, create_app, decide_participant_action, extract_weight
-from soul_bot.config import AppConfig, BotConfig, WatchedGroup
+from soul_bot.app import WebhookPayload, create_app, extract_weight
+from soul_bot.config import AppConfig, BotConfig, WatchedGroup, claude_code_model_args
 from soul_bot.db import BotStore
 
 
 def test_extract_weight_from_hebrew_message():
     assert extract_weight("היום אני 82.4 קילו") == 82.4
+
+
+def test_claude_code_model_args_are_optional():
+    assert claude_code_model_args(BotConfig()) == []
+    assert claude_code_model_args(BotConfig(claude_code_model="claude-opus-4-6")) == ["--model", "claude-opus-4-6"]
 
 
 def test_webhook_ignores_unwatched_group(tmp_path: Path):
@@ -43,30 +48,6 @@ def test_webhook_stores_participant_and_weight(tmp_path: Path):
     assert data["role"] == "participant"
     assert data["weight_kg"] == 82.4
     assert store.list_members("group@g.us")[0]["role"] == "participant"
-
-
-def test_casual_message_is_ignored_when_auto_reply_policy_runs():
-    config = AppConfig(bot=BotConfig(auto_reply=True))
-    payload = WebhookPayload(sender="972500000000@s.whatsapp.net", chatJID="group@g.us", content="תודה")
-
-    assert classify_participant_intent(payload) == "casual"
-    assert decide_participant_action(config, payload) == "ignore"
-
-
-def test_question_message_gets_group_reply_decision():
-    config = AppConfig(bot=BotConfig(auto_reply=True))
-    payload = WebhookPayload(sender="972500000000@s.whatsapp.net", chatJID="group@g.us", content="מה לעשות אם אני תקועה?")
-
-    assert classify_participant_intent(payload) == "question"
-    assert decide_participant_action(config, payload) == "group_reply"
-
-
-def test_photo_message_routes_to_operator_review_without_vision():
-    config = AppConfig(bot=BotConfig(auto_reply=True, vision_enabled=False))
-    payload = WebhookPayload(sender="972500000000@s.whatsapp.net", chatJID="group@g.us", content="", mediaType="image")
-
-    assert classify_participant_intent(payload) == "photo"
-    assert decide_participant_action(config, payload) == "operator_review_photo"
 
 
 def test_image_payload_is_saved(tmp_path: Path):

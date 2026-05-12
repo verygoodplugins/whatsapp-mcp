@@ -2410,6 +2410,26 @@ func main() {
 					logger.Warnf("Failed to store group ephemeral settings for %s: %v", v.JID, err)
 				}
 			}
+			actor := ""
+			if v.Sender != nil {
+				actor = v.Sender.String()
+			}
+			if len(v.Join) > 0 {
+				joined := make([]string, 0, len(v.Join))
+				for _, p := range v.Join {
+					joined = append(joined, p.String())
+				}
+				logger.Infof("Group %s: %d participant(s) joined", v.JID.String(), len(joined))
+				go SendGroupEventWebhook("group_join", v.JID.String(), actor, joined)
+			}
+			if len(v.Leave) > 0 {
+				left := make([]string, 0, len(v.Leave))
+				for _, p := range v.Leave {
+					left = append(left, p.String())
+				}
+				logger.Infof("Group %s: %d participant(s) left", v.JID.String(), len(left))
+				go SendGroupEventWebhook("group_leave", v.JID.String(), actor, left)
+			}
 
 		case *events.CallOffer:
 			// 1:1 incoming call. call_type defaults to "voice"; CallOffer

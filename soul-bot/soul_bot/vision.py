@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 from dataclasses import dataclass
 
-from .config import BotConfig
+from .config import BotConfig, claude_code_model_args
 
 
 @dataclass(frozen=True)
@@ -62,18 +63,21 @@ Task:
 Return only JSON matching the schema.
 """.strip()
 
+    abs_image_path = os.path.abspath(image_path)
+    image_dir = os.path.dirname(abs_image_path)
     cmd = [
         "claude",
         "-p",
+        *claude_code_model_args(config),
         "--output-format",
         "json",
         "--allowedTools",
         "Read",
         "--add-dir",
-        image_path,
+        image_dir,
         "--json-schema",
         json.dumps(schema),
-        prompt,
+        prompt.replace(image_path, abs_image_path),
     ]
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -93,7 +97,9 @@ Return only JSON matching the schema.
 
     try:
         data = json.loads(raw)
-        if "result" in data and isinstance(data["result"], str):
+        if isinstance(data.get("structured_output"), dict):
+            data = data["structured_output"]
+        elif isinstance(data.get("result"), str) and data["result"].strip():
             data = json.loads(data["result"])
     except json.JSONDecodeError:
         return VisionResult(status="parse_error", explanation="Could not parse Claude Code vision response", raw_response=raw)

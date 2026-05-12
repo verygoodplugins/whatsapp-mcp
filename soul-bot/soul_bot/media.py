@@ -18,7 +18,7 @@ def save_media_base64(media_base64: str, *, media_dir: str, message_id: int, fil
     path.mkdir(parents=True, exist_ok=True)
     out = path / f"{message_id}-{sanitize_filename(filename or 'image.jpg')}"
     out.write_bytes(data)
-    return str(out)
+    return str(out.resolve())
 
 
 def sanitize_filename(filename: str) -> str:

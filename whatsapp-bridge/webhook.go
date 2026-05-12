@@ -35,6 +35,9 @@ type WebhookPayload struct {
 	MimeType      string `json:"mimeType,omitempty"`
 	MediaFilename string `json:"mediaFilename,omitempty"`
 	MediaBase64   string `json:"mediaBase64,omitempty"`
+	// Group event fields - populated for non-message events such as joins/leaves
+	EventType    string   `json:"eventType,omitempty"`
+	Participants []string `json:"participants,omitempty"`
 }
 
 // sendWebhookPayload marshals and POSTs a WebhookPayload to the configured webhook URL.
@@ -113,6 +116,18 @@ func SendWebhookWithMedia(
 		MimeType:        mimeType,
 		MediaFilename:   mediaFilename,
 		MediaBase64:     mediaBase64,
+	})
+}
+
+// SendGroupEventWebhook sends a group join/leave (or similar) event to the webhook endpoint.
+// `sender` is the actor who made the change (may be empty), `participants` is the list of JIDs
+// affected (e.g., users who joined or left).
+func SendGroupEventWebhook(eventType, chatJID, sender string, participants []string) {
+	sendWebhookPayload(WebhookPayload{
+		EventType:    eventType,
+		ChatJID:      chatJID,
+		Sender:       sender,
+		Participants: participants,
 	})
 }
 

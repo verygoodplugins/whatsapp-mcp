@@ -97,6 +97,7 @@ class BotStore:
                 """
             )
             self._ensure_column(conn, "messages", "media_path", "TEXT")
+            self._ensure_column(conn, "reminders", "member_jid", "TEXT")
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -167,6 +168,20 @@ class BotStore:
             )
             return int(cursor.lastrowid)
 
+    def list_weights(self, chat_jid: str, member_jid: str | None = None, limit: int = 50) -> list[dict]:
+        with self.connect() as conn:
+            if member_jid:
+                rows = conn.execute(
+                    "SELECT member_jid, weight_kg, note, created_at FROM weights WHERE chat_jid = ? AND member_jid = ? ORDER BY id DESC LIMIT ?",
+                    (chat_jid, member_jid, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT member_jid, weight_kg, note, created_at FROM weights WHERE chat_jid = ? ORDER BY id DESC LIMIT ?",
+                    (chat_jid, limit),
+                ).fetchall()
+            return [dict(row) for row in rows]
+
     def store_vision_review(
         self,
         message_id: int,
@@ -217,9 +232,39 @@ class BotStore:
             ).fetchone()
             return str(row["sent_date"]) if row else None
 
-    def store_reminder(self, chat_jid: str, kind: str, message: str) -> None:
+    def store_reminder(self, chat_jid: str, kind: str, message: str, member_jid: str | None = None) -> None:
         with self.connect() as conn:
             conn.execute(
-                "INSERT INTO reminders (chat_jid, kind, message) VALUES (?, ?, ?)",
-                (chat_jid, kind, message),
+                "INSERT INTO reminders (chat_jid, kind, message, member_jid) VALUES (?, ?, ?, ?)",
+                (chat_jid, kind, message, member_jid),
             )
+
+    def member_weighed_since(self, chat_jid: str, member_jid: str, since_utc_iso: str) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM weights WHERE chat_jid = ? AND member_jid = ? AND created_at >= ? LIMIT 1",
+                (chat_jid, member_jid, since_utc_iso),
+            ).fetchone()
+            return row is not None
+
+    def member_reminder_since(self, chat_jid: str, member_jid: str, kind: str, since_utc_iso: str) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM reminders WHERE chat_jid = ? AND member_jid = ? AND kind = ? AND sent_at >= ? LIMIT 1",
+                (chat_jid, member_jid, kind, since_utc_iso),
+            ).fetchone()
+            return row is not None
+
+    def recent_member_messages(self, chat_jid: str, member_jid: str, limit: int = 10) -> list[StoredMessage]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, chat_jid, sender_jid, role, content, media_type, created_at
+                FROM messages
+                WHERE chat_jid = ? AND sender_jid = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (chat_jid, member_jid, limit),
+            ).fetchall()
+            return [StoredMessage(**dict(row)) for row in rows]
