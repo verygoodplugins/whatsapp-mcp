@@ -2,6 +2,7 @@
 
 from datetime import datetime
 
+import whatsapp
 from whatsapp import Chat, Contact, Message, chat_to_dict, contact_to_dict, msg_to_dict
 
 
@@ -142,3 +143,65 @@ class TestContactConversion:
         result = contact_to_dict(contact)
 
         assert result["name"] is None
+
+
+class TestGroupAPI:
+    """Tests for group management API payloads."""
+
+    def test_create_group_payload_includes_optional_settings(self, monkeypatch):
+        calls = []
+
+        def fake_post(path, payload):
+            calls.append((path, payload))
+            return {"success": True}
+
+        monkeypatch.setattr(whatsapp, "_post_whatsapp_api", fake_post)
+
+        result = whatsapp.create_group(
+            name="Launch",
+            participants=["12025551234"],
+            description="Coordination",
+            announce=True,
+            locked=False,
+            join_approval_required=True,
+            member_add_mode="admin_add",
+            disappearing_timer_seconds=86400,
+        )
+
+        assert result == {"success": True}
+        assert calls == [
+            (
+                "/groups/create",
+                {
+                    "name": "Launch",
+                    "participants": ["12025551234"],
+                    "settings": {
+                        "description": "Coordination",
+                        "announce": True,
+                        "locked": False,
+                        "join_approval_required": True,
+                        "member_add_mode": "admin_add",
+                        "disappearing_timer_seconds": 86400,
+                    },
+                },
+            )
+        ]
+
+    def test_update_group_participants_payload(self, monkeypatch):
+        calls = []
+
+        def fake_post(path, payload):
+            calls.append((path, payload))
+            return {"success": True}
+
+        monkeypatch.setattr(whatsapp, "_post_whatsapp_api", fake_post)
+
+        result = whatsapp.update_group_participants("123@g.us", ["12025551234"], "remove")
+
+        assert result == {"success": True}
+        assert calls == [
+            (
+                "/groups/participants",
+                {"group_jid": "123@g.us", "participants": ["12025551234"], "action": "remove"},
+            )
+        ]

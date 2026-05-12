@@ -974,6 +974,93 @@ def send_message(recipient: str, message: str) -> tuple[bool, str]:
         return False, f"Unexpected error: {str(e)}"
 
 
+def _post_whatsapp_api(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    url = f"{WHATSAPP_API_BASE_URL}{path}"
+    response = requests.post(url, json=payload)
+    try:
+        result = response.json()
+    except json.JSONDecodeError:
+        result = {"success": False, "message": response.text}
+
+    if response.status_code != 200:
+        message = result.get("message", response.text)
+        return {"success": False, "message": f"Error: HTTP {response.status_code} - {message}"}
+    return result
+
+
+def create_group(
+    name: str,
+    participants: list[str],
+    description: str | None = None,
+    announce: bool | None = None,
+    locked: bool | None = None,
+    join_approval_required: bool | None = None,
+    member_add_mode: str | None = None,
+    disappearing_timer_seconds: int | None = None,
+) -> dict[str, Any]:
+    if not name:
+        return {"success": False, "message": "Group name must be provided"}
+    if not participants:
+        return {"success": False, "message": "At least one participant must be provided"}
+
+    settings: dict[str, Any] = {}
+    if description is not None:
+        settings["description"] = description
+    if announce is not None:
+        settings["announce"] = announce
+    if locked is not None:
+        settings["locked"] = locked
+    if join_approval_required is not None:
+        settings["join_approval_required"] = join_approval_required
+    if member_add_mode is not None:
+        settings["member_add_mode"] = member_add_mode
+    if disappearing_timer_seconds is not None:
+        settings["disappearing_timer_seconds"] = disappearing_timer_seconds
+
+    payload: dict[str, Any] = {"name": name, "participants": participants}
+    if settings:
+        payload["settings"] = settings
+    return _post_whatsapp_api("/groups/create", payload)
+
+
+def update_group_settings(
+    group_jid: str,
+    name: str | None = None,
+    description: str | None = None,
+    announce: bool | None = None,
+    locked: bool | None = None,
+    join_approval_required: bool | None = None,
+    member_add_mode: str | None = None,
+    disappearing_timer_seconds: int | None = None,
+) -> dict[str, Any]:
+    if not group_jid:
+        return {"success": False, "message": "group_jid must be provided"}
+
+    payload: dict[str, Any] = {"group_jid": group_jid}
+    optional_fields = {
+        "name": name,
+        "description": description,
+        "announce": announce,
+        "locked": locked,
+        "join_approval_required": join_approval_required,
+        "member_add_mode": member_add_mode,
+        "disappearing_timer_seconds": disappearing_timer_seconds,
+    }
+    payload.update({key: value for key, value in optional_fields.items() if value is not None})
+    return _post_whatsapp_api("/groups/settings", payload)
+
+
+def update_group_participants(group_jid: str, participants: list[str], action: str) -> dict[str, Any]:
+    if not group_jid:
+        return {"success": False, "message": "group_jid must be provided"}
+    if not participants:
+        return {"success": False, "message": "At least one participant must be provided"}
+    return _post_whatsapp_api(
+        "/groups/participants",
+        {"group_jid": group_jid, "participants": participants, "action": action},
+    )
+
+
 def send_file(recipient: str, media_path: str) -> tuple[bool, str]:
     try:
         # Validate input

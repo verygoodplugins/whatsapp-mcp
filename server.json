@@ -61,6 +61,26 @@
       "description": "Send text message to contact or group"
     },
     {
+      "name": "create_group",
+      "description": "Create WhatsApp group with optional settings"
+    },
+    {
+      "name": "update_group_settings",
+      "description": "Update WhatsApp group settings"
+    },
+    {
+      "name": "update_group_participants",
+      "description": "Add, remove, promote, or demote group participants"
+    },
+    {
+      "name": "add_group_participants",
+      "description": "Add people to a WhatsApp group"
+    },
+    {
+      "name": "remove_group_participants",
+      "description": "Remove people from a WhatsApp group"
+    },
+    {
       "name": "send_file",
       "description": "Send media file (image, video, document)"
     },

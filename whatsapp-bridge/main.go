@@ -790,6 +790,40 @@ type SendMessageRequest struct {
 	MediaPath string `json:"media_path,omitempty"`
 }
 
+type GroupSettingsRequest struct {
+	Name                     *string `json:"name,omitempty"`
+	Description              *string `json:"description,omitempty"`
+	Announce                 *bool   `json:"announce,omitempty"`
+	Locked                   *bool   `json:"locked,omitempty"`
+	JoinApprovalRequired     *bool   `json:"join_approval_required,omitempty"`
+	MemberAddMode            *string `json:"member_add_mode,omitempty"`
+	DisappearingTimerSeconds *uint32 `json:"disappearing_timer_seconds,omitempty"`
+}
+
+type CreateGroupRequest struct {
+	Name         string               `json:"name"`
+	Participants []string             `json:"participants"`
+	Settings     GroupSettingsRequest `json:"settings,omitempty"`
+}
+
+type GroupSettingsUpdateRequest struct {
+	GroupJID string `json:"group_jid"`
+	GroupSettingsRequest
+}
+
+type GroupParticipantsRequest struct {
+	GroupJID     string   `json:"group_jid"`
+	Participants []string `json:"participants"`
+	Action       string   `json:"action"`
+}
+
+type GroupAPIResponse struct {
+	Success bool        `json:"success"`
+	Message string      `json:"message"`
+	Group   interface{} `json:"group,omitempty"`
+	Result  interface{} `json:"result,omitempty"`
+}
+
 // classifyMediaPath maps a file extension to (whatsmeow upload type, MIME
 // type, persist-side category). Single source of truth for the upload path
 // (which needs the whatsmeow.MediaType + MIME) and the SQLite persist path
@@ -1684,6 +1718,166 @@ func extractDirectPathFromURL(url string) string {
 	return "/" + pathPart
 }
 
+func parseContactJID(identifier string) (types.JID, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return types.EmptyJID, fmt.Errorf("participant cannot be empty")
+	}
+	if strings.Contains(identifier, "@") {
+		return types.ParseJID(identifier)
+	}
+	digits := ""
+	for _, ch := range identifier {
+		if ch >= '0' && ch <= '9' {
+			digits += string(ch)
+		}
+	}
+	if digits == "" {
+		return types.EmptyJID, fmt.Errorf("participant %q must be a phone number or JID", identifier)
+	}
+	return types.NewJID(digits, types.DefaultUserServer), nil
+}
+
+func parseContactJIDs(identifiers []string) ([]types.JID, error) {
+	jids := make([]types.JID, 0, len(identifiers))
+	for _, identifier := range identifiers {
+		jid, err := parseContactJID(identifier)
+		if err != nil {
+			return nil, err
+		}
+		jids = append(jids, jid)
+	}
+	return jids, nil
+}
+
+func parseGroupJID(identifier string) (types.JID, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return types.EmptyJID, fmt.Errorf("group_jid is required")
+	}
+	jid, err := types.ParseJID(identifier)
+	if err != nil {
+		return types.EmptyJID, err
+	}
+	if jid.Server != types.GroupServer {
+		return types.EmptyJID, fmt.Errorf("%s is not a group JID", identifier)
+	}
+	return jid, nil
+}
+
+func parseMemberAddMode(value string) (types.GroupMemberAddMode, error) {
+	switch strings.TrimSpace(value) {
+	case string(types.GroupMemberAddModeAdmin):
+		return types.GroupMemberAddModeAdmin, nil
+	case string(types.GroupMemberAddModeAllMember):
+		return types.GroupMemberAddModeAllMember, nil
+	default:
+		return "", fmt.Errorf("member_add_mode must be %q or %q", types.GroupMemberAddModeAdmin, types.GroupMemberAddModeAllMember)
+	}
+}
+
+func parseParticipantChange(action string) (whatsmeow.ParticipantChange, error) {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "add":
+		return whatsmeow.ParticipantChangeAdd, nil
+	case "remove":
+		return whatsmeow.ParticipantChangeRemove, nil
+	case "promote":
+		return whatsmeow.ParticipantChangePromote, nil
+	case "demote":
+		return whatsmeow.ParticipantChangeDemote, nil
+	default:
+		return "", fmt.Errorf("action must be add, remove, promote, or demote")
+	}
+}
+
+func groupParticipantToMap(participant types.GroupParticipant) map[string]interface{} {
+	return map[string]interface{}{
+		"jid":           participant.JID.String(),
+		"phone_number":  participant.PhoneNumber.String(),
+		"lid":           participant.LID.String(),
+		"is_admin":      participant.IsAdmin,
+		"is_superadmin": participant.IsSuperAdmin,
+		"display_name":  participant.DisplayName,
+		"error":         participant.Error,
+	}
+}
+
+func groupInfoToMap(info *types.GroupInfo) map[string]interface{} {
+	participants := make([]map[string]interface{}, 0, len(info.Participants))
+	for _, participant := range info.Participants {
+		participants = append(participants, groupParticipantToMap(participant))
+	}
+
+	return map[string]interface{}{
+		"jid":                        info.JID.String(),
+		"name":                       info.Name,
+		"description":                info.Topic,
+		"owner_jid":                  info.OwnerJID.String(),
+		"is_announce":                info.IsAnnounce,
+		"is_locked":                  info.IsLocked,
+		"is_ephemeral":               info.IsEphemeral,
+		"disappearing_timer_seconds": info.DisappearingTimer,
+		"join_approval_required":     info.IsJoinApprovalRequired,
+		"member_add_mode":            string(info.MemberAddMode),
+		"participant_count":          info.ParticipantCount,
+		"participants":               participants,
+		"created_at":                 info.GroupCreated.Format(time.RFC3339),
+		"participant_version_id":     info.ParticipantVersionID,
+	}
+}
+
+func applyGroupSettings(client *whatsmeow.Client, groupJID types.JID, settings GroupSettingsRequest) error {
+	ctx := context.Background()
+	if settings.Name != nil {
+		if err := client.SetGroupName(ctx, groupJID, *settings.Name); err != nil {
+			return fmt.Errorf("failed to set group name: %w", err)
+		}
+	}
+	if settings.Description != nil {
+		if err := client.SetGroupDescription(ctx, groupJID, *settings.Description); err != nil {
+			return fmt.Errorf("failed to set group description: %w", err)
+		}
+	}
+	if settings.Announce != nil {
+		if err := client.SetGroupAnnounce(ctx, groupJID, *settings.Announce); err != nil {
+			return fmt.Errorf("failed to set announce mode: %w", err)
+		}
+	}
+	if settings.Locked != nil {
+		if err := client.SetGroupLocked(ctx, groupJID, *settings.Locked); err != nil {
+			return fmt.Errorf("failed to set locked mode: %w", err)
+		}
+	}
+	if settings.JoinApprovalRequired != nil {
+		if err := client.SetGroupJoinApprovalMode(ctx, groupJID, *settings.JoinApprovalRequired); err != nil {
+			return fmt.Errorf("failed to set join approval mode: %w", err)
+		}
+	}
+	if settings.MemberAddMode != nil {
+		mode, err := parseMemberAddMode(*settings.MemberAddMode)
+		if err != nil {
+			return err
+		}
+		if err := client.SetGroupMemberAddMode(ctx, groupJID, mode); err != nil {
+			return fmt.Errorf("failed to set member add mode: %w", err)
+		}
+	}
+	if settings.DisappearingTimerSeconds != nil {
+		timer := time.Duration(*settings.DisappearingTimerSeconds) * time.Second
+		if err := client.SetDisappearingTimer(ctx, groupJID, timer, time.Now()); err != nil {
+			return fmt.Errorf("failed to set disappearing timer: %w", err)
+		}
+	}
+	return nil
+}
+
+func writeGroupAPIResponse(w http.ResponseWriter, statusCode int, response GroupAPIResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
 	// Health check endpoint
@@ -1744,6 +1938,199 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		_ = json.NewEncoder(w).Encode(SendMessageResponse{
 			Success: success,
 			Message: message,
+		})
+	})
+
+	http.HandleFunc("/api/groups/create", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !client.IsConnected() {
+			writeGroupAPIResponse(w, http.StatusServiceUnavailable, GroupAPIResponse{
+				Success: false,
+				Message: "WhatsApp client is not connected. Please wait for reconnection.",
+			})
+			return
+		}
+
+		var req CreateGroupRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.Name) == "" {
+			writeGroupAPIResponse(w, http.StatusBadRequest, GroupAPIResponse{Success: false, Message: "Group name is required"})
+			return
+		}
+		if len(req.Participants) == 0 {
+			writeGroupAPIResponse(w, http.StatusBadRequest, GroupAPIResponse{Success: false, Message: "At least one participant is required"})
+			return
+		}
+
+		participants, err := parseContactJIDs(req.Participants)
+		if err != nil {
+			writeGroupAPIResponse(w, http.StatusBadRequest, GroupAPIResponse{Success: false, Message: err.Error()})
+			return
+		}
+
+		createReq := whatsmeow.ReqCreateGroup{
+			Name:         req.Name,
+			Participants: participants,
+		}
+		if req.Settings.Announce != nil {
+			createReq.GroupAnnounce = types.GroupAnnounce{IsAnnounce: *req.Settings.Announce}
+		}
+		if req.Settings.Locked != nil {
+			createReq.GroupLocked = types.GroupLocked{IsLocked: *req.Settings.Locked}
+		}
+		if req.Settings.JoinApprovalRequired != nil {
+			createReq.GroupMembershipApprovalMode = types.GroupMembershipApprovalMode{
+				IsJoinApprovalRequired: *req.Settings.JoinApprovalRequired,
+			}
+		}
+		if req.Settings.DisappearingTimerSeconds != nil {
+			createReq.GroupEphemeral = types.GroupEphemeral{
+				IsEphemeral:       *req.Settings.DisappearingTimerSeconds > 0,
+				DisappearingTimer: *req.Settings.DisappearingTimerSeconds,
+			}
+		}
+
+		groupInfo, err := client.CreateGroup(context.Background(), createReq)
+		if err != nil {
+			writeGroupAPIResponse(w, http.StatusInternalServerError, GroupAPIResponse{
+				Success: false,
+				Message: fmt.Sprintf("Failed to create group: %v", err),
+			})
+			return
+		}
+
+		// Some settings are not part of the create request, so apply them after
+		// the server returns the group JID.
+		if req.Settings.Description != nil || req.Settings.MemberAddMode != nil {
+			if err := applyGroupSettings(client, groupInfo.JID, GroupSettingsRequest{
+				Description:   req.Settings.Description,
+				MemberAddMode: req.Settings.MemberAddMode,
+			}); err != nil {
+				writeGroupAPIResponse(w, http.StatusInternalServerError, GroupAPIResponse{
+					Success: false,
+					Message: err.Error(),
+					Group:   groupInfoToMap(groupInfo),
+				})
+				return
+			}
+			if refreshed, refreshErr := client.GetGroupInfo(context.Background(), groupInfo.JID); refreshErr == nil {
+				groupInfo = refreshed
+			}
+		}
+
+		writeGroupAPIResponse(w, http.StatusOK, GroupAPIResponse{
+			Success: true,
+			Message: "Group created successfully",
+			Group:   groupInfoToMap(groupInfo),
+		})
+	})
+
+	http.HandleFunc("/api/groups/settings", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !client.IsConnected() {
+			writeGroupAPIResponse(w, http.StatusServiceUnavailable, GroupAPIResponse{
+				Success: false,
+				Message: "WhatsApp client is not connected. Please wait for reconnection.",
+			})
+			return
+		}
+
+		var req GroupSettingsUpdateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		groupJID, err := parseGroupJID(req.GroupJID)
+		if err != nil {
+			writeGroupAPIResponse(w, http.StatusBadRequest, GroupAPIResponse{Success: false, Message: err.Error()})
+			return
+		}
+
+		if err := applyGroupSettings(client, groupJID, req.GroupSettingsRequest); err != nil {
+			writeGroupAPIResponse(w, http.StatusInternalServerError, GroupAPIResponse{Success: false, Message: err.Error()})
+			return
+		}
+
+		groupInfo, err := client.GetGroupInfo(context.Background(), groupJID)
+		if err != nil {
+			writeGroupAPIResponse(w, http.StatusOK, GroupAPIResponse{
+				Success: true,
+				Message: fmt.Sprintf("Group settings updated, but failed to refresh group info: %v", err),
+			})
+			return
+		}
+
+		writeGroupAPIResponse(w, http.StatusOK, GroupAPIResponse{
+			Success: true,
+			Message: "Group settings updated successfully",
+			Group:   groupInfoToMap(groupInfo),
+		})
+	})
+
+	http.HandleFunc("/api/groups/participants", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !client.IsConnected() {
+			writeGroupAPIResponse(w, http.StatusServiceUnavailable, GroupAPIResponse{
+				Success: false,
+				Message: "WhatsApp client is not connected. Please wait for reconnection.",
+			})
+			return
+		}
+
+		var req GroupParticipantsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		groupJID, err := parseGroupJID(req.GroupJID)
+		if err != nil {
+			writeGroupAPIResponse(w, http.StatusBadRequest, GroupAPIResponse{Success: false, Message: err.Error()})
+			return
+		}
+		if len(req.Participants) == 0 {
+			writeGroupAPIResponse(w, http.StatusBadRequest, GroupAPIResponse{Success: false, Message: "At least one participant is required"})
+			return
+		}
+		participants, err := parseContactJIDs(req.Participants)
+		if err != nil {
+			writeGroupAPIResponse(w, http.StatusBadRequest, GroupAPIResponse{Success: false, Message: err.Error()})
+			return
+		}
+		action, err := parseParticipantChange(req.Action)
+		if err != nil {
+			writeGroupAPIResponse(w, http.StatusBadRequest, GroupAPIResponse{Success: false, Message: err.Error()})
+			return
+		}
+
+		updated, err := client.UpdateGroupParticipants(context.Background(), groupJID, participants, action)
+		if err != nil {
+			writeGroupAPIResponse(w, http.StatusInternalServerError, GroupAPIResponse{
+				Success: false,
+				Message: fmt.Sprintf("Failed to update group participants: %v", err),
+			})
+			return
+		}
+
+		result := make([]map[string]interface{}, 0, len(updated))
+		for _, participant := range updated {
+			result = append(result, groupParticipantToMap(participant))
+		}
+		writeGroupAPIResponse(w, http.StatusOK, GroupAPIResponse{
+			Success: true,
+			Message: "Group participants updated successfully",
+			Result:  result,
 		})
 	})
 

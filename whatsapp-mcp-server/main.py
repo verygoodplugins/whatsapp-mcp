@@ -5,6 +5,9 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from whatsapp import (
+    create_group as whatsapp_create_group,
+)
+from whatsapp import (
     download_media as whatsapp_download_media,
 )
 from whatsapp import (
@@ -42,6 +45,12 @@ from whatsapp import (
 )
 from whatsapp import (
     send_message as whatsapp_send_message,
+)
+from whatsapp import (
+    update_group_participants as whatsapp_update_group_participants,
+)
+from whatsapp import (
+    update_group_settings as whatsapp_update_group_settings,
 )
 
 # Initialize FastMCP server
@@ -311,6 +320,110 @@ def send_message(recipient: str, message: str) -> dict[str, Any]:
     # Call the whatsapp_send_message function with the unified recipient parameter
     success, status_message = whatsapp_send_message(recipient, message)
     return {"success": success, "message": status_message}
+
+
+@mcp.tool()
+def create_group(
+    name: str,
+    participants: list[str],
+    description: str | None = None,
+    announce: bool | None = None,
+    locked: bool | None = None,
+    join_approval_required: bool | None = None,
+    member_add_mode: str | None = None,
+    disappearing_timer_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Create a WhatsApp group with optional group settings.
+
+    Args:
+        name: Group name. WhatsApp currently limits group names to 25 characters.
+        participants: Phone numbers or JIDs to add. Do not include your own JID.
+        description: Optional group description.
+        announce: If true, only admins can send messages.
+        locked: If true, only admins can edit group info.
+        join_approval_required: If true, joining requires admin approval.
+        member_add_mode: "admin_add" or "all_member_add".
+        disappearing_timer_seconds: Disappearing message timer in seconds. Use 0 to disable.
+    """
+    return whatsapp_create_group(
+        name=name,
+        participants=participants,
+        description=description,
+        announce=announce,
+        locked=locked,
+        join_approval_required=join_approval_required,
+        member_add_mode=member_add_mode,
+        disappearing_timer_seconds=disappearing_timer_seconds,
+    )
+
+
+@mcp.tool()
+def update_group_settings(
+    group_jid: str,
+    name: str | None = None,
+    description: str | None = None,
+    announce: bool | None = None,
+    locked: bool | None = None,
+    join_approval_required: bool | None = None,
+    member_add_mode: str | None = None,
+    disappearing_timer_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Update WhatsApp group settings.
+
+    Args:
+        group_jid: Group JID, e.g. "123456789@g.us".
+        name: Optional new group name.
+        description: Optional new group description.
+        announce: If true, only admins can send messages.
+        locked: If true, only admins can edit group info.
+        join_approval_required: If true, joining requires admin approval.
+        member_add_mode: "admin_add" or "all_member_add".
+        disappearing_timer_seconds: Disappearing message timer in seconds. Use 0 to disable.
+    """
+    return whatsapp_update_group_settings(
+        group_jid=group_jid,
+        name=name,
+        description=description,
+        announce=announce,
+        locked=locked,
+        join_approval_required=join_approval_required,
+        member_add_mode=member_add_mode,
+        disappearing_timer_seconds=disappearing_timer_seconds,
+    )
+
+
+@mcp.tool()
+def update_group_participants(group_jid: str, participants: list[str], action: str) -> dict[str, Any]:
+    """Add, remove, promote, or demote WhatsApp group participants.
+
+    Args:
+        group_jid: Group JID, e.g. "123456789@g.us".
+        participants: Phone numbers or JIDs to change.
+        action: One of "add", "remove", "promote", or "demote".
+    """
+    return whatsapp_update_group_participants(group_jid, participants, action)
+
+
+@mcp.tool()
+def add_group_participants(group_jid: str, participants: list[str]) -> dict[str, Any]:
+    """Add people to a WhatsApp group.
+
+    Args:
+        group_jid: Group JID, e.g. "123456789@g.us".
+        participants: Phone numbers or JIDs to add.
+    """
+    return whatsapp_update_group_participants(group_jid, participants, "add")
+
+
+@mcp.tool()
+def remove_group_participants(group_jid: str, participants: list[str]) -> dict[str, Any]:
+    """Remove people from a WhatsApp group.
+
+    Args:
+        group_jid: Group JID, e.g. "123456789@g.us".
+        participants: Phone numbers or JIDs to remove.
+    """
+    return whatsapp_update_group_participants(group_jid, participants, "remove")
 
 
 @mcp.tool()
