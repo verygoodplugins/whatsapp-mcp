@@ -1434,3 +1434,79 @@ func TestCallChatJID_Precedence(t *testing.T) {
 		})
 	}
 }
+
+func TestMarkMessageDeleted_SetsDeletedAt(t *testing.T) {
+	ms := newTestMessageStore(t)
+	chatJID := "15551234567@s.whatsapp.net"
+	messageID := "3A1234567890ABCDEF"
+
+	if _, err := ms.db.Exec(
+		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		messageID, chatJID, "15551234567", "secret", time.Unix(1710000000, 0), false,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	deletedAt := time.Unix(1710000010, 0)
+	if err := ms.MarkMessageDeleted(messageID, chatJID, deletedAt); err != nil {
+		t.Fatalf("MarkMessageDeleted: %v", err)
+	}
+
+	var got sql.NullTime
+	if err := ms.db.QueryRow(
+		"SELECT deleted_at FROM messages WHERE id = ? AND chat_jid = ?",
+		messageID, chatJID,
+	).Scan(&got); err != nil {
+		t.Fatalf("read deleted_at: %v", err)
+	}
+	if !got.Valid || !got.Time.Equal(deletedAt) {
+		t.Fatalf("expected deleted_at=%v, got %v (valid=%v)", deletedAt, got.Time, got.Valid)
+	}
+
+	var content string
+	_ = ms.db.QueryRow("SELECT content FROM messages WHERE id = ? AND chat_jid = ?",
+		messageID, chatJID).Scan(&content)
+	if content != "secret" {
+		t.Fatalf("content must be preserved on revoke, got %q", content)
+	}
+}
+
+func TestMarkMessageDeleted_NoopForMissingMessage(t *testing.T) {
+	ms := newTestMessageStore(t)
+	err := ms.MarkMessageDeleted("DOES_NOT_EXIST", "15551234567@s.whatsapp.net",
+		time.Unix(1710000000, 0))
+	if err != nil {
+		t.Fatalf("revoke for missing message should be a silent no-op, got error: %v", err)
+	}
+}
+
+func TestMarkMessageDeleted_FirstWriteWins(t *testing.T) {
+	ms := newTestMessageStore(t)
+	chatJID := "15551234567@s.whatsapp.net"
+	messageID := "3A1234567890ABCDEF"
+	if _, err := ms.db.Exec(
+		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		messageID, chatJID, "15551234567", "x", time.Unix(1710000000, 0), false,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	earlier := time.Unix(1710000010, 0)
+	later := time.Unix(1710000020, 0)
+
+	if err := ms.MarkMessageDeleted(messageID, chatJID, earlier); err != nil {
+		t.Fatalf("first revoke: %v", err)
+	}
+	if err := ms.MarkMessageDeleted(messageID, chatJID, later); err != nil {
+		t.Fatalf("second revoke: %v", err)
+	}
+
+	var got sql.NullTime
+	_ = ms.db.QueryRow("SELECT deleted_at FROM messages WHERE id = ? AND chat_jid = ?",
+		messageID, chatJID).Scan(&got)
+	if !got.Valid || !got.Time.Equal(earlier) {
+		t.Fatalf("expected earlier deleted_at=%v to win, got %v", earlier, got.Time)
+	}
+}
