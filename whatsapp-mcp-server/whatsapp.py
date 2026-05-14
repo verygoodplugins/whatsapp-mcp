@@ -88,6 +88,32 @@ class MessageContext:
     after: list[Message]
 
 
+@dataclass
+class Poll:
+    message_id: str
+    chat_jid: str
+    sender: str
+    is_from_me: bool
+    name: str
+    options: list[str]
+    selectable_option_count: int
+    timestamp: datetime
+
+
+@dataclass
+class PollOptionResult:
+    name: str
+    vote_count: int
+    voters: list[str]
+
+
+@dataclass
+class PollResult:
+    poll: Poll
+    options: list[PollOptionResult]
+    total_voters: int
+
+
 def msg_to_dict(message: Message, include_sender_name: bool = True) -> dict[str, Any]:
     """Convert a Message dataclass to a dictionary for JSON serialization."""
     # Extract phone number from JID (e.g., "1234567890@s.whatsapp.net" -> "1234567890")
@@ -140,6 +166,32 @@ def chat_to_dict(chat: "Chat") -> dict[str, Any]:
 def contact_to_dict(contact: "Contact") -> dict[str, Any]:
     """Convert a Contact dataclass to a dictionary for JSON serialization."""
     return {"phone_number": contact.phone_number, "name": contact.name, "jid": contact.jid}
+
+
+def poll_to_dict(poll: "Poll") -> dict[str, Any]:
+    """Convert a Poll dataclass to a dictionary for JSON serialization."""
+    return {
+        "message_id": poll.message_id,
+        "chat_jid": poll.chat_jid,
+        "sender": poll.sender,
+        "is_from_me": poll.is_from_me,
+        "name": poll.name,
+        "options": list(poll.options),
+        "selectable_option_count": poll.selectable_option_count,
+        "timestamp": poll.timestamp.isoformat() if poll.timestamp else None,
+    }
+
+
+def poll_result_to_dict(result: "PollResult") -> dict[str, Any]:
+    """Convert a PollResult dataclass to a dictionary for JSON serialization."""
+    return {
+        "poll": poll_to_dict(result.poll),
+        "options": [
+            {"name": o.name, "vote_count": o.vote_count, "voters": list(o.voters)}
+            for o in result.options
+        ],
+        "total_voters": result.total_voters,
+    }
 
 
 def _sender_aliases(value: str) -> list[str]:
@@ -997,6 +1049,223 @@ def send_message(recipient: str, message: str) -> tuple[bool, str]:
         return False, f"Error parsing response: {response.text}"
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
+
+
+def send_poll(
+    recipient: str,
+    name: str,
+    options: list[str],
+    selectable_option_count: int = 1,
+) -> tuple[bool, str]:
+    # Validation is intentionally duplicated in whatsapp-bridge/main.go's
+    # /api/send/poll handler so each layer is safe at its boundary. Keep the
+    # two in sync if you change the rules here.
+    try:
+        if not recipient:
+            return False, "Recipient must be provided"
+
+        if not name or not name.strip():
+            return False, "Poll name must be provided"
+
+        if not options or len(options) < 2:
+            return False, "At least two poll options are required"
+
+        if len(options) > 12:
+            return False, "WhatsApp supports at most 12 poll options"
+
+        if any(not opt or not opt.strip() for opt in options):
+            return False, "Poll options must not be empty"
+
+        # whatsmeow semantics: 0 = multi-select with no limit, 1 = single-select,
+        # N (1 < N <= len(options)) = multi-select up to N. Out-of-range values
+        # are silently coerced to 0 by the library, so reject them upfront.
+        if selectable_option_count < 0 or selectable_option_count > len(options):
+            return False, "selectable_option_count must be 0 (unlimited) or between 1 and len(options)"
+
+        url = f"{WHATSAPP_API_BASE_URL}/send/poll"
+        payload = {
+            "recipient": recipient,
+            "name": name,
+            "options": options,
+            "selectable_option_count": selectable_option_count,
+        }
+
+        response = requests.post(url, json=payload)
+
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "Unknown response")
+        else:
+            return False, f"Error: HTTP {response.status_code} - {response.text}"
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
+def vote_poll(
+    poll_message_id: str,
+    poll_chat_jid: str,
+    selected_options: list[str],
+) -> tuple[bool, str]:
+    """Cast (or clear) a vote on an existing poll.
+
+    The poll must already be in the bridge's local store — i.e. either the
+    bridge sent it via send_poll, or the bridge was running when it arrived
+    from another participant. An empty `selected_options` list clears the
+    voter's previous selection.
+    """
+    # Validation is intentionally duplicated in whatsapp-bridge/main.go's
+    # /api/vote/poll handler so each layer is safe at its boundary.
+    try:
+        if not poll_message_id or not poll_message_id.strip():
+            return False, "poll_message_id must be provided"
+        if not poll_chat_jid or not poll_chat_jid.strip():
+            return False, "poll_chat_jid must be provided"
+        if selected_options is None:
+            selected_options = []
+        if any(not opt or not opt.strip() for opt in selected_options):
+            return False, "selected_options entries must not be empty"
+
+        url = f"{WHATSAPP_API_BASE_URL}/vote/poll"
+        payload = {
+            "poll_message_id": poll_message_id,
+            "poll_chat_jid": poll_chat_jid,
+            "selected_options": selected_options,
+        }
+        response = requests.post(url, json=payload)
+
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "Unknown response")
+        else:
+            return False, f"Error: HTTP {response.status_code} - {response.text}"
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
+def _row_to_poll(row: tuple) -> Poll:
+    """Build a Poll from a `polls` table row in canonical column order."""
+    options = json.loads(row[5]) if row[5] else []
+    timestamp_raw = row[8]
+    timestamp = datetime.fromisoformat(timestamp_raw) if timestamp_raw else datetime.fromtimestamp(0)
+    return Poll(
+        message_id=row[0],
+        chat_jid=row[1],
+        sender=row[2],
+        is_from_me=bool(row[3]),
+        name=row[4],
+        options=options,
+        selectable_option_count=int(row[6] or 0),
+        timestamp=timestamp,
+    )
+
+
+_POLL_COLUMNS = (
+    "message_id, chat_jid, sender, is_from_me, name, options_json, "
+    "selectable_count, is_group, timestamp"
+)
+
+
+def list_polls(
+    chat_jid: str | None = None,
+    limit: int = 20,
+    page: int = 0,
+) -> list[dict[str, Any]]:
+    """List polls captured by the bridge, newest first.
+
+    Polls created before the bridge was running may surface via WhatsApp's
+    history sync but their votes are not recoverable (decryption needs a
+    per-poll secret that whatsmeow only stores when the creation message is
+    processed live).
+    """
+    try:
+        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        cursor = conn.cursor()
+
+        sql_parts = [f"SELECT {_POLL_COLUMNS} FROM polls"]
+        params: list[Any] = []
+        if chat_jid:
+            sql_parts.append("WHERE chat_jid = ?")
+            params.append(chat_jid)
+        sql_parts.append("ORDER BY timestamp DESC")
+        sql_parts.append("LIMIT ? OFFSET ?")
+        params.extend([limit, page * limit])
+
+        cursor.execute(" ".join(sql_parts), tuple(params))
+        rows = cursor.fetchall()
+        return [poll_to_dict(_row_to_poll(r)) for r in rows]
+
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+        return []
+    finally:
+        if "conn" in locals():
+            conn.close()
+
+
+def get_poll_results(poll_message_id: str, poll_chat_jid: str) -> dict[str, Any] | None:
+    """Aggregate vote counts for a single poll.
+
+    Returns None when the poll is not in the local store. Vote counts only
+    reflect votes the bridge was running to receive — see list_polls().
+    """
+    try:
+        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute(
+            f"SELECT {_POLL_COLUMNS} FROM polls WHERE message_id = ? AND chat_jid = ?",
+            (poll_message_id, poll_chat_jid),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        poll = _row_to_poll(row)
+
+        cursor.execute(
+            "SELECT voter, selected_options_json FROM poll_votes "
+            "WHERE poll_message_id = ? AND poll_chat_jid = ?",
+            (poll_message_id, poll_chat_jid),
+        )
+        vote_rows = cursor.fetchall()
+
+        # Preserve the poll's option order in the output, including options
+        # that received zero votes so callers can render the full ballot.
+        tally: dict[str, list[str]] = {opt: [] for opt in poll.options}
+        total_voters = 0
+        for voter, selected_json in vote_rows:
+            selected = json.loads(selected_json) if selected_json else []
+            # Empty selection means the voter cleared their vote — count them
+            # as "not voting" rather than as a voter.
+            if not selected:
+                continue
+            total_voters += 1
+            for name in selected:
+                if name in tally:
+                    tally[name].append(voter)
+
+        option_results = [
+            PollOptionResult(name=opt, vote_count=len(voters), voters=voters)
+            for opt, voters in tally.items()
+        ]
+        result = PollResult(poll=poll, options=option_results, total_voters=total_voters)
+        return poll_result_to_dict(result)
+
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+        return None
+    finally:
+        if "conn" in locals():
+            conn.close()
 
 
 def send_file(recipient: str, media_path: str) -> tuple[bool, str]:

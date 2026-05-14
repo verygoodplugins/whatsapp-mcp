@@ -140,6 +140,30 @@ func NewMessageStore() (*MessageStore, error) {
 
 		CREATE INDEX IF NOT EXISTS idx_calls_chat ON calls(chat_jid);
 		CREATE INDEX IF NOT EXISTS idx_calls_timestamp ON calls(timestamp);
+
+		CREATE TABLE IF NOT EXISTS polls (
+			message_id        TEXT,
+			chat_jid          TEXT,
+			sender            TEXT,
+			is_from_me        BOOLEAN,
+			name              TEXT,
+			options_json      TEXT,
+			selectable_count  INTEGER,
+			is_group          BOOLEAN,
+			timestamp         TIMESTAMP,
+			PRIMARY KEY (message_id, chat_jid)
+		);
+
+		CREATE TABLE IF NOT EXISTS poll_votes (
+			poll_message_id        TEXT,
+			poll_chat_jid          TEXT,
+			voter                  TEXT,
+			selected_options_json  TEXT,
+			timestamp              TIMESTAMP,
+			PRIMARY KEY (poll_message_id, poll_chat_jid, voter)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_poll_votes_poll ON poll_votes(poll_message_id, poll_chat_jid);
 	`)
 	if err != nil {
 		_ = db.Close()
@@ -720,6 +744,91 @@ func (store *MessageStore) MarkCallTerminated(callID, chatJID, reason string, en
 	return err
 }
 
+// Poll storage methods.
+//
+// Poll creation messages (inbound and outbound) are persisted to `polls` so
+// that incoming PollUpdateMessage events — which carry only SHA-256 hashes of
+// selected option names — can be decoded back into option names on read.
+// Votes (decrypted via whatsmeow.Client.DecryptPollVote) land in `poll_votes`
+// keyed by (poll_message_id, poll_chat_jid, voter), so a fresh vote from the
+// same voter (WhatsApp delivers a new PollUpdateMessage on every change,
+// including an empty SelectedOptions list to clear) replaces the previous one.
+
+// PollRecord mirrors a row from the `polls` table.
+type PollRecord struct {
+	MessageID       string
+	ChatJID         string
+	Sender          string
+	IsFromMe        bool
+	Name            string
+	Options         []string
+	SelectableCount int
+	IsGroup         bool
+	Timestamp       time.Time
+}
+
+// StorePoll inserts a poll creation record. Uses INSERT OR IGNORE so a
+// later observation of the same poll (e.g. via history sync) does not
+// overwrite the timestamp captured when the poll first arrived live.
+func (store *MessageStore) StorePoll(messageID, chatJID, sender string, isFromMe bool,
+	name string, options []string, selectableCount int, isGroup bool, ts time.Time) error {
+	optionsJSON, err := json.Marshal(options)
+	if err != nil {
+		return fmt.Errorf("marshal poll options: %w", err)
+	}
+	_, err = store.db.Exec(
+		`INSERT OR IGNORE INTO polls
+		 (message_id, chat_jid, sender, is_from_me, name, options_json, selectable_count, is_group, timestamp)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		messageID, chatJID, sender, isFromMe, name, string(optionsJSON), selectableCount, isGroup, ts,
+	)
+	return err
+}
+
+// GetPoll fetches a poll by (messageID, chatJID). Returns nil with no error
+// if the row does not exist, so callers can branch on "poll not seen yet".
+func (store *MessageStore) GetPoll(messageID, chatJID string) (*PollRecord, error) {
+	var rec PollRecord
+	var optionsJSON string
+	err := store.db.QueryRow(
+		`SELECT message_id, chat_jid, sender, is_from_me, name, options_json, selectable_count, is_group, timestamp
+		   FROM polls WHERE message_id = ? AND chat_jid = ?`,
+		messageID, chatJID,
+	).Scan(&rec.MessageID, &rec.ChatJID, &rec.Sender, &rec.IsFromMe, &rec.Name,
+		&optionsJSON, &rec.SelectableCount, &rec.IsGroup, &rec.Timestamp)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(optionsJSON), &rec.Options); err != nil {
+		return nil, fmt.Errorf("unmarshal poll options: %w", err)
+	}
+	return &rec, nil
+}
+
+// StorePollVote records a single voter's current selection. Uses INSERT OR
+// REPLACE because WhatsApp sends a fresh PollUpdateMessage every time a voter
+// changes their selection (and an empty selection list to clear the vote).
+func (store *MessageStore) StorePollVote(pollMsgID, pollChatJID, voter string,
+	selectedOptions []string, ts time.Time) error {
+	if selectedOptions == nil {
+		selectedOptions = []string{}
+	}
+	selectedJSON, err := json.Marshal(selectedOptions)
+	if err != nil {
+		return fmt.Errorf("marshal selected options: %w", err)
+	}
+	_, err = store.db.Exec(
+		`INSERT OR REPLACE INTO poll_votes
+		 (poll_message_id, poll_chat_jid, voter, selected_options_json, timestamp)
+		 VALUES (?, ?, ?, ?, ?)`,
+		pollMsgID, pollChatJID, voter, string(selectedJSON), ts,
+	)
+	return err
+}
+
 // Get all chats
 func (store *MessageStore) GetChats() (map[string]time.Time, error) {
 	rows, err := store.db.Query("SELECT jid, last_message_time FROM chats ORDER BY last_message_time DESC")
@@ -927,57 +1036,23 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		return false, "Not connected to WhatsApp"
 	}
 
-	// Create JID for recipient
-	var recipientJID types.JID
-	var settingsLookupJID types.JID
-	var err error
-
-	// Check if recipient is a JID
-	isJID := strings.Contains(recipient, "@")
-
-	if isJID {
-		// Parse the JID string
-		recipientJID, err = types.ParseJID(recipient)
-		if err != nil {
-			return false, fmt.Sprintf("Error parsing JID: %v", err)
+	// Parse the raw JID (pre-LID resolution) for settings lookup and SQLite
+	// storage: rows are keyed by @s.whatsapp.net, not @lid.
+	var storageJID types.JID
+	if strings.Contains(recipient, "@") {
+		var parseErr error
+		storageJID, parseErr = types.ParseJID(recipient)
+		if parseErr != nil {
+			return false, fmt.Sprintf("Error parsing JID: %v", parseErr)
 		}
 	} else {
-		// Create JID from phone number
-		recipientJID = types.JID{
-			User:   recipient,
-			Server: "s.whatsapp.net", // For personal chats
-		}
+		storageJID = types.JID{User: recipient, Server: "s.whatsapp.net"}
 	}
-	settingsLookupJID = recipientJID
+	settingsLookupJID := storageJID
 
-	// Capture pre-LID-resolution JID for SQLite storage.
-	// handleMessage uses resolveLIDChat to map LID→phone for incoming events;
-	// for outbound we keep the pre-resolution form so the chat stays unified
-	// under @s.whatsapp.net (matches what list_chats / list_messages expect).
-	storageJID := recipientJID
-
-	// For personal chats, resolve phone number JID to LID (Linked Identity).
-	// WhatsApp is migrating to LID-based addressing; messages sent to the
-	// phone JID silently fail for migrated contacts.
-	if recipientJID.Server == types.DefaultUserServer {
-		ctx := context.Background()
-		lid, lidErr := client.Store.LIDs.GetLIDForPN(ctx, recipientJID)
-		if lidErr == nil && !lid.IsEmpty() {
-			fmt.Printf("Resolved %s -> %s (LID)\n", recipientJID, lid)
-			recipientJID = lid
-		} else {
-			// Cache miss or cache error — ask the WhatsApp server.
-			if lidErr != nil {
-				fmt.Printf("Warning: LID cache lookup failed for %s: %v, falling back to server\n", recipientJID, lidErr)
-			}
-			info, infoErr := client.GetUserInfo(ctx, []types.JID{recipientJID})
-			if infoErr != nil {
-				fmt.Printf("Warning: server LID lookup failed for %s: %v\n", recipientJID, infoErr)
-			} else if userInfo, ok := info[recipientJID]; ok && !userInfo.LID.IsEmpty() {
-				fmt.Printf("Resolved %s -> %s (LID via server)\n", recipientJID, userInfo.LID)
-				recipientJID = userInfo.LID
-			}
-		}
+	recipientJID, err := resolveRecipientJID(client, recipient)
+	if err != nil {
+		return false, err.Error()
 	}
 
 	msg := &waProto.Message{}
@@ -1138,6 +1213,385 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 	}
 
 	return true, fmt.Sprintf("Message sent to %s", recipient)
+}
+
+// SendPollRequest represents the request body for the send poll API.
+// SelectableOptionCount follows whatsmeow semantics:
+//
+//	0 = multi-select with no limit (also the zero-value default when omitted)
+//	1 = single-select
+//	N = multi-select up to N (1 < N <= len(Options))
+type SendPollRequest struct {
+	Recipient             string   `json:"recipient"`
+	Name                  string   `json:"name"`
+	Options               []string `json:"options"`
+	SelectableOptionCount int      `json:"selectable_option_count,omitempty"`
+}
+
+// SendPollResponse is the response for /api/send/poll. MessageID lets the
+// caller subsequently look up vote results without scraping messages.db.
+type SendPollResponse struct {
+	Success   bool   `json:"success"`
+	Message   string `json:"message"`
+	MessageID string `json:"message_id,omitempty"`
+}
+
+// resolveRecipientJID parses a phone number or JID string and resolves PN -> LID
+// for personal chats, matching the behavior used when sending text/media messages.
+func resolveRecipientJID(client *whatsmeow.Client, recipient string) (types.JID, error) {
+	var recipientJID types.JID
+	var err error
+
+	if strings.Contains(recipient, "@") {
+		recipientJID, err = types.ParseJID(recipient)
+		if err != nil {
+			return types.JID{}, fmt.Errorf("error parsing JID: %w", err)
+		}
+	} else {
+		recipientJID = types.JID{
+			User:   recipient,
+			Server: "s.whatsapp.net",
+		}
+	}
+
+	if recipientJID.Server == types.DefaultUserServer {
+		ctx := context.Background()
+		lid, lidErr := client.Store.LIDs.GetLIDForPN(ctx, recipientJID)
+		if lidErr == nil && !lid.IsEmpty() {
+			fmt.Printf("Resolved %s -> %s (LID)\n", recipientJID, lid)
+			recipientJID = lid
+		} else {
+			if lidErr != nil {
+				fmt.Printf("Warning: LID cache lookup failed for %s: %v, falling back to server\n", recipientJID, lidErr)
+			}
+			info, infoErr := client.GetUserInfo(ctx, []types.JID{recipientJID})
+			if infoErr != nil {
+				fmt.Printf("Warning: server LID lookup failed for %s: %v\n", recipientJID, infoErr)
+			} else if userInfo, ok := info[recipientJID]; ok && !userInfo.LID.IsEmpty() {
+				fmt.Printf("Resolved %s -> %s (LID via server)\n", recipientJID, userInfo.LID)
+				recipientJID = userInfo.LID
+			}
+		}
+	}
+
+	return recipientJID, nil
+}
+
+// sendWhatsAppPoll builds and sends a poll creation message. The poll
+// metadata (options, selectable count, message id) is persisted locally so
+// that subsequent vote events can be matched back to option names and so
+// that vote_poll callers can look up the poll without scraping messages.db.
+func sendWhatsAppPoll(client *whatsmeow.Client, messageStore *MessageStore,
+	recipient, name string, options []string, selectableOptionCount int) (bool, string, string) {
+	if !client.IsConnected() {
+		return false, "Not connected to WhatsApp", ""
+	}
+
+	recipientJID, err := resolveRecipientJID(client, recipient)
+	if err != nil {
+		return false, err.Error(), ""
+	}
+
+	msg := client.BuildPollCreation(name, options, selectableOptionCount)
+	resp, err := client.SendMessage(context.Background(), recipientJID, msg)
+	if err != nil {
+		return false, fmt.Sprintf("Error sending poll: %v", err), ""
+	}
+
+	chatJID := recipientJID.String()
+	timestamp := resp.Timestamp
+	if timestamp.IsZero() {
+		timestamp = time.Now()
+	}
+
+	sender := ""
+	if client.Store.ID != nil {
+		sender = client.Store.ID.ToNonAD().User
+	}
+	isGroup := recipientJID.Server == types.GroupServer
+
+	if err := messageStore.StoreChat(chatJID, "", timestamp); err != nil {
+		fmt.Printf("Warning: failed to upsert chat for poll: %v\n", err)
+	}
+	if err := messageStore.StorePoll(
+		resp.ID, chatJID, sender, true,
+		name, options, selectableOptionCount, isGroup, timestamp,
+	); err != nil {
+		fmt.Printf("Warning: failed to persist poll metadata: %v\n", err)
+	}
+	// Surface the poll question in `messages` so list_messages shows the
+	// agent's own polls alongside everything else.
+	if err := messageStore.StoreMessage(
+		resp.ID, chatJID, sender, name, timestamp, true,
+		"poll", "", "", nil, nil, nil, 0,
+	); err != nil {
+		fmt.Printf("Warning: failed to persist poll message: %v\n", err)
+	}
+
+	return true, fmt.Sprintf("Poll sent to %s", recipient), resp.ID
+}
+
+// VotePollRequest represents the request body for the /api/vote/poll endpoint.
+// `selected_options` may be empty — that clears the voter's previous selection.
+type VotePollRequest struct {
+	PollMessageID   string   `json:"poll_message_id"`
+	PollChatJID     string   `json:"poll_chat_jid"`
+	SelectedOptions []string `json:"selected_options"`
+}
+
+// voteOnWhatsAppPoll casts a vote on an existing poll. The poll must already
+// be in our local `polls` table (i.e. the bridge saw the original creation
+// message), since whatsmeow.Client.BuildPollVote needs the original poll's
+// MessageInfo to derive the per-poll secret.
+func voteOnWhatsAppPoll(client *whatsmeow.Client, messageStore *MessageStore,
+	pollMsgID, pollChatJID string, selectedOptions []string) (bool, int, string) {
+	if !client.IsConnected() {
+		return false, http.StatusServiceUnavailable, "Not connected to WhatsApp"
+	}
+	if pollMsgID == "" {
+		return false, http.StatusBadRequest, "poll_message_id is required"
+	}
+	if pollChatJID == "" {
+		return false, http.StatusBadRequest, "poll_chat_jid is required"
+	}
+
+	poll, err := messageStore.GetPoll(pollMsgID, pollChatJID)
+	if err != nil {
+		return false, http.StatusInternalServerError, fmt.Sprintf("Failed to look up poll: %v", err)
+	}
+	if poll == nil {
+		return false, http.StatusNotFound, "Poll not found in local store. The poll must have been observed live by the bridge."
+	}
+
+	// Validate that every selected option exists on the poll, and that the
+	// caller is not exceeding the poll's selectable_option_count limit.
+	known := make(map[string]struct{}, len(poll.Options))
+	for _, o := range poll.Options {
+		known[o] = struct{}{}
+	}
+	for _, o := range selectedOptions {
+		if _, ok := known[o]; !ok {
+			return false, http.StatusBadRequest, fmt.Sprintf("Option %q is not part of this poll", o)
+		}
+	}
+	if poll.SelectableCount > 0 && len(selectedOptions) > poll.SelectableCount {
+		return false, http.StatusBadRequest, fmt.Sprintf("This poll allows at most %d selections", poll.SelectableCount)
+	}
+
+	chatJID, err := types.ParseJID(poll.ChatJID)
+	if err != nil {
+		return false, http.StatusInternalServerError, fmt.Sprintf("Invalid poll chat JID %q: %v", poll.ChatJID, err)
+	}
+
+	// Reconstruct the original poll's MessageInfo. Sender is stored as the
+	// resolved user-part (consistent with messages.sender), so we attach the
+	// default user server to parse it back into a JID.
+	senderJID := types.JID{User: poll.Sender, Server: types.DefaultUserServer}
+	info := &types.MessageInfo{
+		MessageSource: types.MessageSource{
+			Chat:     chatJID,
+			Sender:   senderJID,
+			IsFromMe: poll.IsFromMe,
+			IsGroup:  poll.IsGroup,
+		},
+		ID:        poll.MessageID,
+		Timestamp: poll.Timestamp,
+	}
+
+	ctx := context.Background()
+	voteMsg, err := client.BuildPollVote(ctx, info, selectedOptions)
+	if err != nil {
+		return false, http.StatusInternalServerError, fmt.Sprintf("Failed to build poll vote: %v", err)
+	}
+
+	if _, err := client.SendMessage(ctx, chatJID, voteMsg); err != nil {
+		return false, http.StatusInternalServerError, fmt.Sprintf("Failed to send poll vote: %v", err)
+	}
+
+	// whatsmeow does not deliver our own outgoing PollUpdateMessage as an
+	// *events.Message, so we must persist our self-vote ourselves to keep
+	// get_poll_results consistent.
+	voter := ""
+	if client.Store.ID != nil {
+		voter = client.Store.ID.ToNonAD().User
+	}
+	if err := messageStore.StorePollVote(poll.MessageID, poll.ChatJID, voter, selectedOptions, time.Now()); err != nil {
+		fmt.Printf("Warning: failed to persist self poll vote: %v\n", err)
+	}
+
+	if len(selectedOptions) == 0 {
+		return true, http.StatusOK, "Cleared vote on poll"
+	}
+	return true, http.StatusOK, fmt.Sprintf("Voted on poll (%d selection(s))", len(selectedOptions))
+}
+
+// pollCreationInfo is a normalised view of WhatsApp's five PollCreationMessage
+// oneof variants (legacy, V2, V3, V4 wrapped in FutureProofMessage, V5).
+type pollCreationInfo struct {
+	Name            string
+	Options         []string
+	SelectableCount int
+}
+
+// extractPollCreation returns the poll creation payload from any of the
+// PollCreationMessage* oneof slots, or nil if the message isn't a poll
+// creation. Callers should treat nil as "not a poll".
+func extractPollCreation(msg *waProto.Message) *pollCreationInfo {
+	if msg == nil {
+		return nil
+	}
+	candidates := []*waProto.PollCreationMessage{
+		msg.GetPollCreationMessage(),
+		msg.GetPollCreationMessageV2(),
+		msg.GetPollCreationMessageV3(),
+		msg.GetPollCreationMessageV5(),
+	}
+	if v4 := msg.GetPollCreationMessageV4(); v4 != nil {
+		// V4 wraps the poll creation in a FutureProofMessage.
+		if inner := v4.GetMessage(); inner != nil {
+			candidates = append(candidates,
+				inner.GetPollCreationMessage(),
+				inner.GetPollCreationMessageV2(),
+				inner.GetPollCreationMessageV3(),
+				inner.GetPollCreationMessageV5(),
+			)
+		}
+	}
+	for _, pc := range candidates {
+		if pc == nil {
+			continue
+		}
+		opts := pc.GetOptions()
+		names := make([]string, 0, len(opts))
+		for _, o := range opts {
+			if o == nil {
+				continue
+			}
+			names = append(names, o.GetOptionName())
+		}
+		if len(names) == 0 {
+			continue
+		}
+		return &pollCreationInfo{
+			Name:            pc.GetName(),
+			Options:         names,
+			SelectableCount: int(pc.GetSelectableOptionsCount()),
+		}
+	}
+	return nil
+}
+
+// pollChatJIDCandidates returns the set of JID forms a poll could plausibly
+// be stored under, in lookup order: the literal value, the LID->PN mapping,
+// and the PN->LID mapping. Outbound polls land under the recipient's LID
+// (resolveRecipientJID converts PN->LID at send time) while inbound vote
+// events may carry the chat in either form, so we try both.
+func pollChatJIDCandidates(client *whatsmeow.Client, raw string) []string {
+	seen := map[string]struct{}{raw: {}}
+	out := []string{raw}
+	parsed, err := types.ParseJID(raw)
+	if err != nil || client == nil || client.Store == nil || client.Store.LIDs == nil {
+		return out
+	}
+	add := func(s string) {
+		if _, ok := seen[s]; ok {
+			return
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	ctx := context.Background()
+	if parsed.Server == types.HiddenUserServer {
+		if pn, lerr := client.Store.LIDs.GetPNForLID(ctx, parsed); lerr == nil && !pn.IsEmpty() {
+			add(pn.ToNonAD().String())
+		}
+	} else if parsed.Server == types.DefaultUserServer {
+		if lid, lerr := client.Store.LIDs.GetLIDForPN(ctx, parsed); lerr == nil && !lid.IsEmpty() {
+			add(lid.ToNonAD().String())
+		}
+	}
+	return out
+}
+
+// handlePollVote decrypts an incoming PollUpdateMessage and persists the
+// voter's selection to `poll_votes`. The vote payload is encrypted with a
+// per-poll secret that whatsmeow stored when the original poll-creation
+// message was processed, so this only succeeds for polls observed live (or
+// for polls whose secret is otherwise present in the whatsmeow store).
+func handlePollVote(client *whatsmeow.Client, messageStore *MessageStore,
+	msg *events.Message, pollUpdate *waProto.PollUpdateMessage, logger waLog.Logger) {
+	creationKey := pollUpdate.GetPollCreationMessageKey()
+	if creationKey == nil {
+		logger.Warnf("Poll update from %s missing creation message key", msg.Info.SourceString())
+		return
+	}
+	pollMsgID := creationKey.GetID()
+	pollChatJID := creationKey.GetRemoteJID()
+	if pollMsgID == "" || pollChatJID == "" {
+		logger.Warnf("Poll update from %s missing creation message id/jid", msg.Info.SourceString())
+		return
+	}
+
+	// The vote's PollCreationMessageKey references the chat in whatever form
+	// the sender's client used (PN or LID), but our outbound polls are stored
+	// under the LID and inbound polls under whatever form handleMessage saw.
+	// Try every reasonable form before giving up.
+	candidates := pollChatJIDCandidates(client, pollChatJID)
+
+	var (
+		poll *PollRecord
+		err  error
+	)
+	for _, candidate := range candidates {
+		poll, err = messageStore.GetPoll(pollMsgID, candidate)
+		if err != nil {
+			logger.Warnf("Failed to look up poll %s/%s: %v", candidate, pollMsgID, err)
+			return
+		}
+		if poll != nil {
+			pollChatJID = candidate
+			break
+		}
+	}
+	if poll == nil {
+		// We never saw the original poll creation — typically because the
+		// bridge wasn't running when the poll was sent. Without the option
+		// list we cannot decode the SHA-256 hashes back to names.
+		logger.Warnf("Received vote for unknown poll %s/%s (tried %v) — ignoring", pollChatJID, pollMsgID, candidates)
+		return
+	}
+
+	pollVote, err := client.DecryptPollVote(context.Background(), msg)
+	if err != nil {
+		logger.Warnf("Failed to decrypt poll vote for %s/%s: %v", pollChatJID, pollMsgID, err)
+		return
+	}
+
+	// Match each selected hash back to an option name by re-hashing our
+	// stored option list. Unknown hashes (option list out of sync) are
+	// silently dropped — there is nothing meaningful to record.
+	optionHashes := whatsmeow.HashPollOptions(poll.Options)
+	selected := make([]string, 0, len(pollVote.GetSelectedOptions()))
+	for _, h := range pollVote.GetSelectedOptions() {
+		for i, oh := range optionHashes {
+			if bytes.Equal(h, oh) {
+				selected = append(selected, poll.Options[i])
+				break
+			}
+		}
+	}
+
+	// Resolve the voter the same way handleMessage resolves message senders,
+	// so the voter user-part matches `messages.sender` rows.
+	resolvedSender := resolveUserJID(client, msg.Info.Sender, senderAltForMessage(client, msg.Info))
+	voter := resolvedSender.User
+
+	if err := messageStore.StorePollVote(pollMsgID, pollChatJID, voter, selected, msg.Info.Timestamp); err != nil {
+		logger.Warnf("Failed to store poll vote for %s/%s: %v", pollChatJID, pollMsgID, err)
+		return
+	}
+	logger.Infof("Stored poll vote: poll=%s/%s voter=%s selected=%v",
+		pollChatJID, pollMsgID, voter, selected)
 }
 
 // Extract quoted message info from ContextInfo
@@ -1351,6 +1805,14 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}
 	}
 
+	// Poll updates carry encrypted vote hashes — handle them inline and stop
+	// before the regular content/media path, since they have no displayable
+	// content of their own.
+	if pollUpdate := msg.Message.GetPollUpdateMessage(); pollUpdate != nil {
+		handlePollVote(client, messageStore, msg, pollUpdate, logger)
+		return
+	}
+
 	// Extract text content
 	content := extractTextContent(msg.Message)
 
@@ -1359,6 +1821,22 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 
 	// Extract quoted message info
 	quotedMessageId, quotedSender, quotedContent := extractQuotedMessageInfo(msg.Message)
+
+	// Capture poll creation: persist the option list to `polls` and surface
+	// the question as message content so list_messages still shows it.
+	if poll := extractPollCreation(msg.Message); poll != nil {
+		mediaType = "poll"
+		if content == "" {
+			content = poll.Name
+		}
+		if err := messageStore.StorePoll(
+			msg.Info.ID, chatJID, sender, msg.Info.IsFromMe,
+			poll.Name, poll.Options, poll.SelectableCount,
+			msg.Info.IsGroup, msg.Info.Timestamp,
+		); err != nil {
+			logger.Warnf("Failed to persist poll: %v", err)
+		}
+	}
 
 	// Skip if there's no content and no media
 	if content == "" && mediaType == "" {
@@ -1780,6 +2258,108 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			Message: message,
 		})
 	}))
+
+	// Handler for sending polls
+	http.HandleFunc("/api/send/poll", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req SendPollRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		if req.Recipient == "" {
+			http.Error(w, "Recipient is required", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.Name) == "" {
+			http.Error(w, "Poll name is required", http.StatusBadRequest)
+			return
+		}
+		if len(req.Options) < 2 {
+			http.Error(w, "At least two poll options are required", http.StatusBadRequest)
+			return
+		}
+		if len(req.Options) > 12 {
+			http.Error(w, "WhatsApp supports at most 12 poll options", http.StatusBadRequest)
+			return
+		}
+		for _, opt := range req.Options {
+			if strings.TrimSpace(opt) == "" {
+				http.Error(w, "Poll options must not be empty", http.StatusBadRequest)
+				return
+			}
+		}
+		// whatsmeow coerces out-of-range values to 0, which silently changes the
+		// poll's selection mode. Reject them upfront so the caller knows.
+		if req.SelectableOptionCount < 0 || req.SelectableOptionCount > len(req.Options) {
+			http.Error(w, "selectable_option_count must be 0 (unlimited) or between 1 and len(options)", http.StatusBadRequest)
+			return
+		}
+
+		success, message, messageID := sendWhatsAppPoll(client, messageStore, req.Recipient, req.Name, req.Options, req.SelectableOptionCount)
+
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		_ = json.NewEncoder(w).Encode(SendPollResponse{
+			Success:   success,
+			Message:   message,
+			MessageID: messageID,
+		})
+	})
+
+	// Handler for casting a vote on an existing poll. The poll must already
+	// be in the local `polls` table (i.e. the bridge saw the original poll
+	// creation message), since whatsmeow needs the per-poll secret to encrypt
+	// the vote payload.
+	http.HandleFunc("/api/vote/poll", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req VotePollRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		if strings.TrimSpace(req.PollMessageID) == "" {
+			http.Error(w, "poll_message_id is required", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.PollChatJID) == "" {
+			http.Error(w, "poll_chat_jid is required", http.StatusBadRequest)
+			return
+		}
+		// Reject vote payloads with empty or whitespace-only entries upfront.
+		// An empty `selected_options` array is allowed (clears the vote) but
+		// a `[""]` entry would fail option matching downstream with a less
+		// helpful error.
+		for _, o := range req.SelectedOptions {
+			if strings.TrimSpace(o) == "" {
+				http.Error(w, "selected_options entries must not be empty", http.StatusBadRequest)
+				return
+			}
+		}
+
+		success, status, message := voteOnWhatsAppPoll(client, messageStore, req.PollMessageID, req.PollChatJID, req.SelectedOptions)
+
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(status)
+		}
+		_ = json.NewEncoder(w).Encode(SendMessageResponse{
+			Success: success,
+			Message: message,
+		})
+	})
 
 	// Handler for downloading media
 	http.HandleFunc("/api/download", auth(func(w http.ResponseWriter, r *http.Request) {
@@ -2564,6 +3144,21 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message, timestamp, histMsgID)
 				}
 
+				// Capture poll creations from history sync so list_polls can
+				// surface them. Vote backfill is intentionally not attempted
+				// here — votes need the per-poll secret which whatsmeow only
+				// reliably stores when the creation message is processed live.
+				var histPoll *pollCreationInfo
+				if msg.Message.Message != nil {
+					histPoll = extractPollCreation(msg.Message.Message)
+				}
+				if histPoll != nil {
+					mediaType = "poll"
+					if content == "" {
+						content = histPoll.Name
+					}
+				}
+
 				// Log the message content for debugging
 				logger.Infof("Message content: %v, Media Type: %v", content, mediaType)
 
@@ -2642,6 +3237,18 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					} else {
 						logger.Infof("Stored message: [%s] %s -> %s: %s",
 							msgTimestamp.Format("2006-01-02 15:04:05"), sender, chatJID, content)
+					}
+				}
+
+				if histPoll != nil && msgID != "" {
+					// History-sync IsGroup is inferable from the chat server.
+					isGroup := jid.Server == types.GroupServer
+					if pollErr := messageStore.StorePoll(
+						msgID, chatJID, sender, isFromMe,
+						histPoll.Name, histPoll.Options, histPoll.SelectableCount,
+						isGroup, msgTimestamp,
+					); pollErr != nil {
+						logger.Warnf("Failed to store history poll %s/%s: %v", chatJID, msgID, pollErr)
 					}
 				}
 			}
