@@ -5,12 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -131,33 +129,8 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 	return &MessageStore{db: db}
 }
 
-func freeTCPPort(t *testing.T) int {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to allocate free TCP port: %v", err)
-	}
-	defer func() { _ = listener.Close() }()
-
-	_, portString, err := net.SplitHostPort(listener.Addr().String())
-	if err != nil {
-		t.Fatalf("failed to split listener address: %v", err)
-	}
-	port, err := strconv.Atoi(portString)
-	if err != nil {
-		t.Fatalf("failed to parse listener port: %v", err)
-	}
-	return port
-}
-
 func TestSendHandlerLogsCallerBeforeDecode(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	port := freeTCPPort(t)
-	oldMux := http.DefaultServeMux
-	http.DefaultServeMux = http.NewServeMux()
-	t.Cleanup(func() {
-		http.DefaultServeMux = oldMux
-	})
 
 	readPipe, writePipe, err := os.Pipe()
 	if err != nil {
@@ -165,29 +138,20 @@ func TestSendHandlerLogsCallerBeforeDecode(t *testing.T) {
 	}
 	oldStdout := os.Stdout
 	os.Stdout = writePipe
+	t.Cleanup(func() {
+		os.Stdout = oldStdout
+		_ = writePipe.Close()
+		_ = readPipe.Close()
+	})
 
-	startRESTServer(newTestClient(&mockLIDStore{}), newTestMessageStore(t), port, token, nil)
+	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/send", strings.NewReader("{"))
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("User-Agent", "unit-test-fingerprint")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
 
-	client := &http.Client{Timeout: 2 * time.Second}
-	var resp *http.Response
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		req, reqErr := http.NewRequest(
-			http.MethodPost,
-			"http://127.0.0.1:"+strconv.Itoa(port)+"/api/send",
-			strings.NewReader("{"),
-		)
-		if reqErr != nil {
-			t.Fatalf("failed to create request: %v", reqErr)
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("User-Agent", "unit-test-fingerprint")
-		resp, err = client.Do(req)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 	os.Stdout = oldStdout
 	_ = writePipe.Close()
 	outputBytes, readErr := io.ReadAll(readPipe)
@@ -195,12 +159,8 @@ func TestSendHandlerLogsCallerBeforeDecode(t *testing.T) {
 	if readErr != nil {
 		t.Fatalf("failed to read captured stdout: %v", readErr)
 	}
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected malformed body to return 400, got %d", resp.StatusCode)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected malformed body to return 400, got %d", resp.Code)
 	}
 
 	output := string(outputBytes)
