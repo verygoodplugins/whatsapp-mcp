@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"mime"
 	"net/http"
 	"os"
 	"os/signal"
@@ -814,6 +815,9 @@ func classifyMediaPath(mediaPath string) (whatsmeow.MediaType, string, string) {
 	case "mov":
 		return whatsmeow.MediaVideo, "video/quicktime", "video"
 	default:
+		if m := mime.TypeByExtension("." + ext); m != "" {
+			return whatsmeow.MediaDocument, m, "document"
+		}
 		return whatsmeow.MediaDocument, "application/octet-stream", "document"
 	}
 }
@@ -1075,6 +1079,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		case whatsmeow.MediaDocument:
 			msg.DocumentMessage = &waProto.DocumentMessage{
 				Title:         proto.String(mediaPath[strings.LastIndex(mediaPath, "/")+1:]),
+				FileName:      proto.String(mediaPath[strings.LastIndex(mediaPath, "/")+1:]),
 				Caption:       proto.String(message),
 				Mimetype:      proto.String(mimeType),
 				URL:           &resp.URL,
