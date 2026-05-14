@@ -1205,6 +1205,13 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			return
 		}
 
+		// GTM-6129 caller-fingerprinting: identify which downstream process
+		// is calling /api/send so the 5-week unidentified-relay-producer
+		// mystery can be resolved (see gfv-brain/docs/PIL-WHATSAPP-RELAY-DIAGNOSIS.md
+		// Path 1). RemoteAddr is host:port, UserAgent is per-client signature.
+		// Logged BEFORE body decode so even malformed requests get fingerprinted.
+		fmt.Printf("[/api/send] from=%s ua=%q\n", r.RemoteAddr, r.UserAgent())
+
 		// Parse the request body
 		var req SendMessageRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
