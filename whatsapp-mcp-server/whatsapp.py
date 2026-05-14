@@ -21,6 +21,31 @@ WHATSMEOW_DB_PATH = os.getenv(
 )
 WHATSAPP_API_BASE_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:8080/api")
 
+_BRIDGE_TOKEN_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store", ".bridge-token"
+)
+
+
+def _read_bridge_token() -> str | None:
+    env = os.getenv("WHATSAPP_BRIDGE_TOKEN", "").strip()
+    if env:
+        return env
+    try:
+        with open(_BRIDGE_TOKEN_PATH, encoding="utf-8") as fh:
+            value = fh.read().strip()
+            return value or None
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+
+
+def _bridge_headers() -> dict[str, str]:
+    token = _read_bridge_token()
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}"}
+
 
 @dataclass
 class Message:
@@ -571,16 +596,27 @@ def list_chats(
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
 
-        # Build base query
+        # Build base query. The last-message columns are referenced by tuple
+        # index downstream, so we keep the result shape constant and emit
+        # static NULLs when the messages table is not joined — otherwise the
+        # SELECT references messages.* with no FROM/JOIN and SQLite errors
+        # out with "no such column: messages.content".
+        if include_last_message:
+            last_message_select = (
+                "messages.content as last_message, "
+                "messages.sender as last_sender, "
+                "messages.is_from_me as last_is_from_me"
+            )
+        else:
+            last_message_select = "NULL as last_message, NULL as last_sender, NULL as last_is_from_me"
+
         query_parts = [
-            """
+            f"""
             SELECT
                 chats.jid,
                 chats.name,
                 chats.last_message_time,
-                messages.content as last_message,
-                messages.sender as last_sender,
-                messages.is_from_me as last_is_from_me
+                {last_message_select}
             FROM chats
         """
         ]
@@ -838,14 +874,20 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
 
-        query = """
+        # See list_chats: keep result tuple shape stable across the
+        # include_last_message branch by emitting static NULLs when we
+        # don't JOIN the messages table.
+        if include_last_message:
+            last_message_select = "m.content as last_message, m.sender as last_sender, m.is_from_me as last_is_from_me"
+        else:
+            last_message_select = "NULL as last_message, NULL as last_sender, NULL as last_is_from_me"
+
+        query = f"""
             SELECT
                 c.jid,
                 c.name,
                 c.last_message_time,
-                m.content as last_message,
-                m.sender as last_sender,
-                m.is_from_me as last_is_from_me
+                {last_message_select}
             FROM chats c
         """
 
@@ -940,7 +982,7 @@ def send_message(recipient: str, message: str) -> tuple[bool, str]:
             "message": message,
         }
 
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, headers=_bridge_headers())
 
         # Check if the request was successful
         if response.status_code == 200:
@@ -972,7 +1014,7 @@ def send_file(recipient: str, media_path: str) -> tuple[bool, str]:
         url = f"{WHATSAPP_API_BASE_URL}/send"
         payload = {"recipient": recipient, "media_path": media_path}
 
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, headers=_bridge_headers())
 
         # Check if the request was successful
         if response.status_code == 200:
@@ -1010,7 +1052,7 @@ def send_audio_message(recipient: str, media_path: str) -> tuple[bool, str]:
         url = f"{WHATSAPP_API_BASE_URL}/send"
         payload = {"recipient": recipient, "media_path": media_path}
 
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, headers=_bridge_headers())
 
         # Check if the request was successful
         if response.status_code == 200:
@@ -1041,7 +1083,7 @@ def download_media(message_id: str, chat_jid: str) -> str | None:
         url = f"{WHATSAPP_API_BASE_URL}/download"
         payload = {"message_id": message_id, "chat_jid": chat_jid}
 
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, headers=_bridge_headers())
 
         if response.status_code == 200:
             result = response.json()

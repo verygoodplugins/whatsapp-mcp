@@ -76,7 +76,9 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 		CREATE TABLE chats (
 			jid TEXT PRIMARY KEY,
 			name TEXT,
-			last_message_time TIMESTAMP
+			last_message_time TIMESTAMP,
+			ephemeral_expiration INTEGER NOT NULL DEFAULT 0,
+			ephemeral_setting_timestamp INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE TABLE messages (
 			id TEXT,
@@ -115,6 +117,228 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return &MessageStore{db: db}
+}
+
+func TestStoreChatPreservesEphemeralSettings(t *testing.T) {
+	ms := newTestMessageStore(t)
+
+	chatJID := "15551234567@s.whatsapp.net"
+	if err := ms.UpdateChatEphemeralSettings(chatJID, 604800, 1710000000); err != nil {
+		t.Fatalf("failed to seed ephemeral settings: %v", err)
+	}
+
+	if err := ms.StoreChat(chatJID, "Alice", time.Unix(1710000100, 0)); err != nil {
+		t.Fatalf("failed to store chat: %v", err)
+	}
+
+	settings, err := ms.GetChatEphemeralSettings(chatJID)
+	if err != nil {
+		t.Fatalf("failed to load ephemeral settings: %v", err)
+	}
+	if settings.Expiration != 604800 {
+		t.Fatalf("expected expiration 604800, got %d", settings.Expiration)
+	}
+	if settings.SettingTimestamp != 1710000000 {
+		t.Fatalf("expected setting timestamp 1710000000, got %d", settings.SettingTimestamp)
+	}
+}
+
+// TestUpdateChatEphemeralSettings_IgnoresZeroTimestamp pins down the sparse-chunk
+// guard: a write with settingTimestamp == 0 carries no information about when
+// the user toggled the chat's ephemeral state, so it must not clobber a
+// previously-captured non-zero value. WhatsApp's history sync delivers
+// Conversation records in many chunks; sparse later chunks omit the ephemeral
+// fields and would otherwise reset the row to (0, 0).
+func TestUpdateChatEphemeralSettings_IgnoresZeroTimestamp(t *testing.T) {
+	ms := newTestMessageStore(t)
+
+	chatJID := "15551234567@s.whatsapp.net"
+	if err := ms.UpdateChatEphemeralSettings(chatJID, 604800, 1710000000); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := ms.UpdateChatEphemeralSettings(chatJID, 0, 0); err != nil {
+		t.Fatalf("zero-ts write: %v", err)
+	}
+
+	settings, err := ms.GetChatEphemeralSettings(chatJID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if settings.Expiration != 604800 || settings.SettingTimestamp != 1710000000 {
+		t.Fatalf("expected sparse zero-ts write to be ignored; got (%d, %d)",
+			settings.Expiration, settings.SettingTimestamp)
+	}
+}
+
+// TestUpdateChatEphemeralSettings_IgnoresOlderTimestamp pins down the
+// monotonic-update rule: a write whose settingTimestamp is older than the
+// stored one is stale (out-of-order delivery) and must not overwrite. This
+// lets handleMessage safely write ephemeral-from-ContextInfo on every inbound
+// message without worrying about replays / late history-sync chunks.
+func TestUpdateChatEphemeralSettings_IgnoresOlderTimestamp(t *testing.T) {
+	ms := newTestMessageStore(t)
+
+	chatJID := "15551234567@s.whatsapp.net"
+	if err := ms.UpdateChatEphemeralSettings(chatJID, 604800, 1710000000); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// An older event (ts=1700000000) should not overwrite, even though both
+	// expiration and ts are non-zero.
+	if err := ms.UpdateChatEphemeralSettings(chatJID, 86400, 1700000000); err != nil {
+		t.Fatalf("older-ts write: %v", err)
+	}
+
+	settings, err := ms.GetChatEphemeralSettings(chatJID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if settings.Expiration != 604800 || settings.SettingTimestamp != 1710000000 {
+		t.Fatalf("expected older-ts write to be ignored; got (%d, %d)",
+			settings.Expiration, settings.SettingTimestamp)
+	}
+}
+
+// TestExtractChatEphemeralFromMessage covers every concrete sub-message type
+// that carries ContextInfo. Each regular message in an ephemeral chat stamps
+// ContextInfo.Expiration / EphemeralSettingTimestamp; the bridge backfills
+// from this so it doesn't depend on receiving a live EPHEMERAL_SETTING toggle
+// or a fresh history sync.
+func TestExtractChatEphemeralFromMessage(t *testing.T) {
+	ctx := &waProto.ContextInfo{
+		Expiration:                proto.Uint32(604800),
+		EphemeralSettingTimestamp: proto.Int64(1710000000),
+	}
+
+	cases := []struct {
+		name string
+		msg  *waProto.Message
+		want ChatEphemeralSettings
+	}{
+		{
+			name: "ExtendedTextMessage",
+			msg:  &waProto.Message{ExtendedTextMessage: &waProto.ExtendedTextMessage{ContextInfo: ctx}},
+			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
+		},
+		{
+			name: "ImageMessage",
+			msg:  &waProto.Message{ImageMessage: &waProto.ImageMessage{ContextInfo: ctx}},
+			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
+		},
+		{
+			name: "VideoMessage",
+			msg:  &waProto.Message{VideoMessage: &waProto.VideoMessage{ContextInfo: ctx}},
+			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
+		},
+		{
+			name: "AudioMessage",
+			msg:  &waProto.Message{AudioMessage: &waProto.AudioMessage{ContextInfo: ctx}},
+			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
+		},
+		{
+			name: "DocumentMessage",
+			msg:  &waProto.Message{DocumentMessage: &waProto.DocumentMessage{ContextInfo: ctx}},
+			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
+		},
+		{
+			name: "StickerMessage",
+			msg:  &waProto.Message{StickerMessage: &waProto.StickerMessage{ContextInfo: ctx}},
+			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
+		},
+		{
+			name: "Conversation (no ContextInfo at all)",
+			msg:  &waProto.Message{Conversation: proto.String("plain text")},
+			want: ChatEphemeralSettings{},
+		},
+		{
+			name: "Nil",
+			msg:  nil,
+			want: ChatEphemeralSettings{},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractChatEphemeralFromMessage(tc.msg)
+			if got != tc.want {
+				t.Errorf("extractChatEphemeralFromMessage() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandleMessage_BackfillsEphemeralFromContextInfo asserts the end-to-end
+// backfill: an inbound regular message whose ContextInfo carries a
+// non-zero EphemeralSettingTimestamp must update the chat's ephemeral
+// settings row, so subsequent outgoing messages from the bridge respect the
+// chat's disappearing-message timer.
+func TestHandleMessage_BackfillsEphemeralFromContextInfo(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	msg := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     phonePN,
+				Sender:   phonePN,
+				IsFromMe: false,
+			},
+			ID:        "ephemeral-backfill-001",
+			Timestamp: time.Now(),
+		},
+		Message: &waProto.Message{
+			ExtendedTextMessage: &waProto.ExtendedTextMessage{
+				Text: proto.String("hi from a disappearing chat"),
+				ContextInfo: &waProto.ContextInfo{
+					Expiration:                proto.Uint32(604800),
+					EphemeralSettingTimestamp: proto.Int64(1710000000),
+				},
+			},
+		},
+	}
+
+	handleMessage(client, ms, msg, logger)
+
+	settings, err := ms.GetChatEphemeralSettings(phonePN.String())
+	if err != nil {
+		t.Fatalf("get ephemeral settings: %v", err)
+	}
+	if settings.Expiration != 604800 || settings.SettingTimestamp != 1710000000 {
+		t.Fatalf("expected handleMessage to backfill (604800, 1710000000); got (%d, %d)",
+			settings.Expiration, settings.SettingTimestamp)
+	}
+}
+
+func TestApplyChatEphemeralSettingsConvertsConversation(t *testing.T) {
+	msg := &waProto.Message{
+		Conversation: proto.String("hello"),
+	}
+
+	applyChatEphemeralSettings(msg, ChatEphemeralSettings{
+		Expiration:       604800,
+		SettingTimestamp: 1710000000,
+	})
+
+	if msg.Conversation != nil {
+		t.Fatalf("expected conversation to be converted to extended text")
+	}
+	if msg.GetExtendedTextMessage() == nil {
+		t.Fatalf("expected extended text message to be set")
+	}
+	if got := msg.GetExtendedTextMessage().GetText(); got != "hello" {
+		t.Fatalf("expected text hello, got %q", got)
+	}
+	if got := msg.GetExtendedTextMessage().GetContextInfo().GetExpiration(); got != 604800 {
+		t.Fatalf("expected expiration 604800, got %d", got)
+	}
+	if got := msg.GetExtendedTextMessage().GetContextInfo().GetEphemeralSettingTimestamp(); got != 1710000000 {
+		t.Fatalf("expected setting timestamp 1710000000, got %d", got)
+	}
+	if got := msg.GetExtendedTextMessage().GetContextInfo().GetDisappearingMode().GetTrigger(); got != waProto.DisappearingMode_CHAT_SETTING {
+		t.Fatalf("expected disappearing mode trigger CHAT_SETTING, got %v", got)
+	}
 }
 
 func testLogger() waLog.Logger {
