@@ -27,7 +27,15 @@ import (
 // mockLIDStore implements store.LIDStore with a simple in-memory map.
 type mockLIDStore struct {
 	store.NoopStore
+	lidByPN map[types.JID]types.JID
 	pnByLID map[types.JID]types.JID
+}
+
+func (m *mockLIDStore) GetLIDForPN(_ context.Context, pn types.JID) (types.JID, error) {
+	if lid, ok := m.lidByPN[pn]; ok {
+		return lid, nil
+	}
+	return types.EmptyJID, nil
 }
 
 func (m *mockLIDStore) GetPNForLID(_ context.Context, lid types.JID) (types.JID, error) {
@@ -140,6 +148,23 @@ func TestStoreChatPreservesEphemeralSettings(t *testing.T) {
 	}
 	if settings.SettingTimestamp != 1710000000 {
 		t.Fatalf("expected setting timestamp 1710000000, got %d", settings.SettingTimestamp)
+	}
+}
+
+func TestResolveRecipientJIDResolvesPhoneToCachedLID(t *testing.T) {
+	phoneJID := types.JID{User: "15551234567", Server: types.DefaultUserServer}
+	lidJID := types.JID{User: "123456789012345", Server: types.HiddenUserServer}
+	client := newTestClient(&mockLIDStore{
+		lidByPN: map[types.JID]types.JID{phoneJID: lidJID},
+	})
+
+	got, err := resolveRecipientJID(client, phoneJID.User)
+	if err != nil {
+		t.Fatalf("resolveRecipientJID returned error: %v", err)
+	}
+
+	if got != lidJID {
+		t.Fatalf("expected cached LID %s, got %s", lidJID, got)
 	}
 }
 
