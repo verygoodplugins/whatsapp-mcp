@@ -1764,7 +1764,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			req.Recipient, len(req.Message), resolvedMediaPath != "")
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, resolvedMediaPath)
+		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, resolvedMediaPath)
 		fmt.Printf("← /api/send success=%v status=%q\n", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
