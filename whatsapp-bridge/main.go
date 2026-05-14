@@ -120,6 +120,7 @@ func NewMessageStore() (*MessageStore, error) {
 			file_sha256 BLOB,
 			file_enc_sha256 BLOB,
 			file_length INTEGER,
+			deleted_at TIMESTAMP,
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
@@ -161,6 +162,9 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	}
 	if err := ensureColumn(db, "chats", "ephemeral_setting_timestamp", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("failed to ensure chats.ephemeral_setting_timestamp column: %w", err)
+	}
+	if err := ensureColumn(db, "messages", "deleted_at", "TIMESTAMP"); err != nil {
+		return fmt.Errorf("failed to ensure messages.deleted_at column: %w", err)
 	}
 	return nil
 }
