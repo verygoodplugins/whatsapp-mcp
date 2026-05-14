@@ -5,9 +5,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,6 +129,87 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return &MessageStore{db: db}
+}
+
+func freeTCPPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to allocate free TCP port: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	_, portString, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("failed to split listener address: %v", err)
+	}
+	port, err := strconv.Atoi(portString)
+	if err != nil {
+		t.Fatalf("failed to parse listener port: %v", err)
+	}
+	return port
+}
+
+func TestSendHandlerLogsCallerBeforeDecode(t *testing.T) {
+	const token = "supersecrettoken1234567890abcdef"
+	port := freeTCPPort(t)
+	oldMux := http.DefaultServeMux
+	http.DefaultServeMux = http.NewServeMux()
+	t.Cleanup(func() {
+		http.DefaultServeMux = oldMux
+	})
+
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create stdout pipe: %v", err)
+	}
+	oldStdout := os.Stdout
+	os.Stdout = writePipe
+
+	startRESTServer(newTestClient(&mockLIDStore{}), newTestMessageStore(t), port, token, nil)
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	var resp *http.Response
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		req, reqErr := http.NewRequest(
+			http.MethodPost,
+			"http://127.0.0.1:"+strconv.Itoa(port)+"/api/send",
+			strings.NewReader("{"),
+		)
+		if reqErr != nil {
+			t.Fatalf("failed to create request: %v", reqErr)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("User-Agent", "unit-test-fingerprint")
+		resp, err = client.Do(req)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	os.Stdout = oldStdout
+	_ = writePipe.Close()
+	outputBytes, readErr := io.ReadAll(readPipe)
+	_ = readPipe.Close()
+	if readErr != nil {
+		t.Fatalf("failed to read captured stdout: %v", readErr)
+	}
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected malformed body to return 400, got %d", resp.StatusCode)
+	}
+
+	output := string(outputBytes)
+	if !strings.Contains(output, "→ /api/send from=") {
+		t.Fatalf("expected caller fingerprint log, got output %q", output)
+	}
+	if !strings.Contains(output, `user_agent="unit-test-fingerprint"`) {
+		t.Fatalf("expected user agent in caller fingerprint log, got output %q", output)
+	}
 }
 
 func TestStoreChatPreservesEphemeralSettings(t *testing.T) {
