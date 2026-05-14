@@ -41,6 +41,31 @@ def test_get_contact_normalizes_lid(monkeypatch):
     assert result["resolved"] is True
 
 
+def test_get_contact_falls_back_to_lid_for_14_digit_numeric_identifier(monkeypatch):
+    calls = []
+
+    def fake_get_chat(jid: str, include_last_message: bool = True):
+        assert include_last_message is False
+        calls.append(jid)
+        if jid.endswith("@lid"):
+            return {"jid": jid, "name": "Lidia"}
+        return None
+
+    monkeypatch.setattr(mcp_main, "whatsapp_get_chat", fake_get_chat)
+    monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda jid: jid)
+
+    result = mcp_main.get_contact(identifier="35047067385985")
+
+    assert calls == ["35047067385985@s.whatsapp.net", "35047067385985@lid"]
+    assert result["jid"] == "35047067385985@lid"
+    assert result["is_lid"] is True
+    assert result["phone_number"] is None
+    assert result["lid"] == "35047067385985"
+    assert result["name"] == "Lidia"
+    assert result["display_name"] == "Lidia"
+    assert result["resolved"] is True
+
+
 def test_get_contact_unresolved_falls_back_to_jid_user(monkeypatch):
     monkeypatch.setattr(mcp_main, "whatsapp_get_chat", lambda *args, **kwargs: None)
     monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda jid: jid)
