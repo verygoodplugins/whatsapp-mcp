@@ -2162,10 +2162,23 @@ func extractDirectPathFromURL(url string) string {
 	return "/" + pathPart
 }
 
-// Start a REST API server to expose the WhatsApp client functionality
-func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
+// Start a REST API server to expose the WhatsApp client functionality.
+//
+// Auth: every handler is wrapped in withAuth, which enforces both a
+// bearer-token check and a Host-header allow-list (loopback only). See
+// auth.go for the rationale.
+//
+// Outbound media: req.MediaPath in /api/send is validated against
+// allowedMediaRoots before sendWhatsAppMessage ever sees it. See
+// media_path.go.
+func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []string) {
+	allowedHosts := buildAllowedHosts(port)
+	auth := func(h http.HandlerFunc) http.HandlerFunc {
+		return withAuth(token, allowedHosts, h)
+	}
+
 	// Health check endpoint
-	http.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/health", auth(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		status := map[string]interface{}{
 			"status":    "ok",
@@ -2177,10 +2190,10 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 		_ = json.NewEncoder(w).Encode(status)
-	})
+	}))
 
 	// Handler for sending messages
-	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/send", auth(func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -2205,11 +2218,32 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			return
 		}
 
-		fmt.Println("Received request to send message", req.Message, req.MediaPath)
+		// Validate and canonicalize media_path against the configured roots
+		// before reading. This prevents the bridge from being used as a
+		// generic file-read primitive (e.g. media_path=/Users/x/.ssh/id_rsa).
+		resolvedMediaPath := req.MediaPath
+		if req.MediaPath != "" {
+			canonical, mpErr := validateMediaPath(req.MediaPath, allowedMediaRoots)
+			if mpErr != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(SendMessageResponse{
+					Success: false,
+					Message: fmt.Sprintf("media_path rejected: %v", mpErr),
+				})
+				return
+			}
+			resolvedMediaPath = canonical
+		}
+
+		// Avoid logging req.Message verbatim — it's user content and may
+		// contain secrets the user pasted into a chat.
+		fmt.Printf("→ /api/send recipient=%q message_len=%d has_media=%v\n",
+			req.Recipient, len(req.Message), resolvedMediaPath != "")
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, req.MediaPath)
-		fmt.Println("Message sent", success, message)
+		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, resolvedMediaPath)
+		fmt.Printf("← /api/send success=%v status=%q\n", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
 
@@ -2223,7 +2257,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			Success: success,
 			Message: message,
 		})
-	})
+	}))
 
 	// Handler for sending polls
 	http.HandleFunc("/api/send/poll", func(w http.ResponseWriter, r *http.Request) {
@@ -2328,7 +2362,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	})
 
 	// Handler for downloading media
-	http.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/download", auth(func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -2390,10 +2424,10 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			Filename: filename,
 			Path:     path,
 		})
-	})
+	}))
 
 	// Handler for sending typing indicator
-	http.HandleFunc("/api/typing", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/typing", auth(func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -2466,7 +2500,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 				"message": fmt.Sprintf("Typing indicator set to %v", req.IsTyping),
 			})
 		}
-	})
+	}))
 
 	// Start the server with proper timeouts. Bind to loopback so the bridge is
 	// not reachable from the LAN; MCP clients talk to it over localhost.
@@ -2799,7 +2833,28 @@ connectionSuccess:
 		}
 		port = v
 	}
-	startRESTServer(client, messageStore, port)
+
+	// Load (or generate on first run) the bearer token used to authenticate
+	// REST callers, and resolve the allow-listed roots that media_path values
+	// in /api/send must live under. See auth.go and media_path.go for the
+	// rationale.
+	bridgeToken, fresh, tokErr := loadOrCreateBridgeToken()
+	if tokErr != nil {
+		logger.Errorf("Failed to initialize bridge token: %v", tokErr)
+		return
+	}
+	if fresh {
+		printTokenBanner(bridgeToken, port)
+	}
+
+	allowedMediaRoots, mrErr := resolveMediaRoots()
+	if mrErr != nil {
+		logger.Errorf("Failed to resolve media roots: %v", mrErr)
+		return
+	}
+	logger.Infof("Allowed media roots: %v", allowedMediaRoots)
+
+	startRESTServer(client, messageStore, port, bridgeToken, allowedMediaRoots)
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)

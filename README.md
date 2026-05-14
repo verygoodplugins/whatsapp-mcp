@@ -45,7 +45,9 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
    go run .
    ```
 
-   Scan the QR code with WhatsApp on your phone to authenticate.
+   On first start, the bridge prints and stores a local REST API token at
+   `whatsapp-bridge/store/.bridge-token`. Scan the QR code with WhatsApp on
+   your phone to authenticate.
 
 3. **Configure Claude Desktop**
 
@@ -86,6 +88,11 @@ git pull
 | **MCP server** (`whatsapp-mcp-server/*.py`, `pyproject.toml`, `uv.lock`) | Restart Claude Desktop / Cursor — `uv` re-resolves from the lockfile on next launch. Force a sync with `cd whatsapp-mcp-server && uv sync` if needed. |
 
 Updates do **not** require re-pairing or deleting `whatsapp.db` — your session and message history are preserved. Re-pairing is only needed when explicitly requesting full history (see [Requesting full history](#requesting-full-history)).
+
+For `v0.2.1` and later, restart both the bridge and MCP server after updating
+so the MCP server can read the bridge token. If the two components do not share
+the same checkout, set the same `WHATSAPP_BRIDGE_TOKEN` value in both
+environments.
 
 ### Cursor IDE Configuration
 
@@ -234,6 +241,10 @@ Send a media file (image, video, document).
 - `file_path` (required): Path to the file
 - `caption` (optional): Caption for the media
 
+The bridge only reads files inside configured media roots. By default this is
+`~/.local/share/whatsapp-mcp/outbox`; set `WHATSAPP_MEDIA_ROOTS` to allow
+additional absolute directories.
+
 #### `send_audio_message`
 
 Send a voice message (automatically converts to Opus .ogg format).
@@ -242,6 +253,9 @@ Send a voice message (automatically converts to Opus .ogg format).
 
 - `recipient` (required): Phone number or group JID
 - `file_path` (required): Path to audio file
+
+Converted audio is sent through the same media-path confinement as
+`send_file`.
 
 #### `download_media`
 
@@ -317,6 +331,26 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_DB_PATH`     | `../whatsapp-bridge/store/messages.db`   | Path to SQLite database                      |
 | `WHATSMEOW_DB_PATH`    | `../whatsapp-bridge/store/whatsapp.db`   | whatsmeow DB used for LID ↔ phone resolution |
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
+| `WHATSAPP_BRIDGE_TOKEN` | generated in `whatsapp-bridge/store/.bridge-token` | Bearer token required for bridge REST calls |
+| `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files |
+
+### Bridge authentication and media paths
+
+The bridge requires bearer-token authentication for every `/api/*` request and
+accepts only exact loopback Host headers for its configured port. This protects
+the local REST API from other local processes and browser DNS-rebinding attacks.
+
+On first start, the bridge generates a 256-bit token, writes it to
+`whatsapp-bridge/store/.bridge-token` with owner-only permissions, and prints a
+setup banner. The MCP server reads `WHATSAPP_BRIDGE_TOKEN` first, then falls
+back to that token file. For split deployments, containers, or process managers
+that do not share the repository directory, set the same
+`WHATSAPP_BRIDGE_TOKEN` value for both the bridge and MCP server.
+
+Outbound `media_path` values are confined to `WHATSAPP_MEDIA_ROOTS`. The default
+outbox is `~/.local/share/whatsapp-mcp/outbox`, created on bridge startup. Move
+files there before calling `send_file` or `send_audio_message`, or set
+`WHATSAPP_MEDIA_ROOTS` to a colon-separated list of absolute directories.
 
 ### CLI flags (Go bridge)
 
@@ -538,6 +572,16 @@ are documented in [docs/RELEASING.md](docs/RELEASING.md).
 - **Device Limit Reached**: Remove a linked device from WhatsApp Settings > Linked Devices.
 - **No Messages Loading**: Initial sync can take several minutes for large chat histories.
 - **Out of Sync**: Delete `whatsapp-bridge/store/*.db` files and re-authenticate.
+- **Bridge returns 401 Unauthorized**: Restart the bridge so it creates
+  `whatsapp-bridge/store/.bridge-token`, then restart the MCP server. If the MCP
+  server cannot read that file, set `WHATSAPP_BRIDGE_TOKEN` to the same value in
+  both environments.
+- **Bridge returns 403 Forbidden for Host**: Use `WHATSAPP_API_URL` with
+  `http://127.0.0.1:<port>/api`, `http://localhost:<port>/api`, or
+  `http://[::1]:<port>/api`; custom hostnames and missing ports are rejected.
+- **Bridge returns 403 Forbidden for media_path**: Move the file into
+  `~/.local/share/whatsapp-mcp/outbox` or add its absolute parent directory to
+  `WHATSAPP_MEDIA_ROOTS`.
 
 ### Windows
 
