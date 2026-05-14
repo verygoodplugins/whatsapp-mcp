@@ -1510,3 +1510,73 @@ func TestMarkMessageDeleted_FirstWriteWins(t *testing.T) {
 		t.Fatalf("expected earlier deleted_at=%v to win, got %v", earlier, got.Time)
 	}
 }
+
+func TestHandleMessageRevoke_MarksTargetMessage(t *testing.T) {
+	ms := newTestMessageStore(t)
+	chatJID := "15551234567@s.whatsapp.net"
+	targetID := "3A1234567890ABCDEF"
+
+	if _, err := ms.db.Exec(
+		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		targetID, chatJID, "15551234567", "secret", time.Unix(1710000000, 0), false,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	revokeType := waProto.ProtocolMessage_REVOKE
+	msg := &waProto.Message{
+		ProtocolMessage: &waProto.ProtocolMessage{
+			Type: &revokeType,
+			Key: &waCommon.MessageKey{
+				RemoteJID: proto.String(chatJID),
+				ID:        proto.String(targetID),
+				FromMe:    proto.Bool(false),
+			},
+		},
+	}
+
+	const eventTS = int64(1710000010)
+	handleMessageRevoke(ms, msg, chatJID, eventTS, testLogger())
+
+	var got sql.NullTime
+	_ = ms.db.QueryRow("SELECT deleted_at FROM messages WHERE id = ? AND chat_jid = ?",
+		targetID, chatJID).Scan(&got)
+	if !got.Valid {
+		t.Fatalf("expected target row to have deleted_at set after REVOKE")
+	}
+	if got.Time.Unix() != eventTS {
+		t.Fatalf("expected deleted_at=%d, got %d", eventTS, got.Time.Unix())
+	}
+}
+
+func TestHandleMessageRevoke_IgnoresEphemeralSetting(t *testing.T) {
+	ms := newTestMessageStore(t)
+	chatJID := "15551234567@s.whatsapp.net"
+	targetID := "3A1234567890ABCDEF"
+
+	if _, err := ms.db.Exec(
+		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		targetID, chatJID, "x", "x", time.Unix(1710000000, 0), false,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	setting := waProto.ProtocolMessage_EPHEMERAL_SETTING
+	msg := &waProto.Message{
+		ProtocolMessage: &waProto.ProtocolMessage{
+			Type: &setting,
+			Key:  &waCommon.MessageKey{ID: proto.String(targetID), RemoteJID: proto.String(chatJID)},
+		},
+	}
+
+	handleMessageRevoke(ms, msg, chatJID, 1710000010, testLogger())
+
+	var got sql.NullTime
+	_ = ms.db.QueryRow("SELECT deleted_at FROM messages WHERE id = ? AND chat_jid = ?",
+		targetID, chatJID).Scan(&got)
+	if got.Valid {
+		t.Fatalf("EPHEMERAL_SETTING must not trigger revoke handling; deleted_at=%v", got.Time)
+	}
+}

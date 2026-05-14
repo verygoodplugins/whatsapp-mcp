@@ -946,6 +946,31 @@ func updateChatEphemeralSettingsFromProtocolMessage(messageStore *MessageStore, 
 	}
 }
 
+// handleMessageRevoke records a "delete for everyone" event by stamping
+// deleted_at on the target message row. The original content is kept on
+// purpose so the local archive can still surface what was retracted.
+//
+// chatJID is the already-LID-normalised chat from the carrier event;
+// using it (rather than Key.RemoteJID, which may carry the raw @lid
+// form) keeps the UPDATE aligned with how StoreMessage wrote the row.
+func handleMessageRevoke(messageStore *MessageStore, msg *waProto.Message, chatJID string, eventTimestamp int64, logger waLog.Logger) {
+	if msg == nil || msg.GetProtocolMessage() == nil {
+		return
+	}
+	protoMsg := msg.GetProtocolMessage()
+	if protoMsg.GetType() != waProto.ProtocolMessage_REVOKE {
+		return
+	}
+	targetID := protoMsg.GetKey().GetID()
+	if targetID == "" {
+		return
+	}
+	deletedAt := time.Unix(eventTimestamp, 0)
+	if err := messageStore.MarkMessageDeleted(targetID, chatJID, deletedAt); err != nil {
+		logger.Warnf("Failed to mark message %s in %s as deleted: %v", targetID, chatJID, err)
+	}
+}
+
 // resolveRecipientJID parses a phone number or JID string and resolves PN -> LID
 // for personal chats before sending.
 func resolveRecipientJID(client *whatsmeow.Client, recipient string) (types.JID, error) {
