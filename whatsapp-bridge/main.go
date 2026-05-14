@@ -921,40 +921,23 @@ func updateChatEphemeralSettingsFromProtocolMessage(messageStore *MessageStore, 
 	}
 }
 
-// Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string) (bool, string) {
-	if !client.IsConnected() {
-		return false, "Not connected to WhatsApp"
-	}
-
-	// Create JID for recipient
+// resolveRecipientJID parses a phone number or JID string and resolves PN -> LID
+// for personal chats before sending.
+func resolveRecipientJID(client *whatsmeow.Client, recipient string) (types.JID, error) {
 	var recipientJID types.JID
-	var settingsLookupJID types.JID
 	var err error
 
-	// Check if recipient is a JID
-	isJID := strings.Contains(recipient, "@")
-
-	if isJID {
-		// Parse the JID string
+	if strings.Contains(recipient, "@") {
 		recipientJID, err = types.ParseJID(recipient)
 		if err != nil {
-			return false, fmt.Sprintf("Error parsing JID: %v", err)
+			return types.JID{}, fmt.Errorf("Error parsing JID: %v", err)
 		}
 	} else {
-		// Create JID from phone number
 		recipientJID = types.JID{
 			User:   recipient,
 			Server: "s.whatsapp.net", // For personal chats
 		}
 	}
-	settingsLookupJID = recipientJID
-
-	// Capture pre-LID-resolution JID for SQLite storage.
-	// handleMessage uses resolveLIDChat to map LID→phone for incoming events;
-	// for outbound we keep the pre-resolution form so the chat stays unified
-	// under @s.whatsapp.net (matches what list_chats / list_messages expect).
-	storageJID := recipientJID
 
 	// For personal chats, resolve phone number JID to LID (Linked Identity).
 	// WhatsApp is migrating to LID-based addressing; messages sent to the
@@ -978,6 +961,41 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 				recipientJID = userInfo.LID
 			}
 		}
+	}
+
+	return recipientJID, nil
+}
+
+// Function to send a WhatsApp message
+func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "Not connected to WhatsApp"
+	}
+
+	var settingsLookupJID types.JID
+	var err error
+
+	if strings.Contains(recipient, "@") {
+		settingsLookupJID, err = types.ParseJID(recipient)
+		if err != nil {
+			return false, fmt.Sprintf("Error parsing JID: %v", err)
+		}
+	} else {
+		settingsLookupJID = types.JID{
+			User:   recipient,
+			Server: "s.whatsapp.net", // For personal chats
+		}
+	}
+
+	// Capture pre-LID-resolution JID for SQLite storage.
+	// handleMessage uses resolveLIDChat to map LID→phone for incoming events;
+	// for outbound we keep the pre-resolution form so the chat stays unified
+	// under @s.whatsapp.net (matches what list_chats / list_messages expect).
+	storageJID := settingsLookupJID
+
+	recipientJID, err := resolveRecipientJID(client, recipient)
+	if err != nil {
+		return false, err.Error()
 	}
 
 	msg := &waProto.Message{}
