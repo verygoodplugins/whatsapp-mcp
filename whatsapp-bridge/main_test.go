@@ -1435,60 +1435,111 @@ func TestCallChatJID_Precedence(t *testing.T) {
 	}
 }
 
-func TestMarkMessageDeleted_SetsDeletedAt(t *testing.T) {
-	ms := newTestMessageStore(t)
-	chatJID := "15551234567@s.whatsapp.net"
-	messageID := "3A1234567890ABCDEF"
-
-	if _, err := ms.db.Exec(
-		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		messageID, chatJID, "15551234567", "secret", time.Unix(1710000000, 0), false,
-	); err != nil {
-		t.Fatalf("seed: %v", err)
+// revokeEvent builds an inbound events.Message carrying a
+// ProtocolMessage_REVOKE that targets the given message ID. Tests use
+// this to drive handleMessage end-to-end rather than reaching into
+// internal helpers.
+func revokeEvent(targetID string, ts time.Time) *events.Message {
+	revokeType := waProto.ProtocolMessage_REVOKE
+	return &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     phonePN,
+				Sender:   phonePN,
+				IsFromMe: false,
+			},
+			ID:        "carrier-" + targetID,
+			Timestamp: ts,
+		},
+		Message: &waProto.Message{
+			ProtocolMessage: &waProto.ProtocolMessage{
+				Type: &revokeType,
+				Key: &waCommon.MessageKey{
+					RemoteJID: proto.String(phonePN.String()),
+					ID:        proto.String(targetID),
+					FromMe:    proto.Bool(false),
+				},
+			},
+		},
 	}
+}
 
-	deletedAt := time.Unix(1710000010, 0)
-	if err := ms.MarkMessageDeleted(messageID, chatJID, deletedAt); err != nil {
-		t.Fatalf("MarkMessageDeleted: %v", err)
-	}
-
+// readDeletedAt returns the deleted_at value for a message row, with
+// ok=false if the row doesn't exist or the column is NULL.
+func readDeletedAt(t *testing.T, ms *MessageStore, chatJID, messageID string) (time.Time, bool) {
+	t.Helper()
 	var got sql.NullTime
 	if err := ms.db.QueryRow(
 		"SELECT deleted_at FROM messages WHERE id = ? AND chat_jid = ?",
 		messageID, chatJID,
 	).Scan(&got); err != nil {
+		if err == sql.ErrNoRows {
+			return time.Time{}, false
+		}
 		t.Fatalf("read deleted_at: %v", err)
 	}
-	if !got.Valid || !got.Time.Equal(deletedAt) {
-		t.Fatalf("expected deleted_at=%v, got %v (valid=%v)", deletedAt, got.Time, got.Valid)
+	return got.Time, got.Valid
+}
+
+func TestHandleMessage_RevokeMarksTargetDeleted(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	chatJID := phonePN.String()
+	targetID := "3A1234567890ABCDEF"
+
+	if _, err := ms.db.Exec(
+		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		targetID, chatJID, phonePN.User, "secret", time.Unix(1710000000, 0), false,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	revokedAt := time.Unix(1710000010, 0)
+	handleMessage(client, ms, revokeEvent(targetID, revokedAt), testLogger())
+
+	got, valid := readDeletedAt(t, ms, chatJID, targetID)
+	if !valid {
+		t.Fatalf("expected REVOKE to mark target row as deleted")
+	}
+	if !got.Equal(revokedAt) {
+		t.Fatalf("expected deleted_at=%v, got %v", revokedAt, got)
 	}
 
 	var content string
 	_ = ms.db.QueryRow("SELECT content FROM messages WHERE id = ? AND chat_jid = ?",
-		messageID, chatJID).Scan(&content)
+		targetID, chatJID).Scan(&content)
 	if content != "secret" {
 		t.Fatalf("content must be preserved on revoke, got %q", content)
 	}
 }
 
-func TestMarkMessageDeleted_NoopForMissingMessage(t *testing.T) {
+func TestHandleMessage_RevokeIsNoopForUnknownTarget(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
 	ms := newTestMessageStore(t)
-	err := ms.MarkMessageDeleted("DOES_NOT_EXIST", "15551234567@s.whatsapp.net",
-		time.Unix(1710000000, 0))
-	if err != nil {
-		t.Fatalf("revoke for missing message should be a silent no-op, got error: %v", err)
+
+	// No seeded row — bridge was offline when the original arrived, or it
+	// was deleted before this code path shipped. The handler must not
+	// error and must not invent a row.
+	handleMessage(client, ms, revokeEvent("NEVER_SEEN", time.Unix(1710000010, 0)), testLogger())
+
+	var rowCount int
+	_ = ms.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&rowCount)
+	if rowCount != 0 {
+		t.Fatalf("expected no rows in messages, got %d", rowCount)
 	}
 }
 
-func TestMarkMessageDeleted_FirstWriteWins(t *testing.T) {
+func TestHandleMessage_DuplicateRevokeKeepsEarliestDeletedAt(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
 	ms := newTestMessageStore(t)
-	chatJID := "15551234567@s.whatsapp.net"
-	messageID := "3A1234567890ABCDEF"
+	chatJID := phonePN.String()
+	targetID := "3A1234567890ABCDEF"
+
 	if _, err := ms.db.Exec(
 		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		messageID, chatJID, "15551234567", "x", time.Unix(1710000000, 0), false,
+		targetID, chatJID, phonePN.User, "x", time.Unix(1710000000, 0), false,
 	); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -1496,87 +1547,45 @@ func TestMarkMessageDeleted_FirstWriteWins(t *testing.T) {
 	earlier := time.Unix(1710000010, 0)
 	later := time.Unix(1710000020, 0)
 
-	if err := ms.MarkMessageDeleted(messageID, chatJID, earlier); err != nil {
-		t.Fatalf("first revoke: %v", err)
-	}
-	if err := ms.MarkMessageDeleted(messageID, chatJID, later); err != nil {
-		t.Fatalf("second revoke: %v", err)
-	}
+	handleMessage(client, ms, revokeEvent(targetID, earlier), testLogger())
+	handleMessage(client, ms, revokeEvent(targetID, later), testLogger())
 
-	var got sql.NullTime
-	_ = ms.db.QueryRow("SELECT deleted_at FROM messages WHERE id = ? AND chat_jid = ?",
-		messageID, chatJID).Scan(&got)
-	if !got.Valid || !got.Time.Equal(earlier) {
-		t.Fatalf("expected earlier deleted_at=%v to win, got %v", earlier, got.Time)
+	got, valid := readDeletedAt(t, ms, chatJID, targetID)
+	if !valid || !got.Equal(earlier) {
+		t.Fatalf("expected earlier deleted_at=%v to be preserved across a duplicate revoke, got %v", earlier, got)
 	}
 }
 
-func TestHandleMessageRevoke_MarksTargetMessage(t *testing.T) {
+func TestHandleMessage_RegularMessageDoesNotMarkDeleted(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
 	ms := newTestMessageStore(t)
-	chatJID := "15551234567@s.whatsapp.net"
-	targetID := "3A1234567890ABCDEF"
+	chatJID := phonePN.String()
+	seededID := "PRE_EXISTING_MESSAGE"
 
 	if _, err := ms.db.Exec(
 		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		targetID, chatJID, "15551234567", "secret", time.Unix(1710000000, 0), false,
+		seededID, chatJID, phonePN.User, "still here", time.Unix(1710000000, 0), false,
 	); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	revokeType := waProto.ProtocolMessage_REVOKE
-	msg := &waProto.Message{
-		ProtocolMessage: &waProto.ProtocolMessage{
-			Type: &revokeType,
-			Key: &waCommon.MessageKey{
-				RemoteJID: proto.String(chatJID),
-				ID:        proto.String(targetID),
-				FromMe:    proto.Bool(false),
-			},
+	// A regular text message arriving in the same chat must not touch
+	// deleted_at on any existing row, and must not mark itself deleted.
+	regular := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: phonePN, Sender: phonePN, IsFromMe: false},
+			ID:            "REGULAR_MSG",
+			Timestamp:     time.Unix(1710000010, 0),
 		},
+		Message: &waProto.Message{Conversation: proto.String("just a normal hello")},
 	}
+	handleMessage(client, ms, regular, testLogger())
 
-	const eventTS = int64(1710000010)
-	handleMessageRevoke(ms, msg, chatJID, eventTS, testLogger())
-
-	var got sql.NullTime
-	_ = ms.db.QueryRow("SELECT deleted_at FROM messages WHERE id = ? AND chat_jid = ?",
-		targetID, chatJID).Scan(&got)
-	if !got.Valid {
-		t.Fatalf("expected target row to have deleted_at set after REVOKE")
+	if _, valid := readDeletedAt(t, ms, chatJID, seededID); valid {
+		t.Fatalf("regular message must not flip deleted_at on the pre-existing row")
 	}
-	if got.Time.Unix() != eventTS {
-		t.Fatalf("expected deleted_at=%d, got %d", eventTS, got.Time.Unix())
-	}
-}
-
-func TestHandleMessageRevoke_IgnoresEphemeralSetting(t *testing.T) {
-	ms := newTestMessageStore(t)
-	chatJID := "15551234567@s.whatsapp.net"
-	targetID := "3A1234567890ABCDEF"
-
-	if _, err := ms.db.Exec(
-		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		targetID, chatJID, "x", "x", time.Unix(1710000000, 0), false,
-	); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	setting := waProto.ProtocolMessage_EPHEMERAL_SETTING
-	msg := &waProto.Message{
-		ProtocolMessage: &waProto.ProtocolMessage{
-			Type: &setting,
-			Key:  &waCommon.MessageKey{ID: proto.String(targetID), RemoteJID: proto.String(chatJID)},
-		},
-	}
-
-	handleMessageRevoke(ms, msg, chatJID, 1710000010, testLogger())
-
-	var got sql.NullTime
-	_ = ms.db.QueryRow("SELECT deleted_at FROM messages WHERE id = ? AND chat_jid = ?",
-		targetID, chatJID).Scan(&got)
-	if got.Valid {
-		t.Fatalf("EPHEMERAL_SETTING must not trigger revoke handling; deleted_at=%v", got.Time)
+	if _, valid := readDeletedAt(t, ms, chatJID, "REGULAR_MSG"); valid {
+		t.Fatalf("regular message must not flip its own deleted_at")
 	}
 }
