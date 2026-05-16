@@ -1507,8 +1507,10 @@ func TestHandleMessage_RevokeMarksTargetDeleted(t *testing.T) {
 	}
 
 	var content string
-	_ = ms.db.QueryRow("SELECT content FROM messages WHERE id = ? AND chat_jid = ?",
-		targetID, chatJID).Scan(&content)
+	if err := ms.db.QueryRow("SELECT content FROM messages WHERE id = ? AND chat_jid = ?",
+		targetID, chatJID).Scan(&content); err != nil {
+		t.Fatalf("read content: %v", err)
+	}
 	if content != "secret" {
 		t.Fatalf("content must be preserved on revoke, got %q", content)
 	}
@@ -1524,7 +1526,9 @@ func TestHandleMessage_RevokeIsNoopForUnknownTarget(t *testing.T) {
 	handleMessage(client, ms, revokeEvent("NEVER_SEEN", time.Unix(1710000010, 0)), testLogger())
 
 	var rowCount int
-	_ = ms.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&rowCount)
+	if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&rowCount); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
 	if rowCount != 0 {
 		t.Fatalf("expected no rows in messages, got %d", rowCount)
 	}
@@ -1553,6 +1557,39 @@ func TestHandleMessage_DuplicateRevokeKeepsEarliestDeletedAt(t *testing.T) {
 	got, valid := readDeletedAt(t, ms, chatJID, targetID)
 	if !valid || !got.Equal(earlier) {
 		t.Fatalf("expected earlier deleted_at=%v to be preserved across a duplicate revoke, got %v", earlier, got)
+	}
+}
+
+func TestHandleMessage_ReplayedOriginalPreservesDeletedAt(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	chatJID := phonePN.String()
+	targetID := "3A1234567890ABCDEF"
+
+	if _, err := ms.db.Exec(
+		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		targetID, chatJID, phonePN.User, "secret", time.Unix(1710000000, 0), false,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	revokedAt := time.Unix(1710000010, 0)
+	handleMessage(client, ms, revokeEvent(targetID, revokedAt), testLogger())
+
+	replayedOriginal := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: phonePN, Sender: phonePN, IsFromMe: false},
+			ID:            targetID,
+			Timestamp:     time.Unix(1710000020, 0),
+		},
+		Message: &waProto.Message{Conversation: proto.String("replayed original")},
+	}
+	handleMessage(client, ms, replayedOriginal, testLogger())
+
+	got, valid := readDeletedAt(t, ms, chatJID, targetID)
+	if !valid || !got.Equal(revokedAt) {
+		t.Fatalf("expected replayed original to preserve deleted_at=%v, got %v (valid=%v)", revokedAt, got, valid)
 	}
 }
 

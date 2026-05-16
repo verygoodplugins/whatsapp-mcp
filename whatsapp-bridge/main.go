@@ -621,9 +621,21 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 	}
 
 	_, err := store.db.Exec(
-		`INSERT OR REPLACE INTO messages 
-		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length) 
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO messages
+		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id, chat_jid) DO UPDATE SET
+			sender = excluded.sender,
+			content = excluded.content,
+			timestamp = excluded.timestamp,
+			is_from_me = excluded.is_from_me,
+			media_type = excluded.media_type,
+			filename = excluded.filename,
+			url = excluded.url,
+			media_key = excluded.media_key,
+			file_sha256 = excluded.file_sha256,
+			file_enc_sha256 = excluded.file_enc_sha256,
+			file_length = excluded.file_length`,
 		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
 	)
 	return err
@@ -961,7 +973,11 @@ func handleMessageRevoke(messageStore *MessageStore, msg *waProto.Message, chatJ
 	if protoMsg.GetType() != waProto.ProtocolMessage_REVOKE {
 		return
 	}
-	targetID := protoMsg.GetKey().GetID()
+	key := protoMsg.GetKey()
+	if key == nil {
+		return
+	}
+	targetID := key.GetID()
 	if targetID == "" {
 		return
 	}
