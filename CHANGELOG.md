@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2](https://github.com/verygoodplugins/whatsapp-mcp/compare/v0.2.1...v0.2.2) (2026-05-16)
+
+
+### Bug Fixes
+
+* **bridge:** handle ProtocolMessage_REVOKE (delete-for-everyone) events ([#99](https://github.com/verygoodplugins/whatsapp-mcp/issues/99)) ([7f4ec42](https://github.com/verygoodplugins/whatsapp-mcp/commit/7f4ec42c455d1716e901b6262a9ff7e3af437b6a))
+
 ## [0.2.1](https://github.com/verygoodplugins/whatsapp-mcp/compare/v0.2.0...v0.2.1) (2026-05-14)
 
 
