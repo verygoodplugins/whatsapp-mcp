@@ -649,46 +649,155 @@ def list_chats(
             conn.close()
 
 
+# Cyrillic ↔ Latin transliteration tables (BGN/PCGN-ish, lossy by design).
+# Used to make contact search cross-script: searching "Olga" should match a
+# contact saved in Cyrillic as "Ольга", and vice versa.
+_CYR_TO_LAT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+# Inverse mapping. Multi-letter Latin sequences come first so "zh" → "ж" is
+# tried before falling back to "z" → "з" + "h" leftover.
+_LAT_TO_CYR_MULTI = [
+    ("shch", "щ"), ("yu", "ю"), ("ya", "я"), ("zh", "ж"),
+    ("kh", "х"), ("ts", "ц"), ("ch", "ч"), ("sh", "ш"),
+]
+_LAT_TO_CYR_SINGLE = {
+    "a": "а", "b": "б", "c": "к", "d": "д", "e": "е", "f": "ф", "g": "г",
+    "h": "х", "i": "и", "j": "й", "k": "к", "l": "л", "m": "м", "n": "н",
+    "o": "о", "p": "п", "q": "к", "r": "р", "s": "с", "t": "т", "u": "у",
+    "v": "в", "w": "в", "x": "кс", "y": "ы", "z": "з",
+}
+
+
+def _cyr_to_lat(s: str) -> str:
+    return "".join(_CYR_TO_LAT.get(ch, ch) for ch in s.lower())
+
+
+def _lat_to_cyr(s: str) -> str:
+    s = s.lower()
+    out: list[str] = []
+    i = 0
+    while i < len(s):
+        matched = False
+        for prefix, cyr in _LAT_TO_CYR_MULTI:
+            if s.startswith(prefix, i):
+                out.append(cyr)
+                i += len(prefix)
+                matched = True
+                break
+        if matched:
+            continue
+        out.append(_LAT_TO_CYR_SINGLE.get(s[i], s[i]))
+        i += 1
+    return "".join(out)
+
+
+def _strip_silent(s: str) -> str:
+    """Drop characters that the other script doesn't carry (ь/ъ) and fold ё→е.
+
+    Used as an extra normalization so 'olga' (no soft sign) matches 'Ольга'.
+    """
+    return s.translate(str.maketrans({"ь": "", "ъ": "", "ё": "е"}))
+
+
+def _name_normalizations(name: str | None) -> list[str]:
+    """Return all forms of `name` we want to substring-match against.
+
+    Always lowercased; includes the raw lowercase, plus a transliteration to
+    the *other* script when at least one character maps, plus a soft/hard-sign
+    stripped variant so 'olga' substring-matches a name containing 'Ольга'.
+    """
+    if not name:
+        return []
+    raw = name.lower()
+    forms = {raw, _strip_silent(raw)}
+    has_cyr = any("а" <= ch <= "я" or ch == "ё" for ch in raw)
+    has_lat = any("a" <= ch <= "z" for ch in raw)
+    if has_cyr:
+        translit = _cyr_to_lat(raw)
+        forms.add(translit)
+        forms.add(_strip_silent(translit))
+    if has_lat:
+        translit = _lat_to_cyr(raw)
+        forms.add(translit)
+        forms.add(_strip_silent(translit))
+    return [f for f in forms if f]
+
+
+def _query_variants(query: str) -> set[str]:
+    q_lower = query.lower()
+    variants = {q_lower, _strip_silent(q_lower)}
+    if any("а" <= ch <= "я" or ch == "ё" for ch in q_lower):
+        translit = _cyr_to_lat(q_lower)
+        variants.add(translit)
+        variants.add(_strip_silent(translit))
+    if any("a" <= ch <= "z" for ch in q_lower):
+        translit = _lat_to_cyr(q_lower)
+        variants.add(translit)
+        variants.add(_strip_silent(translit))
+    return {v for v in variants if v}
+
+
+def _matches(query: str, name: str | None, jid: str) -> bool:
+    """Cross-script substring match for contact search."""
+    if not query:
+        return False
+    q_variants = _query_variants(query)
+    if any(v in jid.lower() for v in q_variants):
+        return True
+    for n in _name_normalizations(name):
+        if any(v in n for v in q_variants):
+            return True
+    return False
+
+
 def search_contacts(query: str) -> list[dict[str, Any]]:
     """Search contacts by name or phone number.
 
     Searches both the messages.db chats table and whatsmeow's contact store
     (whatsapp.db) to find contacts. Results are deduplicated by JID.
+
+    Match is cross-script: a Latin query matches Cyrillic-saved names (and
+    vice versa) via a BGN/PCGN-ish transliteration table. Pure ASCII queries
+    against ASCII names still work as before.
     """
     seen_jids: set[str] = set()
     result: list[dict[str, Any]] = []
-    # JIDs are all ASCII so LIKE is safe; names use instr() because SQLite's
-    # LOWER() only folds case for ASCII and would drop Unicode matches.
-    jid_pattern = "%" + query + "%"
 
-    # 1) Search messages.db chats table (existing behavior)
+    # Cross-script matching requires soft-sign-stripping and transliteration
+    # variants that SQL's instr()/LIKE can't express portably. Personal WA
+    # contact stores are small (low thousands at the extreme), so we stream
+    # rows out and filter in Python. We still cap with LIMIT to bound memory
+    # if some account has tens of thousands of contacts.
+    SCAN_CAP = 20000
+
+    # 1) Search messages.db chats table.
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
-            """
-            SELECT DISTINCT jid, name
-            FROM chats
-            WHERE
-                (instr(LOWER(name), LOWER(?)) > 0 OR instr(name, ?) > 0 OR jid LIKE ?)
-                AND jid NOT LIKE '%@g.us'
-            ORDER BY name, jid
-            LIMIT 50
-        """,
-            (query, query, jid_pattern),
+            "SELECT jid, name FROM chats WHERE jid NOT LIKE '%@g.us' LIMIT ?",
+            (SCAN_CAP,),
         )
         for jid, name in cursor.fetchall():
-            if jid not in seen_jids:
-                seen_jids.add(jid)
-                contact = Contact(phone_number=jid.split("@")[0], name=name, jid=jid)
-                result.append(contact_to_dict(contact))
+            if jid in seen_jids:
+                continue
+            if not _matches(query, name, jid):
+                continue
+            seen_jids.add(jid)
+            contact = Contact(phone_number=jid.split("@")[0], name=name, jid=jid)
+            result.append(contact_to_dict(contact))
     except sqlite3.Error as e:
         print(f"Database error (messages.db): {e}")
     finally:
         if "conn" in locals():
             conn.close()
 
-    # 2) Search whatsmeow contact store (whatsapp.db)
+    # 2) Search whatsmeow contact store (whatsapp.db).
     if os.path.exists(WHATSMEOW_DB_PATH):
         try:
             conn2 = sqlite3.connect(WHATSMEOW_DB_PATH)
@@ -697,29 +806,37 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
                 """
                 SELECT their_jid, full_name, push_name, first_name, business_name
                 FROM whatsmeow_contacts
-                WHERE
-                    instr(LOWER(full_name), LOWER(?)) > 0 OR instr(full_name, ?) > 0
-                    OR instr(LOWER(push_name), LOWER(?)) > 0 OR instr(push_name, ?) > 0
-                    OR instr(LOWER(first_name), LOWER(?)) > 0 OR instr(first_name, ?) > 0
-                    OR instr(LOWER(business_name), LOWER(?)) > 0 OR instr(business_name, ?) > 0
-                    OR their_jid LIKE ?
-                LIMIT 50
-            """,
-                (query, query, query, query, query, query, query, query, jid_pattern),
+                LIMIT ?
+                """,
+                (SCAN_CAP,),
             )
             for their_jid, full_name, push_name, first_name, business_name in cursor2.fetchall():
-                if their_jid not in seen_jids:
-                    seen_jids.add(their_jid)
-                    name = full_name or push_name or first_name or business_name or ""
-                    contact = Contact(phone_number=their_jid.split("@")[0], name=name, jid=their_jid)
-                    result.append(contact_to_dict(contact))
+                if their_jid in seen_jids:
+                    continue
+                # Try every name field; pick the first non-empty match as the
+                # display name.
+                display_name = ""
+                for candidate in (full_name, push_name, first_name, business_name):
+                    if candidate and _matches(query, candidate, their_jid):
+                        display_name = candidate
+                        break
+                if not display_name:
+                    # JID-only match (digits in the query).
+                    if not _matches(query, None, their_jid):
+                        continue
+                    display_name = full_name or push_name or first_name or business_name or ""
+                seen_jids.add(their_jid)
+                contact = Contact(phone_number=their_jid.split("@")[0], name=display_name, jid=their_jid)
+                result.append(contact_to_dict(contact))
         except sqlite3.Error as e:
             print(f"Database error (whatsapp.db): {e}")
         finally:
             if "conn2" in locals():
                 conn2.close()
 
-    return result
+    # Stable sort by name (case-insensitive) so callers see consistent ordering.
+    result.sort(key=lambda c: ((c.get("name") or "").lower(), c.get("jid") or ""))
+    return result[:50]
 
 
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str, Any]]:
@@ -960,6 +1077,42 @@ def send_message(recipient: str, message: str) -> tuple[bool, str]:
         response = requests.post(url, json=payload)
 
         # Check if the request was successful
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "Unknown response")
+        else:
+            return False, f"Error: HTTP {response.status_code} - {response.text}"
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
+def delete_message(chat_jid: str, message_id: str, for_everyone: bool = True) -> tuple[bool, str]:
+    """Delete a WhatsApp message via the bridge's /api/delete endpoint.
+
+    for_everyone=True (default) revokes the message for both sides via whatsmeow's
+    BuildRevoke flow — equivalent to the "Delete for everyone" button in the WhatsApp
+    UI; only valid for messages this account originally sent. Recipients see the
+    "This message was deleted" placeholder. for_everyone=False only drops the row
+    from the local sqlite store (the message stays visible on the other side).
+    """
+    try:
+        if not chat_jid or not message_id:
+            return False, "chat_jid and message_id are required"
+
+        url = f"{WHATSAPP_API_BASE_URL}/delete"
+        payload = {
+            "chat_jid": chat_jid,
+            "message_id": message_id,
+            "for_everyone": bool(for_everyone),
+        }
+
+        response = requests.post(url, json=payload)
+
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "Unknown response")

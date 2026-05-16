@@ -43,6 +43,9 @@ from whatsapp import (
 from whatsapp import (
     send_message as whatsapp_send_message,
 )
+from whatsapp import (
+    delete_message as whatsapp_delete_message,
+)
 
 # Initialize FastMCP server
 mcp = FastMCP("whatsapp")
@@ -364,6 +367,34 @@ def download_media(message_id: str, chat_jid: str) -> dict[str, Any]:
         return {"success": True, "message": "Media downloaded successfully", "file_path": file_path}
     else:
         return {"success": False, "message": "Failed to download media"}
+
+
+@mcp.tool()
+def delete_message(chat_jid: str, message_id: str, for_everyone: bool = True) -> dict[str, Any]:
+    """Delete a previously-sent WhatsApp message.
+
+    With for_everyone=True (default), revokes the message for both sides — the recipient
+    sees the "This message was deleted" placeholder. Only works for messages this account
+    originally sent (whatsmeow's BuildRevoke flow). Older messages may be rejected by the
+    WhatsApp server if past its "delete for everyone" window (~2 days for plain chats,
+    longer for some accounts) — in that case the call returns success=False with the
+    server's error string.
+
+    With for_everyone=False, just drops the row from the local sqlite store so list_messages
+    no longer returns it; the message remains visible to the other party.
+
+    Args:
+        chat_jid: The JID of the chat the message lives in (e.g. "123456789@s.whatsapp.net"
+                  or a group "12345@g.us"). Same value returned by list_messages as chat_jid.
+        message_id: WhatsApp message ID — the `id` field on a list_messages result. Note this
+                    is the WA ID (uppercase hex), not a sqlite rowid.
+        for_everyone: True (default) revokes remotely + locally; False only deletes locally.
+
+    Returns:
+        A dictionary with `success` (bool) and `message` (status string).
+    """
+    success, status_message = whatsapp_delete_message(chat_jid, message_id, for_everyone)
+    return {"success": success, "message": status_message}
 
 
 def shutdown_handler(signum, frame):
