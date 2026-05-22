@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,7 +29,15 @@ import (
 // mockLIDStore implements store.LIDStore with a simple in-memory map.
 type mockLIDStore struct {
 	store.NoopStore
+	lidByPN map[types.JID]types.JID
 	pnByLID map[types.JID]types.JID
+}
+
+func (m *mockLIDStore) GetLIDForPN(_ context.Context, pn types.JID) (types.JID, error) {
+	if lid, ok := m.lidByPN[pn]; ok {
+		return lid, nil
+	}
+	return types.EmptyJID, nil
 }
 
 func (m *mockLIDStore) GetPNForLID(_ context.Context, lid types.JID) (types.JID, error) {
@@ -76,7 +86,9 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 		CREATE TABLE chats (
 			jid TEXT PRIMARY KEY,
 			name TEXT,
-			last_message_time TIMESTAMP
+			last_message_time TIMESTAMP,
+			ephemeral_expiration INTEGER NOT NULL DEFAULT 0,
+			ephemeral_setting_timestamp INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE TABLE messages (
 			id TEXT,
@@ -92,6 +104,7 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 			file_sha256 BLOB,
 			file_enc_sha256 BLOB,
 			file_length INTEGER,
+			deleted_at TIMESTAMP,
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
@@ -115,6 +128,288 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return &MessageStore{db: db}
+}
+
+func TestSendHandlerLogsCallerBeforeDecode(t *testing.T) {
+	const token = "supersecrettoken1234567890abcdef"
+
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create stdout pipe: %v", err)
+	}
+	oldStdout := os.Stdout
+	os.Stdout = writePipe
+	t.Cleanup(func() {
+		os.Stdout = oldStdout
+		_ = writePipe.Close()
+		_ = readPipe.Close()
+	})
+
+	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/send", strings.NewReader("{"))
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("User-Agent", "unit-test-fingerprint")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	os.Stdout = oldStdout
+	_ = writePipe.Close()
+	outputBytes, readErr := io.ReadAll(readPipe)
+	_ = readPipe.Close()
+	if readErr != nil {
+		t.Fatalf("failed to read captured stdout: %v", readErr)
+	}
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected malformed body to return 400, got %d", resp.Code)
+	}
+
+	output := string(outputBytes)
+	if !strings.Contains(output, "→ /api/send from=") {
+		t.Fatalf("expected caller fingerprint log, got output %q", output)
+	}
+	if !strings.Contains(output, `user_agent="unit-test-fingerprint"`) {
+		t.Fatalf("expected user agent in caller fingerprint log, got output %q", output)
+	}
+}
+
+func TestStoreChatPreservesEphemeralSettings(t *testing.T) {
+	ms := newTestMessageStore(t)
+
+	chatJID := "15551234567@s.whatsapp.net"
+	if err := ms.UpdateChatEphemeralSettings(chatJID, 604800, 1710000000); err != nil {
+		t.Fatalf("failed to seed ephemeral settings: %v", err)
+	}
+
+	if err := ms.StoreChat(chatJID, "Alice", time.Unix(1710000100, 0)); err != nil {
+		t.Fatalf("failed to store chat: %v", err)
+	}
+
+	settings, err := ms.GetChatEphemeralSettings(chatJID)
+	if err != nil {
+		t.Fatalf("failed to load ephemeral settings: %v", err)
+	}
+	if settings.Expiration != 604800 {
+		t.Fatalf("expected expiration 604800, got %d", settings.Expiration)
+	}
+	if settings.SettingTimestamp != 1710000000 {
+		t.Fatalf("expected setting timestamp 1710000000, got %d", settings.SettingTimestamp)
+	}
+}
+
+func TestResolveRecipientJIDResolvesPhoneToCachedLID(t *testing.T) {
+	phoneJID := types.JID{User: "15551234567", Server: types.DefaultUserServer}
+	lidJID := types.JID{User: "123456789012345", Server: types.HiddenUserServer}
+	client := newTestClient(&mockLIDStore{
+		lidByPN: map[types.JID]types.JID{phoneJID: lidJID},
+	})
+
+	got, err := resolveRecipientJID(client, phoneJID.User)
+	if err != nil {
+		t.Fatalf("resolveRecipientJID returned error: %v", err)
+	}
+
+	if got != lidJID {
+		t.Fatalf("expected cached LID %s, got %s", lidJID, got)
+	}
+}
+
+// TestUpdateChatEphemeralSettings_IgnoresZeroTimestamp pins down the sparse-chunk
+// guard: a write with settingTimestamp == 0 carries no information about when
+// the user toggled the chat's ephemeral state, so it must not clobber a
+// previously-captured non-zero value. WhatsApp's history sync delivers
+// Conversation records in many chunks; sparse later chunks omit the ephemeral
+// fields and would otherwise reset the row to (0, 0).
+func TestUpdateChatEphemeralSettings_IgnoresZeroTimestamp(t *testing.T) {
+	ms := newTestMessageStore(t)
+
+	chatJID := "15551234567@s.whatsapp.net"
+	if err := ms.UpdateChatEphemeralSettings(chatJID, 604800, 1710000000); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := ms.UpdateChatEphemeralSettings(chatJID, 0, 0); err != nil {
+		t.Fatalf("zero-ts write: %v", err)
+	}
+
+	settings, err := ms.GetChatEphemeralSettings(chatJID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if settings.Expiration != 604800 || settings.SettingTimestamp != 1710000000 {
+		t.Fatalf("expected sparse zero-ts write to be ignored; got (%d, %d)",
+			settings.Expiration, settings.SettingTimestamp)
+	}
+}
+
+// TestUpdateChatEphemeralSettings_IgnoresOlderTimestamp pins down the
+// monotonic-update rule: a write whose settingTimestamp is older than the
+// stored one is stale (out-of-order delivery) and must not overwrite. This
+// lets handleMessage safely write ephemeral-from-ContextInfo on every inbound
+// message without worrying about replays / late history-sync chunks.
+func TestUpdateChatEphemeralSettings_IgnoresOlderTimestamp(t *testing.T) {
+	ms := newTestMessageStore(t)
+
+	chatJID := "15551234567@s.whatsapp.net"
+	if err := ms.UpdateChatEphemeralSettings(chatJID, 604800, 1710000000); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// An older event (ts=1700000000) should not overwrite, even though both
+	// expiration and ts are non-zero.
+	if err := ms.UpdateChatEphemeralSettings(chatJID, 86400, 1700000000); err != nil {
+		t.Fatalf("older-ts write: %v", err)
+	}
+
+	settings, err := ms.GetChatEphemeralSettings(chatJID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if settings.Expiration != 604800 || settings.SettingTimestamp != 1710000000 {
+		t.Fatalf("expected older-ts write to be ignored; got (%d, %d)",
+			settings.Expiration, settings.SettingTimestamp)
+	}
+}
+
+// TestExtractChatEphemeralFromMessage covers every concrete sub-message type
+// that carries ContextInfo. Each regular message in an ephemeral chat stamps
+// ContextInfo.Expiration / EphemeralSettingTimestamp; the bridge backfills
+// from this so it doesn't depend on receiving a live EPHEMERAL_SETTING toggle
+// or a fresh history sync.
+func TestExtractChatEphemeralFromMessage(t *testing.T) {
+	ctx := &waProto.ContextInfo{
+		Expiration:                proto.Uint32(604800),
+		EphemeralSettingTimestamp: proto.Int64(1710000000),
+	}
+
+	cases := []struct {
+		name string
+		msg  *waProto.Message
+		want ChatEphemeralSettings
+	}{
+		{
+			name: "ExtendedTextMessage",
+			msg:  &waProto.Message{ExtendedTextMessage: &waProto.ExtendedTextMessage{ContextInfo: ctx}},
+			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
+		},
+		{
+			name: "ImageMessage",
+			msg:  &waProto.Message{ImageMessage: &waProto.ImageMessage{ContextInfo: ctx}},
+			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
+		},
+		{
+			name: "VideoMessage",
+			msg:  &waProto.Message{VideoMessage: &waProto.VideoMessage{ContextInfo: ctx}},
+			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
+		},
+		{
+			name: "AudioMessage",
+			msg:  &waProto.Message{AudioMessage: &waProto.AudioMessage{ContextInfo: ctx}},
+			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
+		},
+		{
+			name: "DocumentMessage",
+			msg:  &waProto.Message{DocumentMessage: &waProto.DocumentMessage{ContextInfo: ctx}},
+			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
+		},
+		{
+			name: "StickerMessage",
+			msg:  &waProto.Message{StickerMessage: &waProto.StickerMessage{ContextInfo: ctx}},
+			want: ChatEphemeralSettings{Expiration: 604800, SettingTimestamp: 1710000000},
+		},
+		{
+			name: "Conversation (no ContextInfo at all)",
+			msg:  &waProto.Message{Conversation: proto.String("plain text")},
+			want: ChatEphemeralSettings{},
+		},
+		{
+			name: "Nil",
+			msg:  nil,
+			want: ChatEphemeralSettings{},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractChatEphemeralFromMessage(tc.msg)
+			if got != tc.want {
+				t.Errorf("extractChatEphemeralFromMessage() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandleMessage_BackfillsEphemeralFromContextInfo asserts the end-to-end
+// backfill: an inbound regular message whose ContextInfo carries a
+// non-zero EphemeralSettingTimestamp must update the chat's ephemeral
+// settings row, so subsequent outgoing messages from the bridge respect the
+// chat's disappearing-message timer.
+func TestHandleMessage_BackfillsEphemeralFromContextInfo(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	msg := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     phonePN,
+				Sender:   phonePN,
+				IsFromMe: false,
+			},
+			ID:        "ephemeral-backfill-001",
+			Timestamp: time.Now(),
+		},
+		Message: &waProto.Message{
+			ExtendedTextMessage: &waProto.ExtendedTextMessage{
+				Text: proto.String("hi from a disappearing chat"),
+				ContextInfo: &waProto.ContextInfo{
+					Expiration:                proto.Uint32(604800),
+					EphemeralSettingTimestamp: proto.Int64(1710000000),
+				},
+			},
+		},
+	}
+
+	handleMessage(client, ms, msg, logger)
+
+	settings, err := ms.GetChatEphemeralSettings(phonePN.String())
+	if err != nil {
+		t.Fatalf("get ephemeral settings: %v", err)
+	}
+	if settings.Expiration != 604800 || settings.SettingTimestamp != 1710000000 {
+		t.Fatalf("expected handleMessage to backfill (604800, 1710000000); got (%d, %d)",
+			settings.Expiration, settings.SettingTimestamp)
+	}
+}
+
+func TestApplyChatEphemeralSettingsConvertsConversation(t *testing.T) {
+	msg := &waProto.Message{
+		Conversation: proto.String("hello"),
+	}
+
+	applyChatEphemeralSettings(msg, ChatEphemeralSettings{
+		Expiration:       604800,
+		SettingTimestamp: 1710000000,
+	})
+
+	if msg.Conversation != nil {
+		t.Fatalf("expected conversation to be converted to extended text")
+	}
+	if msg.GetExtendedTextMessage() == nil {
+		t.Fatalf("expected extended text message to be set")
+	}
+	if got := msg.GetExtendedTextMessage().GetText(); got != "hello" {
+		t.Fatalf("expected text hello, got %q", got)
+	}
+	if got := msg.GetExtendedTextMessage().GetContextInfo().GetExpiration(); got != 604800 {
+		t.Fatalf("expected expiration 604800, got %d", got)
+	}
+	if got := msg.GetExtendedTextMessage().GetContextInfo().GetEphemeralSettingTimestamp(); got != 1710000000 {
+		t.Fatalf("expected setting timestamp 1710000000, got %d", got)
+	}
+	if got := msg.GetExtendedTextMessage().GetContextInfo().GetDisappearingMode().GetTrigger(); got != waProto.DisappearingMode_CHAT_SETTING {
+		t.Fatalf("expected disappearing mode trigger CHAT_SETTING, got %v", got)
+	}
 }
 
 func testLogger() waLog.Logger {
@@ -1137,5 +1432,197 @@ func TestCallChatJID_Precedence(t *testing.T) {
 				t.Errorf("callChatJID() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// revokeEvent builds an inbound events.Message carrying a
+// ProtocolMessage_REVOKE that targets the given message ID. Tests use
+// this to drive handleMessage end-to-end rather than reaching into
+// internal helpers.
+func revokeEvent(targetID string, ts time.Time) *events.Message {
+	revokeType := waProto.ProtocolMessage_REVOKE
+	return &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     phonePN,
+				Sender:   phonePN,
+				IsFromMe: false,
+			},
+			ID:        "carrier-" + targetID,
+			Timestamp: ts,
+		},
+		Message: &waProto.Message{
+			ProtocolMessage: &waProto.ProtocolMessage{
+				Type: &revokeType,
+				Key: &waCommon.MessageKey{
+					RemoteJID: proto.String(phonePN.String()),
+					ID:        proto.String(targetID),
+					FromMe:    proto.Bool(false),
+				},
+			},
+		},
+	}
+}
+
+// readDeletedAt returns the deleted_at value for a message row, with
+// ok=false if the row doesn't exist or the column is NULL.
+func readDeletedAt(t *testing.T, ms *MessageStore, chatJID, messageID string) (time.Time, bool) {
+	t.Helper()
+	var got sql.NullTime
+	if err := ms.db.QueryRow(
+		"SELECT deleted_at FROM messages WHERE id = ? AND chat_jid = ?",
+		messageID, chatJID,
+	).Scan(&got); err != nil {
+		if err == sql.ErrNoRows {
+			return time.Time{}, false
+		}
+		t.Fatalf("read deleted_at: %v", err)
+	}
+	return got.Time, got.Valid
+}
+
+func TestHandleMessage_RevokeMarksTargetDeleted(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	chatJID := phonePN.String()
+	targetID := "3A1234567890ABCDEF"
+
+	if _, err := ms.db.Exec(
+		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		targetID, chatJID, phonePN.User, "secret", time.Unix(1710000000, 0), false,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	revokedAt := time.Unix(1710000010, 0)
+	handleMessage(client, ms, revokeEvent(targetID, revokedAt), testLogger())
+
+	got, valid := readDeletedAt(t, ms, chatJID, targetID)
+	if !valid {
+		t.Fatalf("expected REVOKE to mark target row as deleted")
+	}
+	if !got.Equal(revokedAt) {
+		t.Fatalf("expected deleted_at=%v, got %v", revokedAt, got)
+	}
+
+	var content string
+	if err := ms.db.QueryRow("SELECT content FROM messages WHERE id = ? AND chat_jid = ?",
+		targetID, chatJID).Scan(&content); err != nil {
+		t.Fatalf("read content: %v", err)
+	}
+	if content != "secret" {
+		t.Fatalf("content must be preserved on revoke, got %q", content)
+	}
+}
+
+func TestHandleMessage_RevokeIsNoopForUnknownTarget(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+
+	// No seeded row — bridge was offline when the original arrived, or it
+	// was deleted before this code path shipped. The handler must not
+	// error and must not invent a row.
+	handleMessage(client, ms, revokeEvent("NEVER_SEEN", time.Unix(1710000010, 0)), testLogger())
+
+	var rowCount int
+	if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&rowCount); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if rowCount != 0 {
+		t.Fatalf("expected no rows in messages, got %d", rowCount)
+	}
+}
+
+func TestHandleMessage_DuplicateRevokeKeepsEarliestDeletedAt(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	chatJID := phonePN.String()
+	targetID := "3A1234567890ABCDEF"
+
+	if _, err := ms.db.Exec(
+		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		targetID, chatJID, phonePN.User, "x", time.Unix(1710000000, 0), false,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	earlier := time.Unix(1710000010, 0)
+	later := time.Unix(1710000020, 0)
+
+	handleMessage(client, ms, revokeEvent(targetID, earlier), testLogger())
+	handleMessage(client, ms, revokeEvent(targetID, later), testLogger())
+
+	got, valid := readDeletedAt(t, ms, chatJID, targetID)
+	if !valid || !got.Equal(earlier) {
+		t.Fatalf("expected earlier deleted_at=%v to be preserved across a duplicate revoke, got %v", earlier, got)
+	}
+}
+
+func TestHandleMessage_ReplayedOriginalPreservesDeletedAt(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	chatJID := phonePN.String()
+	targetID := "3A1234567890ABCDEF"
+
+	if _, err := ms.db.Exec(
+		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		targetID, chatJID, phonePN.User, "secret", time.Unix(1710000000, 0), false,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	revokedAt := time.Unix(1710000010, 0)
+	handleMessage(client, ms, revokeEvent(targetID, revokedAt), testLogger())
+
+	replayedOriginal := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: phonePN, Sender: phonePN, IsFromMe: false},
+			ID:            targetID,
+			Timestamp:     time.Unix(1710000020, 0),
+		},
+		Message: &waProto.Message{Conversation: proto.String("replayed original")},
+	}
+	handleMessage(client, ms, replayedOriginal, testLogger())
+
+	got, valid := readDeletedAt(t, ms, chatJID, targetID)
+	if !valid || !got.Equal(revokedAt) {
+		t.Fatalf("expected replayed original to preserve deleted_at=%v, got %v (valid=%v)", revokedAt, got, valid)
+	}
+}
+
+func TestHandleMessage_RegularMessageDoesNotMarkDeleted(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	chatJID := phonePN.String()
+	seededID := "PRE_EXISTING_MESSAGE"
+
+	if _, err := ms.db.Exec(
+		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		seededID, chatJID, phonePN.User, "still here", time.Unix(1710000000, 0), false,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// A regular text message arriving in the same chat must not touch
+	// deleted_at on any existing row, and must not mark itself deleted.
+	regular := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: phonePN, Sender: phonePN, IsFromMe: false},
+			ID:            "REGULAR_MSG",
+			Timestamp:     time.Unix(1710000010, 0),
+		},
+		Message: &waProto.Message{Conversation: proto.String("just a normal hello")},
+	}
+	handleMessage(client, ms, regular, testLogger())
+
+	if _, valid := readDeletedAt(t, ms, chatJID, seededID); valid {
+		t.Fatalf("regular message must not flip deleted_at on the pre-existing row")
+	}
+	if _, valid := readDeletedAt(t, ms, chatJID, "REGULAR_MSG"); valid {
+		t.Fatalf("regular message must not flip its own deleted_at")
 	}
 }

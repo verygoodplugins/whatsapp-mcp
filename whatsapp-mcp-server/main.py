@@ -72,7 +72,7 @@ def get_contact(
     Args:
         identifier: Phone number, LID, or full JID. Examples:
                     - "12025551234" (phone number)
-                    - "184125298348272" (LID - long numeric)
+                    - "35047067385985" (LID - numeric)
                     - "12025551234@s.whatsapp.net" (phone JID)
                     - "184125298348272@lid" (LID JID)
         phone_number: Backward-compatible alias for `identifier`.
@@ -93,6 +93,7 @@ def get_contact(
         raise ValueError("identifier must be non-empty")
 
     # Detect identifier type and normalize to JID.
+    bare_numeric_digits: str | None = None
     if "@" in identifier:
         # Already a JID - use as-is
         jid = identifier
@@ -100,15 +101,11 @@ def get_contact(
     else:
         digits = "".join(c for c in identifier if c.isdigit())
         if digits:
-            # WhatsApp phone numbers are max 15 digits (E.164). Longer numeric IDs are typically LIDs.
-            # For 15-digit numbers, ambiguity exists (could be phone or LID), so we try phone first and
-            # fall back to LID if nothing is found.
-            if len(digits) > 15:
-                jid = f"{digits}@lid"
-                is_lid = True
-            else:
-                jid = f"{digits}@s.whatsapp.net"
-                is_lid = False
+            # LIDs can overlap phone-number lengths, so bare numeric inputs try phone first.
+            jid = f"{digits}@s.whatsapp.net"
+            is_lid = False
+            if identifier.isdigit():
+                bare_numeric_digits = digits
         else:
             # Non-numeric and not a JID; try as-is.
             jid = identifier
@@ -121,10 +118,8 @@ def get_contact(
 
     # Prefer chats table lookup via get_chat (works for both phone and LID contacts).
     candidates: list[tuple[str, bool]] = [(jid, is_lid)]
-    if "@" not in identifier and identifier.isdigit() and len(identifier) == 15:
-        # 15-digit numeric identifier is ambiguous (could be phone or LID).
-        # Try LID JID as a fallback if phone JID isn't found.
-        candidates.append((f"{identifier}@lid", True))
+    if bare_numeric_digits:
+        candidates.append((f"{bare_numeric_digits}@lid", True))
 
     chat = None
     for candidate_jid, candidate_is_lid in candidates:

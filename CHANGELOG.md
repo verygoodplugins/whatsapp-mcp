@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1](https://github.com/verygoodplugins/whatsapp-mcp/compare/v0.2.0...v0.2.1) (2026-05-14)
+
+
+### Bug Fixes
+
+* **bridge:** log send caller identity ([#96](https://github.com/verygoodplugins/whatsapp-mcp/issues/96)) ([c81947c](https://github.com/verygoodplugins/whatsapp-mcp/commit/c81947cbd4235e827637961b7ec53b47725d5a65))
+* **bridge:** pass message store when sending messages ([#91](https://github.com/verygoodplugins/whatsapp-mcp/issues/91)) ([423ada9](https://github.com/verygoodplugins/whatsapp-mcp/commit/423ada9cd3432fcde79bb388d527a62cd5e8f696))
+* **bridge:** set FileName and detect MIME for document sends ([#95](https://github.com/verygoodplugins/whatsapp-mcp/issues/95)) ([af18908](https://github.com/verygoodplugins/whatsapp-mcp/commit/af18908225767213bfedf970feb68f9a9bd79182))
+* **ci:** make dependabot auto-approve non-fatal ([#65](https://github.com/verygoodplugins/whatsapp-mcp/issues/65)) ([ea0dfb1](https://github.com/verygoodplugins/whatsapp-mcp/commit/ea0dfb179ac0f68815e5a4b6b96058342590c8bd))
+* send and track disappearing-message settings correctly ([#82](https://github.com/verygoodplugins/whatsapp-mcp/issues/82)) ([b250409](https://github.com/verygoodplugins/whatsapp-mcp/commit/b25040985b0e72d87d091d83d0bb64ff7d78eba8))
+* **server:** list_chats/get_chat error when include_last_message=False ([#79](https://github.com/verygoodplugins/whatsapp-mcp/issues/79)) ([31e03e6](https://github.com/verygoodplugins/whatsapp-mcp/commit/31e03e63ddaa5ed2b0037faa7e70cb736addf617))
+
+
+### Documentation
+
+* add contributors section and updating instructions to README ([#67](https://github.com/verygoodplugins/whatsapp-mcp/issues/67)) ([71b0c03](https://github.com/verygoodplugins/whatsapp-mcp/commit/71b0c03070bb2054f45f202590c84d943cb2e4e6))
+* Update SECURITY.md with enhanced security policy ([#78](https://github.com/verygoodplugins/whatsapp-mcp/issues/78)) ([214780f](https://github.com/verygoodplugins/whatsapp-mcp/commit/214780f3d1cd4c45f04676b37913c1d60b46f445))
+
 ## [0.2.0](https://github.com/verygoodplugins/whatsapp-mcp/compare/v0.1.0...v0.2.0) (2026-04-22)
 
 
