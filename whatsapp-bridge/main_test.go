@@ -1065,6 +1065,61 @@ func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 	}
 }
 
+func TestExtractMediaInfo_Sticker(t *testing.T) {
+	ts := time.Unix(1710000000, 0).UTC()
+	msgID := "TEST_STICKER_ID"
+
+	url := "https://mmg.whatsapp.net/v/t62.7161-24/sticker.enc"
+	mediaKey := []byte{0x01, 0x02, 0x03}
+	sha := []byte{0xaa, 0xbb}
+	encSha := []byte{0xcc, 0xdd}
+	var length uint64 = 660
+
+	msg := &waProto.Message{
+		StickerMessage: &waProto.StickerMessage{
+			URL:           proto.String(url),
+			MediaKey:      mediaKey,
+			FileSHA256:    sha,
+			FileEncSHA256: encSha,
+			FileLength:    proto.Uint64(length),
+		},
+	}
+
+	gotType, gotFile, gotURL, gotKey, gotSHA, gotEncSHA, gotLen := extractMediaInfo(msg, ts, msgID)
+
+	if gotType != "sticker" {
+		t.Errorf("mediaType = %q, want %q", gotType, "sticker")
+	}
+	wantFile := "sticker_" + ts.Format("20060102_150405") + "_" + msgID + ".webp"
+	if gotFile != wantFile {
+		t.Errorf("filename = %q, want %q", gotFile, wantFile)
+	}
+	if gotURL != url {
+		t.Errorf("url = %q, want %q", gotURL, url)
+	}
+	if string(gotKey) != string(mediaKey) {
+		t.Errorf("mediaKey = %x, want %x", gotKey, mediaKey)
+	}
+	if string(gotSHA) != string(sha) {
+		t.Errorf("fileSHA256 = %x, want %x", gotSHA, sha)
+	}
+	if string(gotEncSHA) != string(encSha) {
+		t.Errorf("fileEncSHA256 = %x, want %x", gotEncSHA, encSha)
+	}
+	if gotLen != length {
+		t.Errorf("fileLength = %d, want %d", gotLen, length)
+	}
+}
+
+func TestExtractMediaInfo_NoMediaReturnsEmpty(t *testing.T) {
+	msg := &waProto.Message{Conversation: proto.String("plain text, not media")}
+	gotType, gotFile, gotURL, gotKey, _, _, gotLen := extractMediaInfo(msg, time.Unix(1710000000, 0), "X")
+	if gotType != "" || gotFile != "" || gotURL != "" || gotKey != nil || gotLen != 0 {
+		t.Errorf("non-media should return empty: type=%q file=%q url=%q keyLen=%d len=%d",
+			gotType, gotFile, gotURL, len(gotKey), gotLen)
+	}
+}
+
 func TestMigrateLegacyLIDChatsToPhoneJIDs_AggregatesByPhoneJIDDeterministically(t *testing.T) {
 	ms := newTestMessageStore(t)
 	logger := testLogger()
