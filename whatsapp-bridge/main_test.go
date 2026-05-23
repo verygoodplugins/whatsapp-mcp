@@ -1593,6 +1593,185 @@ func TestHandleMessage_ReplayedOriginalPreservesDeletedAt(t *testing.T) {
 	}
 }
 
+// --- Reaction tests ---
+
+// queryMessageMediaTypeAndFilename returns the (media_type, filename) for a
+// stored message, or empty strings if not found.
+func queryMessageMediaTypeAndFilename(ms *MessageStore, chatJID, msgID string) (mediaType, filename string, found bool) {
+	err := ms.db.QueryRow(
+		"SELECT COALESCE(media_type,''), COALESCE(filename,'') FROM messages WHERE id = ? AND chat_jid = ?",
+		msgID, chatJID,
+	).Scan(&mediaType, &filename)
+	return mediaType, filename, err == nil
+}
+
+// buildReactionMessage constructs an events.Message carrying a ReactionMessage
+// targeting the given message ID with the given emoji.
+func buildReactionMessage(chat, sender types.JID, isFromMe bool, reactedToID, emoji string) *events.Message {
+	return &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     chat,
+				Sender:   sender,
+				IsFromMe: isFromMe,
+			},
+			ID:        "react-" + reactedToID,
+			Timestamp: time.Now(),
+		},
+		Message: &waProto.Message{
+			ReactionMessage: &waProto.ReactionMessage{
+				Key: &waCommon.MessageKey{
+					RemoteJID: proto.String(chat.String()),
+					ID:        proto.String(reactedToID),
+					FromMe:    proto.Bool(false),
+				},
+				Text: proto.String(emoji),
+			},
+		},
+	}
+}
+
+// TestHandleMessage_InboundReaction_Stored verifies that an inbound reaction is
+// stored as media_type="reaction" with the emoji in content and the
+// reacted-to message ID in the filename column.
+func TestHandleMessage_InboundReaction_Stored(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+	chatJID := phonePN.String()
+	targetID := "3AABCDEF01234567"
+	emoji := "👍"
+
+	msg := buildReactionMessage(phonePN, phonePN, false, targetID, emoji)
+	handleMessage(client, ms, msg, logger)
+
+	mediaType, filename, found := queryMessageMediaTypeAndFilename(ms, chatJID, msg.Info.ID)
+	if !found {
+		t.Fatalf("expected reaction to be stored, but message row not found")
+	}
+	if mediaType != "reaction" {
+		t.Errorf("media_type = %q, want %q", mediaType, "reaction")
+	}
+	if filename != targetID {
+		t.Errorf("filename (reacted-to ID) = %q, want %q", filename, targetID)
+	}
+
+	// Verify the emoji is stored in the content column.
+	var content string
+	if err := ms.db.QueryRow(
+		"SELECT content FROM messages WHERE id = ? AND chat_jid = ?",
+		msg.Info.ID, chatJID,
+	).Scan(&content); err != nil {
+		t.Fatalf("read content: %v", err)
+	}
+	if content != emoji {
+		t.Errorf("content = %q, want emoji %q", content, emoji)
+	}
+}
+
+// TestHandleMessage_EmptyEmojiReaction_Stored verifies that a reaction with an
+// empty emoji (reaction removal) is stored rather than silently dropped.
+// Consumers can detect removal by checking content == "".
+func TestHandleMessage_EmptyEmojiReaction_Stored(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+	chatJID := phonePN.String()
+	targetID := "3AABCDEF01234568"
+
+	msg := buildReactionMessage(phonePN, phonePN, false, targetID, "" /* empty = removal */)
+	handleMessage(client, ms, msg, logger)
+
+	mediaType, filename, found := queryMessageMediaTypeAndFilename(ms, chatJID, msg.Info.ID)
+	if !found {
+		t.Fatalf("empty-emoji reaction (removal) must be stored, but message row not found")
+	}
+	if mediaType != "reaction" {
+		t.Errorf("media_type = %q, want %q", mediaType, "reaction")
+	}
+	if filename != targetID {
+		t.Errorf("filename = %q, want %q", filename, targetID)
+	}
+}
+
+// TestHandleMessage_ReactionWithoutKey_NotStored verifies that a reaction
+// with no key (no reacted-to message ID) is silently ignored and not stored.
+func TestHandleMessage_ReactionWithoutKey_NotStored(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	msg := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     phonePN,
+				Sender:   phonePN,
+				IsFromMe: false,
+			},
+			ID:        "react-no-key",
+			Timestamp: time.Now(),
+		},
+		Message: &waProto.Message{
+			ReactionMessage: &waProto.ReactionMessage{
+				Key:  nil, // no key — no reacted-to ID
+				Text: proto.String("👍"),
+			},
+		},
+	}
+	handleMessage(client, ms, msg, logger)
+
+	if count := queryMessageCount(ms, phonePN.String()); count != 0 {
+		t.Errorf("expected reaction without key to be discarded, got %d stored messages", count)
+	}
+}
+
+// TestReactHandler_MissingFields_Returns400 verifies that the /api/react
+// handler returns 400 when recipient or message_id is absent.
+func TestReactHandler_MissingFields_Returns400(t *testing.T) {
+	const token = "supersecrettoken1234567890abcdef"
+	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty body", "{}"},
+		{"missing message_id", `{"recipient":"15551234567@s.whatsapp.net"}`},
+		{"missing recipient", `{"message_id":"3AABCDEF01234567","emoji":"👍"}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/react", strings.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", "application/json")
+			resp := httptest.NewRecorder()
+			handler.ServeHTTP(resp, req)
+			if resp.Code != http.StatusBadRequest {
+				t.Errorf("body=%q: expected 400, got %d", tc.body, resp.Code)
+			}
+		})
+	}
+}
+
+// TestReactHandler_NoAuth_Returns401 verifies that the /api/react handler
+// rejects requests that do not carry a valid bearer token.
+func TestReactHandler_NoAuth_Returns401(t *testing.T) {
+	const token = "supersecrettoken1234567890abcdef"
+	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/react",
+		strings.NewReader(`{"recipient":"15551234567@s.whatsapp.net","message_id":"3AABCDEF01234567","emoji":"👍"}`))
+	req.Header.Set("Content-Type", "application/json")
+	// Deliberately omit Authorization header.
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without auth, got %d", resp.Code)
+	}
+}
+
 func TestHandleMessage_RegularMessageDoesNotMarkDeleted(t *testing.T) {
 	client := newTestClient(&mockLIDStore{})
 	ms := newTestMessageStore(t)

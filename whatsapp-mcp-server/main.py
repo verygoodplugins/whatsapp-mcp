@@ -43,6 +43,9 @@ from whatsapp import (
 from whatsapp import (
     send_message as whatsapp_send_message,
 )
+from whatsapp import (
+    send_reaction as whatsapp_send_reaction,
+)
 
 # Initialize FastMCP server
 mcp = FastMCP("whatsapp")
@@ -305,6 +308,32 @@ def send_message(recipient: str, message: str) -> dict[str, Any]:
 
     # Call the whatsapp_send_message function with the unified recipient parameter
     success, status_message = whatsapp_send_message(recipient, message)
+    return {"success": success, "message": status_message}
+
+
+@mcp.tool()
+def send_reaction(
+    recipient: str,
+    message_id: str,
+    emoji: str,
+    from_me: bool = False,
+    sender_jid: str = "",
+) -> dict[str, Any]:
+    """Send (or remove) a reaction to a WhatsApp message.
+
+    Args:
+        recipient: The chat JID the message belongs to (e.g., "12025551234@s.whatsapp.net"
+                   or a group JID like "123456789@g.us")
+        message_id: The ID of the message to react to
+        emoji: The reaction emoji (e.g., "👍"). Pass an empty string to remove the reaction.
+        from_me: Whether the original message was sent by the current user (default False)
+        sender_jid: JID of the original message sender — required for group messages when
+                    from_me is False so the bridge can build the correct WhatsApp key
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    success, status_message = whatsapp_send_reaction(recipient, message_id, emoji, from_me, sender_jid)
     return {"success": success, "message": status_message}
 
 

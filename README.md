@@ -185,6 +185,25 @@ Send a text message to a contact or group.
 - "Send 'Hello!' to +1234567890"
 - "Message the team group saying 'Meeting at 3pm'"
 
+#### `send_reaction`
+
+Send (or remove) an emoji reaction to a message.
+
+**Parameters:**
+
+- `recipient` (required): Chat JID the message belongs to (phone JID or group JID)
+- `message_id` (required): ID of the message to react to
+- `emoji` (required): Reaction emoji (e.g. `"👍"`). Pass an empty string `""` to remove an existing reaction.
+- `from_me` (optional, default `false`): Whether the original message was sent by the current user
+- `sender_jid` (optional): Full JID of the original message sender — required for group messages when `from_me` is `false` so the correct WhatsApp key is built
+
+Inbound reactions received from others are stored automatically as messages with `media_type = "reaction"`. The `reaction_to_message_id` field in each reaction message indicates which message was reacted to.
+
+**Natural Language Examples:**
+
+- "React to that message with a thumbs up"
+- "Remove my reaction from the last message in the group chat"
+
 #### `send_file`
 
 Send a media file (image, video, document).
@@ -423,6 +442,7 @@ flowchart LR
         direction TB
         SEND["/api/send"]
         DOWN["/api/download"]
+        REACT["/api/react"]
         TYPE["/api/typing"]
         HEALTH["/api/health"]
     end

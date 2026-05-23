@@ -65,6 +65,41 @@ class TestMessageConversion:
 
         assert result["media_type"] == "image"
 
+    def test_msg_to_dict_reaction_exposes_reaction_to_message_id(self):
+        """Reaction messages expose the reacted-to message ID via reaction_to_message_id."""
+        msg = Message(
+            id="react-001",
+            timestamp=datetime(2024, 1, 15, 10, 30, 0),
+            sender="1234567890@s.whatsapp.net",
+            content="👍",
+            is_from_me=False,
+            chat_jid="1234567890@s.whatsapp.net",
+            media_type="reaction",
+            filename="3AABCDEF01234567",  # reacted-to message ID stored in filename
+        )
+
+        result = msg_to_dict(msg, include_sender_name=False)
+
+        assert result["reaction_to_message_id"] == "3AABCDEF01234567"
+        assert result["media_type"] == "reaction"
+
+    def test_msg_to_dict_non_reaction_has_null_reaction_to_message_id(self):
+        """Non-reaction messages always have reaction_to_message_id as None."""
+        msg = Message(
+            id="msg-img",
+            timestamp=datetime(2024, 1, 15, 10, 30, 0),
+            sender="1234567890@s.whatsapp.net",
+            content="",
+            is_from_me=False,
+            chat_jid="1234567890@s.whatsapp.net",
+            media_type="image",
+            filename="photo.jpg",
+        )
+
+        result = msg_to_dict(msg, include_sender_name=False)
+
+        assert result["reaction_to_message_id"] is None
+
 
 class TestChatConversion:
     """Tests for chat conversion functions."""

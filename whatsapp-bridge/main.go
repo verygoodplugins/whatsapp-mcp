@@ -824,6 +824,15 @@ type SendMessageRequest struct {
 	MediaPath string `json:"media_path,omitempty"`
 }
 
+// ReactRequest is the request body for the /api/react endpoint.
+type ReactRequest struct {
+	Recipient string `json:"recipient"`  // chat JID
+	MessageID string `json:"message_id"` // ID of the message being reacted to
+	FromMe    bool   `json:"from_me"`    // whether the reacted-to message was sent by us
+	SenderJID string `json:"sender_jid"` // full JID of the reacted-to message's sender
+	Emoji     string `json:"emoji"`      // reaction emoji; empty string removes the reaction
+}
+
 // classifyMediaPath maps a file extension to (whatsmeow upload type, MIME
 // type, persist-side category). Single source of truth for the upload path
 // (which needs the whatsmeow.MediaType + MIME) and the SQLite persist path
@@ -1437,6 +1446,29 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}
 	}
 
+	// Reactions arrive as their own message stanza rather than message content.
+	// Persist them in the messages table as media_type="reaction", with the
+	// emoji in `content` and the reacted-to message ID in `filename`, then
+	// return — a reaction is not a normal content message. An empty emoji is a
+	// valid event meaning "reaction removed"; we store it (so consumers see the
+	// removal) rather than dropping it.
+	if reaction := msg.Message.GetReactionMessage(); reaction != nil {
+		reactedToID := ""
+		if key := reaction.GetKey(); key != nil {
+			reactedToID = key.GetID()
+		}
+		if reactedToID != "" {
+			if err := messageStore.StoreMessage(
+				msg.Info.ID, chatJID, sender, reaction.GetText(),
+				msg.Info.Timestamp, msg.Info.IsFromMe,
+				"reaction", reactedToID, "", nil, nil, nil, 0,
+			); err != nil {
+				logger.Warnf("Failed to store reaction: %v", err)
+			}
+		}
+		return
+	}
+
 	// Extract text content
 	content := extractTextContent(msg.Message)
 
@@ -1868,6 +1900,48 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			Success: success,
 			Message: message,
 		})
+	}))
+
+	// Handler for sending (or removing) emoji reactions
+	mux.HandleFunc("/api/react", auth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req ReactRequest
+		// Emoji is intentionally optional: an empty emoji removes a reaction.
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Recipient == "" || req.MessageID == "" {
+			http.Error(w, "recipient and message_id are required", http.StatusBadRequest)
+			return
+		}
+		chatJID, err := types.ParseJID(req.Recipient)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Invalid recipient JID: %v", err), http.StatusBadRequest)
+			return
+		}
+		var senderJID types.JID
+		switch {
+		case req.FromMe:
+			if client.Store.ID == nil {
+				http.Error(w, "Not logged in", http.StatusServiceUnavailable)
+				return
+			}
+			senderJID = *client.Store.ID
+		case req.SenderJID != "":
+			if senderJID, err = types.ParseJID(req.SenderJID); err != nil {
+				senderJID = chatJID // fall back to the chat JID for direct chats
+			}
+		default:
+			senderJID = chatJID
+		}
+		msg := client.BuildReaction(chatJID, senderJID, req.MessageID, req.Emoji)
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := client.SendMessage(context.Background(), chatJID, msg); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	}))
 
 	// Handler for downloading media
