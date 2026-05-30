@@ -53,3 +53,6 @@ build/
 .coverage
 htmlcov/
 /store
+
+# Agent harness scratch dir (task runner artifacts)
+.agent_task/

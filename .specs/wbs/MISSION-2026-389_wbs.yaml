@@ -1,0 +1,391 @@
+work_breakdown:
+  mission_id: MISSION-2026-389
+  spec: .specs/features/SPEC-WAMCP-001_whatsapp_remote_mcp.md
+  research: .specs/knowledge/whatsapp-remote-mcp.md
+  product: hitl-whatsapp-mcp
+  repo: slaser79/hitl-whatsapp-mcp
+  generated_by: architect (claude)
+  generated_at: 2026-05-30
+  total_phases: 5   # spec scopes 4 (P-IMPL-1..4); P-IMPL-2 right-sized into 2A+2B
+  branch_strategy: mission
+  branch_strategy_rationale: >
+    P-IMPL-1, 2A, 2B all mutate the single Python entrypoint
+    whatsapp-mcp-server/main.py and must land in order. A mission branch
+    (e.g. mission/wamcp-remote) lets the entrypoint phases stack cleanly and
+    keeps `main` green; P-IMPL-3 (docs/scripts) and the cross-repo P-IMPL-4
+    branch off it once the env-var contract is implemented.
+
+  # ---------------------------------------------------------------------------
+  # GROUNDING — verified against the current fork (not stale assumptions)
+  # ---------------------------------------------------------------------------
+  codebase_grounding:
+    entrypoint:
+      path: whatsapp-mcp-server/main.py
+      current_state: >
+        stdio-only. `mcp = FastMCP("whatsapp")` at module load (no host/port),
+        13 @mcp.tool() wrappers, `mcp.run(transport="stdio")` in __main__.
+        FastMCP comes from `mcp.server.fastmcp`.
+    bridge_client:
+      path: whatsapp-mcp-server/whatsapp.py
+      current_state: >
+        REST client to the Go bridge at WHATSAPP_API_URL (default
+        http://localhost:8080/api). Has `_bridge_headers()` + `_BRIDGE_TOKEN_PATH`
+        and a separate bearer token WHATSAPP_BRIDGE_TOKEN (bridge-facing, NOT the
+        MCP-client-facing token). send_* helpers return (success, message) tuples;
+        bridge errors currently surface as "HTTP <code>" strings, not typed errors.
+    existing_tests:
+      dir: whatsapp-mcp-server/tests/
+      files: [test_list_chats.py, test_get_contact.py, test_whatsapp.py, test_bridge_auth.py]
+      note: >
+        test_bridge_auth.py covers the BRIDGE token (WHATSAPP_BRIDGE_TOKEN) — a
+        different layer from the MCP client auth this mission adds. Do not conflate.
+    go_bridge:
+      path: whatsapp-bridge/
+      constraint: "NON-GOAL — do NOT modify protocol internals (CLAUDE.md §5 / spec §8)."
+    tooling:
+      test: "cd whatsapp-mcp-server && uv run pytest -v"
+      lint: "cd whatsapp-mcp-server && uv run ruff check ."
+      ruff: "line-length 120; E,F,I,N,W,UP; E501 ignored; double-quote."
+      python: ">=3.11 (uv-managed; uv.lock present)."
+
+  # ---------------------------------------------------------------------------
+  # CRITICAL CROSS-PHASE FINDING (drives risks + AC8 placement)
+  # ---------------------------------------------------------------------------
+  pr112_analysis:
+    source: "gh pr diff 112 --repo verygoodplugins/whatsapp-mcp  (status: OPEN/unmerged)"
+    files_touched_upstream:
+      - whatsapp-mcp-server/main.py        # adds os import, TRANSPORT_ALIASES, resolve_transport(), resolve_port(), host/port on FastMCP(), transport branch in __main__
+      - whatsapp-mcp-server/tests/test_transport.py  # NEW — 2 test classes, resolve_transport/resolve_port
+      - .env.example
+      - README.md
+    recommendation: "CHERRY-PICK (keeps attribution + 8 passing tests), then reconcile to the spec contract."
+    MUST_RECONCILE:
+      - id: PORT_DEFAULT_MISMATCH
+        severity: P1
+        detail: >
+          PR-112 defaults WHATSAPP_MCP_PORT to 8000 (in resolve_port() and FastMCP()).
+          Spec §4.1.1 mandates default 8080. A verbatim cherry-pick SHIPS THE WRONG
+          DEFAULT and breaks AC2/AC8 alignment with the env-var contract. P-IMPL-1
+          MUST change the default to 8080 in code, .env.example, README, AND the
+          test_transport.py assertions PR-112 ships (they assert 8000).
+      - id: NO_AUTH
+        severity: expected
+        detail: "PR-112 ships zero auth and a README note to 'put a proxy in front'. That gap is exactly P-IMPL-2A."
+      - id: ENV_VAR_NAMING
+        detail: "PR-112 env names (WHATSAPP_MCP_TRANSPORT/HOST/PORT) match spec §4.1.1 — keep them. Spec adds WHATSAPP_MCP_AUTH + WHATSAPP_MCP_TOKEN (P-IMPL-2A)."
+
+  # ---------------------------------------------------------------------------
+  # DISPATCH STRATEGY
+  # ---------------------------------------------------------------------------
+  dispatch_strategy:
+    parallel_groups: []   # none within this repo — see rationale
+    sequential_chains:
+      - [P-IMPL-1, P-IMPL-2A, P-IMPL-2B, P-IMPL-3]
+    cross_repo_followups:
+      - P-IMPL-4   # separate repo (slaser79/hitl-app) — file-disjoint, but logically last
+    rationale: >
+      The binding constraint is whatsapp-mcp-server/main.py: it is the SINGLE
+      entrypoint touched by P-IMPL-1 (transport branch), P-IMPL-2A (wire auth +
+      fail-closed guard at startup) and P-IMPL-2B (typed errors in the tool
+      wrappers). Concurrent edits to one ~14KB file guarantee conflict cascades,
+      so the three sequence strictly. P-IMPL-3 (docs/scripts) is file-disjoint
+      from the Python code but logically depends on the implemented env-var
+      contract + generated-token UX, so it follows P-IMPL-2B. P-IMPL-4 lives in
+      hitl-app and is a cross-repo follow-up, not dispatched against this repo.
+    shared_file_matrix:
+      "whatsapp-mcp-server/main.py": [P-IMPL-1, P-IMPL-2A, P-IMPL-2B]   # → strict sequence
+      "whatsapp-mcp-server/whatsapp.py": [P-IMPL-2B]
+      "whatsapp-mcp-server/.env.example": [P-IMPL-1, P-IMPL-2A, P-IMPL-3]  # additive; sequence avoids churn
+      "README.md": [P-IMPL-1, P-IMPL-3]
+      "whatsapp-mcp-server/tests/*": [P-IMPL-1, P-IMPL-2A, P-IMPL-2B, P-IMPL-3]  # NEW disjoint files per phase
+
+  # ---------------------------------------------------------------------------
+  # AC COVERAGE MAP (every AC owned by exactly one phase; AC8/AC9 split noted)
+  # ---------------------------------------------------------------------------
+  ac_coverage:
+    AC1:  bootstrap (this mission's bootstrap phase — already delivered; CONFIRM in P-IMPL-1 preflight)
+    AC2:  P-IMPL-1
+    AC3:  P-IMPL-2A
+    AC4:  P-IMPL-2A   # both arms 4a (non-loopback + auth off) and 4b (weak/empty/<32 token)
+    AC5:  P-IMPL-3    # manual — second tailnet device reachable, public not
+    AC6:  P-IMPL-3    # SETUP.md + timed ≤15-min dry-run recorded
+    AC7:  P-IMPL-3    # manual end-to-end remote tool exercise (needs live WhatsApp) — verification owner
+    AC8:  SPLIT — transport tests P-IMPL-1; auth+guard tests P-IMPL-2A; typed-error tests P-IMPL-2B; EC3 script test P-IMPL-3
+    AC9:  SPLIT — DB-path-local config assertion (unit test) P-IMPL-2B; no-empire-egress check (verification) P-IMPL-3
+    AC10: SPLIT — EC1/EC2/EC5 typed errors P-IMPL-2B; EC3 fail-fast P-IMPL-3; EC4 = the guard, P-IMPL-2A
+
+  # ---------------------------------------------------------------------------
+  # PHASES
+  # ---------------------------------------------------------------------------
+  phases:
+    - id: P-IMPL-1
+      title: "Remote transport: adopt PR-112 env-driven stdio/http/sse (reconciled to 8080)"
+      status: READY
+      depends_on: []
+      maps_to_spec_phase: P-IMPL-1
+      estimated_size: S            # 4 active files
+      recommended_agent: codex
+      parallel_safe: false
+      files_modified:
+        - { path: whatsapp-mcp-server/main.py, action: MODIFY, note: "cherry-pick os import, TRANSPORT_ALIASES, resolve_transport(), resolve_port(), host/port on FastMCP(), __main__ transport branch" }
+        - { path: whatsapp-mcp-server/.env.example, action: MODIFY, note: "add WHATSAPP_MCP_TRANSPORT/HOST/PORT; PORT default 8080 (NOT PR-112's 8000)" }
+        - { path: README.md, action: MODIFY, note: "transport section; correct port to 8080" }
+        - { path: whatsapp-mcp-server/tests/test_transport.py, action: CREATE, note: "from PR-112; fix port assertions 8000→8080" }
+      files_read_only:
+        - whatsapp-mcp-server/whatsapp.py
+      active_file_count: 4
+      right_size_check: "OK (S, 4 files ≤5)."
+      acceptance_criteria:
+        - "AC2: server starts under WHATSAPP_MCP_TRANSPORT=http (streamable-http) and =sse; default/stdio path unchanged (regression-safe)."
+        - "resolve_port() and FastMCP() default to 8080 per spec §4.1.1 — no residual 8000 in code, .env.example, README, or tests (grep clean)."
+        - "Invalid WHATSAPP_MCP_TRANSPORT / non-integer PORT raise SystemExit (non-zero)."
+        - "AC1 preflight: confirm product registered in HQ config/empire.yaml and CI green on main before building (report, do not fix here)."
+      verification_command: "cd whatsapp-mcp-server && uv run pytest tests/test_transport.py -v && uv run ruff check . && grep -rn '8000' main.py .env.example tests/test_transport.py ../README.md; test $? -ne 0"
+      issue_body: |
+        ## Context
+        Spec: [SPEC-WAMCP-001](.specs/features/SPEC-WAMCP-001_whatsapp_remote_mcp.md) §4.1/§4.1.1 · Mission MISSION-2026-389 · Phase P-IMPL-1.
+
+        ## Objective
+        Give the Python MCP server env-driven transport selection (stdio/http/sse) by cherry-picking upstream PR #112, reconciled to this spec's env-var contract.
+
+        ## Source to cherry-pick
+        `gh pr diff 112 --repo verygoodplugins/whatsapp-mcp` touches `main.py`, `tests/test_transport.py`, `.env.example`, `README.md`. Cherry-pick to preserve attribution + its 8 tests, THEN reconcile.
+
+        ## CRITICAL reconciliation (do not skip)
+        PR-112 defaults the port to **8000**. Spec §4.1.1 mandates **8080**. Change the default to 8080 in `resolve_port()`, the `FastMCP(...)` call, `.env.example`, `README.md`, AND the PR-112 test assertions (which assert 8000). A verbatim cherry-pick is a defect.
+
+        ## Acceptance Criteria
+        - [ ] AC2: starts in `http` and `sse`; stdio still works (regression-safe).
+        - [ ] Default port is 8080 everywhere (no residual `8000`).
+        - [ ] Invalid transport / non-integer port exit non-zero.
+        - [ ] Tests + ruff pass.
+
+        ## Technical Notes
+        FastMCP is `mcp.server.fastmcp.FastMCP`. Do NOT add auth here (that is P-IMPL-2A). Do NOT touch `whatsapp.py` or the Go bridge.
+
+        ---
+        *Created by Implementation Architect*
+
+    - id: P-IMPL-2A
+      title: "Auth middleware (bearer/API-key) + fail-closed startup guard"
+      status: READY
+      depends_on: [P-IMPL-1]
+      maps_to_spec_phase: "P-IMPL-2 (right-sized: auth+guard half)"
+      estimated_size: S            # 4 active files
+      recommended_agent: codex
+      parallel_safe: false
+      files_modified:
+        - { path: whatsapp-mcp-server/auth.py, action: CREATE, note: "MCP-client auth: HTTPBearer/APIKeyHeader validating WHATSAPP_MCP_TOKEN; ASGI middleware over FastMCP streamable_http_app()/sse_app(); + fail-closed guard fn (host/auth/token validation, min-entropy ≥32 + placeholder blocklist test/changeme)" }
+        - { path: whatsapp-mcp-server/main.py, action: MODIFY, note: "call guard before mcp.run() for non-stdio; wrap app with auth middleware; stdio path bypasses both" }
+        - { path: whatsapp-mcp-server/.env.example, action: MODIFY, note: "add WHATSAPP_MCP_AUTH (default on) + WHATSAPP_MCP_TOKEN (≥32 chars)" }
+        - { path: whatsapp-mcp-server/tests/test_auth.py, action: CREATE, note: "401 without/with bad token; non-401 with valid token; guard AC4a + AC4b both arms; placeholder + <32 rejection" }
+      files_read_only:
+        - whatsapp-mcp-server/whatsapp.py   # mirror its bearer-token pattern (do not edit)
+      active_file_count: 4
+      right_size_check: "OK (S, 4 files ≤5). Auth + guard cohere (both gate startup/requests); kept together deliberately."
+      acceptance_criteria:
+        - "AC3: non-stdio request without a valid bearer token / API key → 401; valid WHATSAPP_MCP_TOKEN → non-401."
+        - "AC4a (EC4): non-loopback host + WHATSAPP_MCP_AUTH=off → process exits non-zero with a message naming the offending var."
+        - "AC4b: WHATSAPP_MCP_AUTH=on with token missing / empty / <32 chars / placeholder (test, changeme) → exits non-zero, var named."
+        - "Loopback + auth=off is permitted (starts). stdio ignores auth/host/port entirely."
+        - "AC8 (auth slice): unit tests cover accept/reject + both guard arms."
+      verification_command: |
+        cd whatsapp-mcp-server && uv run pytest tests/test_auth.py -v && uv run ruff check .
+        # AC4 fail-closed smoke (per spec §6.2):
+        WHATSAPP_MCP_TRANSPORT=http WHATSAPP_MCP_HOST=0.0.0.0 WHATSAPP_MCP_AUTH=off uv run main.py; test $? -ne 0
+        WHATSAPP_MCP_TRANSPORT=http WHATSAPP_MCP_AUTH=on WHATSAPP_MCP_TOKEN=test uv run main.py; test $? -ne 0
+      issue_body: |
+        ## Context
+        Spec: [SPEC-WAMCP-001](.specs/features/SPEC-WAMCP-001_whatsapp_remote_mcp.md) §4.1 / §4.1.1 / §4.3-EC4 · MISSION-2026-389 · P-IMPL-2 (auth+guard half). Depends on P-IMPL-1.
+
+        ## Objective
+        Require a bearer token / API key on every non-stdio MCP request and refuse to start in an unsafe config (fail-closed).
+
+        ## Acceptance Criteria
+        - [ ] AC3: 401 without valid token; accepted with valid token.
+        - [ ] AC4a: non-loopback + `WHATSAPP_MCP_AUTH=off` exits non-zero (var named).
+        - [ ] AC4b: `auth=on` + missing/empty/weak(<32)/placeholder token exits non-zero (var named).
+        - [ ] Loopback + auth=off permitted; stdio bypasses auth/guard.
+        - [ ] Tests + ruff pass.
+
+        ## Technical Notes
+        Mirror `hitl-cli`'s FastMCP + bearer pattern and `whatsapp.py`'s bearer style. Use Starlette `HTTPBearer`/`APIKeyHeader` as ASGI middleware over FastMCP's `streamable_http_app()` / `sse_app()`. WHATSAPP_MCP_TOKEN is the CLIENT-facing token — distinct from WHATSAPP_BRIDGE_TOKEN (bridge-facing). Do NOT touch the Go bridge.
+
+        ---
+        *Created by Implementation Architect*
+
+    - id: P-IMPL-2B
+      title: "Typed failure-mode errors (EC1/EC2/EC5) + local-only DB-path assertion"
+      status: READY
+      depends_on: [P-IMPL-2A]
+      maps_to_spec_phase: "P-IMPL-2 (right-sized: typed-errors half)"
+      estimated_size: S            # 4 active files
+      recommended_agent: codex
+      parallel_safe: false
+      files_modified:
+        - { path: whatsapp-mcp-server/whatsapp.py, action: MODIFY, note: "classify bridge REST failures into typed errors: whatsapp_session_expired (EC1), bridge_unavailable via /api/health probe (EC2), chat_not_found (EC5) — replace bare 'HTTP <code>' strings" }
+        - { path: whatsapp-mcp-server/main.py, action: MODIFY, note: "surface typed errors through tool wrappers as structured results (not generic 500/raise)" }
+        - { path: whatsapp-mcp-server/tests/test_failure_modes.py, action: CREATE, note: "EC1/EC2/EC5 each yield the defined typed error; monkeypatch requests like test_bridge_auth.py" }
+        - { path: whatsapp-mcp-server/tests/test_privacy.py, action: CREATE, note: "AC9 config assertion: WHATSAPP_DB_PATH / WHATSMEOW_DB_PATH resolve to a local-only path" }
+      files_read_only:
+        - whatsapp-mcp-server/tests/test_bridge_auth.py   # reuse DummyResponse/monkeypatch idiom
+      active_file_count: 4
+      right_size_check: "OK (S, 4 files ≤5)."
+      acceptance_criteria:
+        - "AC10-EC1: expired WhatsApp session → typed `whatsapp_session_expired` (not generic 500); server stays up."
+        - "AC10-EC2: downed whatsmeow bridge → typed `bridge_unavailable` via local /api/health probe (no hang/500)."
+        - "AC10-EC5: send to unknown/invalid chat → typed `chat_not_found`/validation error; no partial send."
+        - "AC9 (config slice): DB path assertion test proves messages/contacts SQLite resolves local-only on host."
+        - "AC8 (typed-error slice): unit tests cover all three EC paths."
+      verification_command: "cd whatsapp-mcp-server && uv run pytest tests/test_failure_modes.py tests/test_privacy.py -v && uv run ruff check ."
+      issue_body: |
+        ## Context
+        Spec: [SPEC-WAMCP-001](.specs/features/SPEC-WAMCP-001_whatsapp_remote_mcp.md) §4.3 (EC1/EC2/EC5) + AC9 + AC10 · MISSION-2026-389 · P-IMPL-2 (typed-errors half). Depends on P-IMPL-2A.
+
+        ## Objective
+        Make bridge/session failures surface as clear typed errors to the hitl-app agent instead of generic 500s/hangs, and assert the message DB stays local-only.
+
+        ## Acceptance Criteria
+        - [ ] EC1 → `whatsapp_session_expired`; server stays up.
+        - [ ] EC2 → `bridge_unavailable` (via `/api/health` probe).
+        - [ ] EC5 → `chat_not_found`/validation; no partial send.
+        - [ ] AC9: DB-path-local config assertion test.
+        - [ ] Tests + ruff pass.
+
+        ## Technical Notes
+        Bridge REST client is `whatsapp.py`; reuse `_bridge_headers()` and the `DummyResponse`/monkeypatch idiom from `tests/test_bridge_auth.py`. EC3 (Tailscale) is NOT here — it belongs to P-IMPL-3's run script. Do NOT touch the Go bridge.
+
+        ---
+        *Created by Implementation Architect*
+
+    - id: P-IMPL-3
+      title: "tailscale serve run scripts + SETUP.md (≤15-min) + token rotation + EC3 fail-fast"
+      status: READY
+      depends_on: [P-IMPL-2B]
+      maps_to_spec_phase: P-IMPL-3
+      estimated_size: M            # docs/scripts heavy; code-disjoint from phases 1-2
+      recommended_agent: antigravity   # guides/scripts; copilot acceptable
+      parallel_safe: false   # logically depends on the implemented env-var contract + token UX
+      files_modified:
+        - { path: scripts/run-remote.sh, action: CREATE, note: "loopback bind + `tailscale serve`; generate strong WHATSAPP_MCP_TOKEN (openssl rand); EC3: detect tailnet down → fail fast with actionable message" }
+        - { path: SETUP.md, action: CREATE, note: "copy-paste QR login + Tailscale + one run command + hitl-app registration; token rotation/revocation note (P2-5); record timed ≤15-min dry-run" }
+        - { path: README.md, action: MODIFY, note: "link SETUP.md; document tailscale-serve default vs Funnel opt-in" }
+        - { path: whatsapp-mcp-server/.env.example, action: MODIFY, note: "final consolidated remote+auth example block" }
+        - { path: whatsapp-mcp-server/tests/test_run_script.py, action: CREATE, note: "EC3: script exits non-zero with the actionable message when tailscale is absent (mock CLI on PATH)" }
+      files_read_only:
+        - whatsapp-mcp-server/auth.py
+        - whatsapp-mcp-server/main.py
+      active_file_count: 5
+      right_size_check: "AT LIMIT (M, 5 active files = ceiling). If the EC3 test or compose variant grows, split docs (SETUP.md/README) from scripts into a follow-up."
+      acceptance_criteria:
+        - "AC5 (manual): with the tailscale-serve default (loopback + Tailscale proxy), endpoint reachable from a second tailnet device and NOT from public internet — recorded."
+        - "AC6: SETUP.md is copy-paste/verified; a timed dry-run completes ≤15 min, recorded in verification notes."
+        - "AC10-EC3: run script detects tailnet down (no `tailscale serve`/interface) and fails fast with an actionable message — no silent loopback/public fallback."
+        - "AC9 (egress slice): documented egress check shows no outbound connections to empire domains during a tool exercise."
+        - "AC7 (manual): core tools (list/search/read/send/get_contact) work end-to-end over the remote transport with auth — recorded."
+        - "Token rotation/revocation note present (P2-5)."
+      verification_command: "cd whatsapp-mcp-server && uv run pytest tests/test_run_script.py -v && uv run ruff check . ; bash -n ../scripts/run-remote.sh"
+      issue_body: |
+        ## Context
+        Spec: [SPEC-WAMCP-001](.specs/features/SPEC-WAMCP-001_whatsapp_remote_mcp.md) §4.1 (network posture) + AC5/AC6/AC7/AC9/AC10-EC3 · MISSION-2026-389 · P-IMPL-3. Depends on P-IMPL-2B.
+
+        ## Objective
+        Ship the `tailscale serve` run script and a ≤15-minute copy-paste SETUP guide so a non-developer can self-host securely.
+
+        ## Acceptance Criteria
+        - [ ] AC5: reachable from a 2nd tailnet device, not from public internet (recorded).
+        - [ ] AC6: timed ≤15-min dry-run recorded.
+        - [ ] AC10-EC3: tailnet-down → fail fast, actionable message.
+        - [ ] AC7: core tools work end-to-end over remote+auth (recorded).
+        - [ ] AC9 egress check documented; token rotation note included.
+
+        ## Technical Notes
+        Default posture = `tailscale serve` (server binds loopback, Tailscale proxies TLS). Funnel is opt-in only. Generate the token with `openssl rand -hex 24` (≥32 chars) so users never pick a weak one — must satisfy the P-IMPL-2A guard. Do NOT touch the Go bridge.
+
+        ---
+        *Created by Implementation Architect*
+
+    - id: P-IMPL-4
+      title: "hitl-app client integration — register remote MCP server (CROSS-REPO)"
+      status: BLOCKED_CROSS_REPO
+      depends_on: [P-IMPL-3]
+      maps_to_spec_phase: P-IMPL-4
+      target_repo: slaser79/hitl-app   # NOT this repo
+      estimated_size: "UNSIZED (cross-repo — re-plan in hitl-app)"
+      recommended_agent: "architect (re-plan in hitl-app), then codex"
+      parallel_safe: true   # different repo; file-disjoint from this satellite
+      files_modified: []    # none in THIS repo — see registration_surface
+      registration_surface:
+        scope: >
+          Per spec §4.2.6 + §7, this is tracked as a cross-repo FOLLOW-UP against
+          hitl-app, NOT planned here (architect anti-pattern: don't plan another
+          repo's internals from this one). Deliverable of THIS WBS item is only to
+          NAME the surface and hand off.
+        identify_in_hitl_app:
+          - "The remote-MCP / cloud-agent registration UX (URL + bearer token entry) — research notes it as the openclaw/cloud-agent tiles."
+          - "Local secure storage of the token (mirror openclaw: client-side only, no server-side storage)."
+          - "Connection config matching this server's contract: base URL of the tailnet endpoint + WHATSAPP_MCP_TOKEN bearer."
+        handoff_action: "Open a tracking issue in slaser79/hitl-app referencing SPEC-WAMCP-001 §4.2.6; dispatch architect to re-baseline against hitl-app's current registration code."
+      acceptance_criteria:
+        - "BO1/BO2 (manual, cross-repo): from hitl-app, a connected agent lists/searches/reads and sends WhatsApp via the registered remote server."
+        - "Token stored client-side only (no empire-server storage) — consistent with AC9/BO5."
+      verification_command: "N/A in this repo — verified in hitl-app after re-plan."
+      issue_body: |
+        ## Context
+        Cross-repo follow-up for [SPEC-WAMCP-001](.specs/features/SPEC-WAMCP-001_whatsapp_remote_mcp.md) §4.2.6 / §7. Target repo: **slaser79/hitl-app** (NOT this satellite). MISSION-2026-389 · P-IMPL-4.
+
+        ## Objective
+        Register this remote WhatsApp MCP server (tailnet URL + bearer token) in the hitl-app so a mobile agent can act on WhatsApp — the wacli-equivalent connection.
+
+        ## Why this is a separate issue
+        Architect doctrine: do not plan another repo's internals from the satellite. This card only identifies the registration surface and hands off; an architect re-plans against hitl-app's current code.
+
+        ## Registration surface to identify in hitl-app
+        - Remote-MCP / cloud-agent registration UX (URL + token) — the openclaw/cloud-agent tiles.
+        - Client-side-only token storage (mirror openclaw; no server-side storage — AC9/BO5).
+
+        ## Acceptance Criteria
+        - [ ] BO1/BO2 verified from hitl-app over the remote server.
+        - [ ] Token stored client-side only.
+
+        ---
+        *Created by Implementation Architect*
+
+  # ---------------------------------------------------------------------------
+  dependency_graph: |
+    P-IMPL-1 (transport, AC2)
+        └─▶ P-IMPL-2A (auth + fail-closed guard, AC3/AC4/EC4)
+                └─▶ P-IMPL-2B (typed errors EC1/EC2/EC5 + AC9 DB-path, AC10)
+                        └─▶ P-IMPL-3 (tailscale run script + SETUP.md, AC5/AC6/AC7/EC3/AC9-egress)
+                                └─▶ P-IMPL-4 [CROSS-REPO → slaser79/hitl-app] (BO1/BO2)
+
+    Strict chain inside this repo (all of 1/2A/2B share main.py). P-IMPL-4 is a
+    cross-repo follow-up, re-planned in hitl-app.
+
+  risks:
+    - description: "PR-112 port default is 8000; spec §4.1.1 mandates 8080. Verbatim cherry-pick ships a contract-violating default and breaks AC2/AC8 env-var alignment."
+      severity: P1
+      mitigation: "P-IMPL-1 AC explicitly requires reconciling to 8080 in code + .env.example + README + the PR-112 test assertions; verification greps for residual 8000."
+    - description: "PR-112 is OPEN/unmerged upstream and may diverge before pickup."
+      severity: P2
+      mitigation: "Spec §4.1 fallback: reimplement env-driven transport directly against the fork entrypoint with the same env-var contract if cherry-pick conflicts."
+    - description: "MCP-client token (WHATSAPP_MCP_TOKEN) could be conflated with the existing bridge token (WHATSAPP_BRIDGE_TOKEN) — different layers."
+      severity: P2
+      mitigation: "Phase notes + issue bodies call out the distinction; test_bridge_auth.py stays bridge-only, new test_auth.py is client-only."
+    - description: "AC4/AC5/AC7 partly require a live WhatsApp session + a second tailnet device (manual)."
+      severity: P2
+      mitigation: "Automated tests cover guard/auth/typed-errors; AC5/AC6/AC7 recorded as manual verification notes in P-IMPL-3 per spec §6.3."
+    - description: "P-IMPL-2 as a single unit (auth + guard + typed errors) exceeds the ≤5-active-file right-size bar."
+      severity: design
+      mitigation: "Right-sized into P-IMPL-2A (auth+guard, 4 files) and P-IMPL-2B (typed errors, 4 files); both map to spec's single P-IMPL-2."
+    - description: "Go bridge is a Non-Goal; an over-eager worker might edit whatsapp-bridge/ for EC2 health probing."
+      severity: P1
+      mitigation: "EC2 uses the EXISTING /api/health endpoint via the Python REST client only; CLAUDE.md §5 + every issue body reiterate 'do not touch the Go bridge'."
+
+  lessons_applied:
+    - "Vertical, right-sized slices (≤5 active files) — split oversized P-IMPL-2 (WBS Rule 2 / Right-Sizing)."
+    - "Sequenced phases sharing main.py instead of defaulting to parallel (Overlap Detection / anti-pattern #3)."
+    - "Grounded every path against the live fork + the actual PR-112 diff, not assumptions (anti-pattern #6)."
+    - "No code snippets in issues — WHAT not HOW (anti-pattern #1)."
+    - "CLAUDE.md doctrine: when changing a default (port 8000→8080), grep the whole surface (code+docs+tests) in one pass."
+    - "One concern per issue; cross-repo P-IMPL-4 kept as a separate follow-up, not bundled (anti-pattern #5)."
