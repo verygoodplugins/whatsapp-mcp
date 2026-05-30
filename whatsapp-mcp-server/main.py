@@ -1,9 +1,14 @@
+import hmac
+import ipaddress
 import os
 import signal
 import sys
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from starlette.datastructures import Headers
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from whatsapp import (
     download_media as whatsapp_download_media,
@@ -56,6 +61,16 @@ TRANSPORT_ALIASES = {
 }
 DEFAULT_MCP_HOST = "127.0.0.1"
 DEFAULT_MCP_PORT = 8089
+MIN_MCP_TOKEN_LENGTH = 32
+MCP_TOKEN_PLACEHOLDER_MARKERS = (
+    "changeme",
+    "change-me",
+    "placeholder",
+    "replace-me",
+    "replace_with",
+    "your-token",
+    "your-secret",
+)
 
 
 def resolve_transport(value: str | None) -> str:
@@ -76,6 +91,126 @@ def resolve_port(value: str | None) -> int:
         return int(value)
     except ValueError:
         raise SystemExit(f"Invalid WHATSAPP_MCP_PORT={value!r}; must be an integer")
+
+
+def resolve_auth_enabled(value: str | None) -> bool:
+    """Parse WHATSAPP_MCP_AUTH, defaulting remote transports to authenticated."""
+    normalized = (value or "on").strip().lower()
+    if normalized == "on":
+        return True
+    if normalized == "off":
+        return False
+    raise SystemExit(f"Invalid WHATSAPP_MCP_AUTH={value!r}; valid values: on, off")
+
+
+def is_loopback_host(host: str) -> bool:
+    """Return True only for explicit loopback hosts."""
+    normalized = host.strip().rstrip(".").lower()
+    if normalized == "localhost":
+        return True
+
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def validate_mcp_token(token: str | None) -> str:
+    """Return a stripped, startup-safe client-facing MCP auth token."""
+    value = (token or "").strip()
+    if not value:
+        raise SystemExit("WHATSAPP_MCP_TOKEN is required when WHATSAPP_MCP_AUTH=on")
+    if len(value) < MIN_MCP_TOKEN_LENGTH:
+        raise SystemExit(
+            f"WHATSAPP_MCP_TOKEN must be at least {MIN_MCP_TOKEN_LENGTH} characters when WHATSAPP_MCP_AUTH=on"
+        )
+
+    normalized = value.lower()
+    if any(marker in normalized for marker in MCP_TOKEN_PLACEHOLDER_MARKERS):
+        raise SystemExit("WHATSAPP_MCP_TOKEN must not be a placeholder value")
+
+    return value
+
+
+def validate_remote_startup(host: str, auth_enabled: bool, token: str | None) -> str | None:
+    """Fail closed for unsafe remote MCP configurations."""
+    if not auth_enabled:
+        if not is_loopback_host(host):
+            raise SystemExit(
+                "Unsafe MCP configuration: WHATSAPP_MCP_AUTH=off is only permitted when WHATSAPP_MCP_HOST is loopback"
+            )
+        return None
+
+    return validate_mcp_token(token)
+
+
+def _authorization_matches_token(auth_header: str | None, expected_token: str) -> bool:
+    if not auth_header:
+        return False
+
+    scheme, separator, credentials = auth_header.partition(" ")
+    if not separator or scheme.lower() != "bearer":
+        return False
+
+    return hmac.compare_digest(credentials.strip(), expected_token)
+
+
+def request_has_valid_mcp_token(headers: Headers, expected_token: str) -> bool:
+    """Validate either Authorization: Bearer or X-API-Key credentials."""
+    if _authorization_matches_token(headers.get("authorization"), expected_token):
+        return True
+
+    api_key = headers.get("x-api-key")
+    return bool(api_key) and hmac.compare_digest(api_key.strip(), expected_token)
+
+
+class MCPAuthMiddleware:
+    """Pure ASGI auth wrapper for FastMCP HTTP and SSE apps."""
+
+    def __init__(self, app: ASGIApp, token: str):
+        self.app = app
+        self.token = token
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        if not request_has_valid_mcp_token(Headers(scope=scope), self.token):
+            response = JSONResponse(
+                {"detail": "Authentication required"},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            await response(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
+
+
+def run_remote_mcp_app(transport: str, auth_enabled: bool, token: str | None) -> None:
+    """Run the authenticated ASGI app for http/sse transports."""
+    import anyio
+    import uvicorn
+
+    if transport == "streamable-http":
+        app: ASGIApp = mcp.streamable_http_app()
+    elif transport == "sse":
+        app = mcp.sse_app()
+    else:
+        raise ValueError(f"Remote auth is not supported for transport={transport!r}")
+
+    if auth_enabled:
+        app = MCPAuthMiddleware(app, validate_mcp_token(token))
+
+    config = uvicorn.Config(
+        app,
+        host=mcp.settings.host,
+        port=mcp.settings.port,
+        log_level=mcp.settings.log_level.lower(),
+    )
+    server = uvicorn.Server(config)
+    anyio.run(server.serve)
 
 
 # Initialize FastMCP server without reading host/port from the environment.
@@ -433,13 +568,15 @@ def run_mcp_server() -> None:
         return
 
     configure_remote_transport()
+    auth_enabled = resolve_auth_enabled(os.getenv("WHATSAPP_MCP_AUTH"))
+    token = validate_remote_startup(mcp.settings.host, auth_enabled, os.getenv("WHATSAPP_MCP_TOKEN"))
 
     # stdout is reserved for the protocol on stdio; log startup to stderr.
     print(
         f"WhatsApp MCP server listening on {mcp.settings.host}:{mcp.settings.port} via {transport}",
         file=sys.stderr,
     )
-    mcp.run(transport=transport)
+    run_remote_mcp_app(transport, auth_enabled, token)
 
 
 if __name__ == "__main__":

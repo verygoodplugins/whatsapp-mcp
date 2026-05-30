@@ -296,6 +296,8 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MCP_TRANSPORT` | `stdio`                                | MCP transport to serve clients: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST`    | `127.0.0.1`                              | Bind address for the `http`/`sse` transports |
 | `WHATSAPP_MCP_PORT`    | `8089`                                   | Port for the `http`/`sse` transports |
+| `WHATSAPP_MCP_AUTH`    | `on`                                     | Require bearer/API-key auth for `http`/`sse`; `off` is only allowed on loopback |
+| `WHATSAPP_MCP_TOKEN`   | *(none)*                                 | Client-facing token for MCP `http`/`sse`; required when auth is on, minimum 32 chars |
 
 ### MCP transport (stdio vs http/sse)
 
@@ -305,20 +307,24 @@ instead, set `WHATSAPP_MCP_TRANSPORT`:
 
 ```bash
 # Streamable HTTP (current spec transport for remote MCP), endpoint at /mcp
-WHATSAPP_MCP_TRANSPORT=http WHATSAPP_MCP_PORT=8089 uv run main.py
+WHATSAPP_MCP_TRANSPORT=http WHATSAPP_MCP_TOKEN="$(openssl rand -hex 24)" uv run main.py
 
 # Legacy Server-Sent Events transport (deprecated in the MCP spec), endpoint at /sse
-WHATSAPP_MCP_TRANSPORT=sse uv run main.py
+WHATSAPP_MCP_TRANSPORT=sse WHATSAPP_MCP_TOKEN="$(openssl rand -hex 24)" uv run main.py
 ```
 
 `http` is an alias for the spec's `streamable-http` transport and is the
 recommended choice for remote connections; `sse` is kept for older clients.
 
+`WHATSAPP_MCP_AUTH` defaults to `on` for remote transports. Clients send
+`Authorization: Bearer $WHATSAPP_MCP_TOKEN` or `X-API-Key: $WHATSAPP_MCP_TOKEN`.
+The server refuses missing, shorter-than-32-char, or placeholder tokens.
+`WHATSAPP_MCP_TOKEN` is distinct from bridge-only `WHATSAPP_BRIDGE_TOKEN`.
+
 > **Security:** `WHATSAPP_MCP_HOST` defaults to `127.0.0.1`, so the HTTP/SSE
-> server is reachable only from the local machine. The server has no built-in
-> authentication, and the underlying bridge can read and send WhatsApp messages
-> on your account. Only bind to a non-loopback address (e.g. `0.0.0.0`) if you
-> place an authenticating reverse proxy or tunnel in front of it.
+> server is reachable only from the local machine. `WHATSAPP_MCP_AUTH=off` is
+> permitted only for loopback binds; non-loopback hosts such as `0.0.0.0` fail
+> closed unless MCP auth is enabled with a strong token.
 
 ### Bridge authentication and media paths
 

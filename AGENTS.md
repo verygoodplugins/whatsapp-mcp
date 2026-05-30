@@ -102,6 +102,11 @@ A failing blocking job is a hard block — fix it or explain in the PR why it's 
 | `WHATSAPP_BRIDGE_PORT` | `8080` | Port the bridge binds to |
 | `WHATSAPP_BRIDGE_TOKEN` | generated in `whatsapp-bridge/store/.bridge-token` | Bearer token required for bridge REST calls |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox` | Path-list of directories allowed for outbound media files |
+| `WHATSAPP_MCP_TRANSPORT` | `stdio` | MCP transport: `stdio`, `http`, or `sse` |
+| `WHATSAPP_MCP_HOST` | `127.0.0.1` | Bind address for MCP `http`/`sse` transports |
+| `WHATSAPP_MCP_PORT` | `8089` | Port for MCP `http`/`sse` transports |
+| `WHATSAPP_MCP_AUTH` | `on` | Require bearer/API-key auth for MCP `http`/`sse`; `off` is only allowed on loopback |
+| `WHATSAPP_MCP_TOKEN` | *(none)* | Client-facing MCP token, distinct from `WHATSAPP_BRIDGE_TOKEN`; required when auth is on |
 | `WEBHOOK_URL` | `http://localhost:8769/whatsapp/webhook` | Outgoing webhook for incoming messages (empty = disabled) |
 | `FORWARD_SELF` | `false` | Whether self-sent messages are forwarded |
 
