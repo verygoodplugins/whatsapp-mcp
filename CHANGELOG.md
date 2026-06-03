@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0](https://github.com/verygoodplugins/whatsapp-mcp/compare/v0.2.1...v0.3.0) (2026-06-03)
+
+
+### Features
+
+* **bridge:** add macOS launchd installer ([#116](https://github.com/verygoodplugins/whatsapp-mcp/issues/116)) ([9b2cb8a](https://github.com/verygoodplugins/whatsapp-mcp/commit/9b2cb8ad3e9e1742fc6ac4714ceb5c4a72fb74e3))
+* persist inbound quoted_message_id and add reply support to /api/send ([#109](https://github.com/verygoodplugins/whatsapp-mcp/issues/109)) ([f72d352](https://github.com/verygoodplugins/whatsapp-mcp/commit/f72d35220153dcd8b1fc2dfc645447cf0796271c)), closes [#107](https://github.com/verygoodplugins/whatsapp-mcp/issues/107)
+
+
+### Bug Fixes
+
+* **bridge:** handle ProtocolMessage_REVOKE (delete-for-everyone) events ([#99](https://github.com/verygoodplugins/whatsapp-mcp/issues/99)) ([7f4ec42](https://github.com/verygoodplugins/whatsapp-mcp/commit/7f4ec42c455d1716e901b6262a9ff7e3af437b6a))
+* **mcp:** deduplicate contact chat results ([da543ce](https://github.com/verygoodplugins/whatsapp-mcp/commit/da543ce14349e5f8f3eb3e8b6ee0df1ce284dac8))
+* **mcp:** serialize message context result ([ebb1e07](https://github.com/verygoodplugins/whatsapp-mcp/commit/ebb1e07d8c22ccd62ac1b4dad7b67da7d63c50da))
+
+
+### Documentation
+
+* **readme:** document app state recovery ([#117](https://github.com/verygoodplugins/whatsapp-mcp/issues/117)) ([040f9e1](https://github.com/verygoodplugins/whatsapp-mcp/commit/040f9e11054fd0d5c1fc9e0ad690111bacca1447))
+
 ## [0.2.1](https://github.com/verygoodplugins/whatsapp-mcp/compare/v0.2.0...v0.2.1) (2026-05-14)
 
 
