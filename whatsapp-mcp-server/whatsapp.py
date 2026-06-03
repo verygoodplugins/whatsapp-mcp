@@ -774,12 +774,18 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
                 c.jid,
                 c.name,
                 c.last_message_time,
-                m.content as last_message,
-                m.sender as last_sender,
-                m.is_from_me as last_is_from_me
+                last_msg.content as last_message,
+                last_msg.sender as last_sender,
+                last_msg.is_from_me as last_is_from_me
             FROM chats c
-            JOIN messages m ON c.jid = m.chat_jid
-            WHERE m.sender IN ({placeholders}) OR c.jid = ?
+            LEFT JOIN messages last_msg ON c.jid = last_msg.chat_jid
+                AND c.last_message_time = last_msg.timestamp
+            WHERE EXISTS (
+                SELECT 1
+                FROM messages contact_msg
+                WHERE contact_msg.chat_jid = c.jid
+                    AND contact_msg.sender IN ({placeholders})
+            ) OR c.jid = ?
             ORDER BY c.last_message_time DESC
             LIMIT ? OFFSET ?
         """,
