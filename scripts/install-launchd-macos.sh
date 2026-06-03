@@ -89,7 +89,10 @@ if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/
   fail "Port $PORT is already in use after stopping existing whatsapp-mcp LaunchAgents."
 fi
 
+old_umask="$(umask)"
+umask 077
 : > "$ENV_FILE"
+umask "$old_umask"
 write_export "WHATSAPP_MCP_REPO_ROOT" "$REPO_ROOT"
 write_export "WHATSAPP_BRIDGE_DIR" "$BRIDGE_DIR"
 write_export "WHATSAPP_BRIDGE_BINARY" "$BRIDGE_BINARY"
