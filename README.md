@@ -312,6 +312,61 @@ outbox is `~/.local/share/whatsapp-mcp/outbox`, created on bridge startup. Move
 files there before calling `send_file` or `send_audio_message`, or set
 `WHATSAPP_MEDIA_ROOTS` to a colon-separated list of absolute directories.
 
+### Run automatically on macOS
+
+macOS users can install optional per-user `launchd` jobs that start the Go
+bridge at login and monitor it every 60 seconds for API health, disconnects, and
+QR relink signals. The installer does not require `sudo` and does not install or
+start the MCP server.
+
+```bash
+scripts/install-launchd-macos.sh
+```
+
+The installer builds `whatsapp-bridge/whatsapp-bridge` with `go build` when Go is
+available, writes generated support files to
+`~/Library/Application Support/whatsapp-mcp/`, writes LaunchAgents to
+`~/Library/LaunchAgents/`, and writes logs to `~/Library/Logs/whatsapp-mcp/`.
+It safely reloads only these labels:
+
+- `com.whatsapp-mcp.bridge`
+- `com.whatsapp-mcp.bridge-monitor`
+
+To customize the launchd environment, export values before running the installer.
+Re-run the installer after changing them.
+
+```bash
+export WHATSAPP_BRIDGE_PORT=8080
+export WEBHOOK_URL=http://localhost:8769/whatsapp/webhook
+export FORWARD_SELF=false
+export WHATSAPP_MEDIA_ROOTS="$HOME/.local/share/whatsapp-mcp/outbox"
+scripts/install-launchd-macos.sh
+```
+
+Verify the jobs and inspect logs:
+
+```bash
+launchctl print gui/$(id -u)/com.whatsapp-mcp.bridge
+launchctl print gui/$(id -u)/com.whatsapp-mcp.bridge-monitor
+tail -n 100 ~/Library/Logs/whatsapp-mcp/bridge.err.log
+tail -n 100 ~/Library/Logs/whatsapp-mcp/monitor.err.log
+```
+
+The monitor sends a macOS notification once per failure type until recovery. It
+alerts when the bridge LaunchAgent is unloaded, the token is missing, the health
+endpoint is unreachable, WhatsApp is disconnected, or recent logs indicate that
+QR relinking is needed.
+
+Uninstall the generated LaunchAgents and support files with:
+
+```bash
+scripts/uninstall-launchd-macos.sh
+```
+
+Uninstall preserves `whatsapp-bridge/store/`, including WhatsApp session DBs,
+message DBs, media, and `.bridge-token`. Logs are left in
+`~/Library/Logs/whatsapp-mcp/` for manual cleanup.
+
 ### CLI flags (Go bridge)
 
 | Flag                  | Default | Description                                                                                                                                                                                                                                                       |
