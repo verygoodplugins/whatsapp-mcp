@@ -9,6 +9,14 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 
 > Originally created by [Luke Harries](https://github.com/lharries/whatsapp-mcp). Maintained by [Very Good Plugins](https://verygoodplugins.com/?utm_source=github).
 
+<p align="center">
+  <a href="https://github.com/user-attachments/assets/9475af1d-2369-4315-9ccc-823dba2c5c32"><strong>Watch the WhatsApp MCP demo video</strong></a>
+</p>
+
+<p align="center">
+  <sub>Product demo generated with Remotion using simulated data.</sub>
+</p>
+
 ## Features
 
 - **Message Management**: Search and read personal WhatsApp messages (text, images, videos, documents, audio)
