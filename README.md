@@ -379,7 +379,7 @@ whatsmeow's default pairing asks for "recent sync" — roughly the last 3 months
 
 ```bash
 # Stop the bridge
-launchctl bootout gui/$UID/com.whatsapp-bridge    # or however you manage it
+launchctl bootout gui/$UID/com.whatsapp-mcp.bridge    # or however you manage it
 
 # Back up, then remove the auth session (keeps messages.db intact)
 cp whatsapp-bridge/store/whatsapp.db{,.bak}
@@ -622,7 +622,7 @@ is to reset the whatsmeow session and re-pair:
 
 ```bash
 # Stop the bridge first.
-launchctl bootout gui/$UID/com.whatsapp-bridge    # or however you manage it
+launchctl bootout gui/$UID/com.whatsapp-mcp.bridge    # or however you manage it
 
 # Back up the whole runtime store.
 cp -a whatsapp-bridge/store whatsapp-bridge/store.bak.$(date +%Y%m%d%H%M%S)
@@ -632,7 +632,7 @@ mv whatsapp-bridge/store/whatsapp.db whatsapp-bridge/store/whatsapp.db.lthash.ba
 
 # Restart the bridge and scan the new QR code.
 cd whatsapp-bridge
-go run .
+./whatsapp-bridge    # or `go run .` during development
 ```
 
 Do not remove `whatsapp-bridge/store/messages.db` for this recovery unless you
