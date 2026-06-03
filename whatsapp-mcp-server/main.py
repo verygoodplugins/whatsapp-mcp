@@ -32,6 +32,9 @@ from whatsapp import (
     list_messages as whatsapp_list_messages,
 )
 from whatsapp import (
+    msg_to_dict,
+)
+from whatsapp import (
     search_contacts as whatsapp_search_contacts,
 )
 from whatsapp import (
@@ -284,7 +287,11 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> dic
         after: Number of messages to include after the target message (default 5)
     """
     context = whatsapp_get_message_context(message_id, before, after)
-    return context
+    return {
+        "message": msg_to_dict(context.message),
+        "before": [msg_to_dict(message) for message in context.before],
+        "after": [msg_to_dict(message) for message in context.after],
+    }
 
 
 @mcp.tool()
