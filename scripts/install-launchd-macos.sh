@@ -180,10 +180,20 @@ if [[ -z "\$TOKEN" ]]; then
 fi
 clear_alert "token"
 
-API_URL="\${WHATSAPP_API_URL%/}"
-HEALTH="\$(curl -sS -m 5 -H "Authorization: Bearer \$TOKEN" "\$API_URL/health" 2>/dev/null || true)"
-if [[ -z "\$HEALTH" ]]; then
-  alert_once "api" "WhatsApp Bridge API Unreachable" "The health endpoint did not respond at \$API_URL/health."
+API_URL="${WHATSAPP_API_URL%/}"
+response="$(curl -sS -m 5 -H "Authorization: Bearer $TOKEN" -w $'\n%{http_code}' "$API_URL/health" 2>/dev/null || true)"
+if [[ -z "$response" ]]; then
+  alert_once "api" "WhatsApp Bridge API Unreachable" "The health endpoint did not respond at $API_URL/health."
+  exit 0
+fi
+http_code="${response##*$'\n'}"
+HEALTH="${response%$'\n'*}"
+if [[ "$http_code" == "401" || "$http_code" == "403" ]]; then
+  alert_once "token" "WhatsApp Bridge Token Invalid" "The health endpoint rejected the configured token. Re-sync WHATSAPP_BRIDGE_TOKEN or $TOKEN_FILE."
+  exit 0
+fi
+if [[ "$http_code" != "200" && "$http_code" != "503" ]]; then
+  alert_once "api" "WhatsApp Bridge API Unreachable" "Unexpected HTTP $http_code from $API_URL/health."
   exit 0
 fi
 clear_alert "api"
