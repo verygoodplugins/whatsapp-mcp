@@ -1490,12 +1490,16 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			reactedToID = key.GetID()
 		}
 		if reactedToID != "" {
+			emoji := reaction.GetText()
 			if err := messageStore.StoreMessage(
-				msg.Info.ID, chatJID, sender, reaction.GetText(),
+				msg.Info.ID, chatJID, sender, emoji,
 				msg.Info.Timestamp, msg.Info.IsFromMe,
 				"reaction", reactedToID, "", nil, nil, nil, 0, "",
 			); err != nil {
 				logger.Warnf("Failed to store reaction: %v", err)
+			}
+			if forwardSelfMessages || !msg.Info.IsFromMe {
+				SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji)
 			}
 		}
 		return

@@ -213,6 +213,23 @@ Send (or remove) an emoji reaction to a message.
 
 Inbound reactions received from others are stored automatically as messages with `media_type = "reaction"`. The `reaction_to_message_id` field in each reaction message indicates which message was reacted to.
 
+When webhook forwarding is enabled, inbound reactions are also posted to `WEBHOOK_URL` as typed events. Reaction removals use an empty `content`/`reactionEmoji` and `reactionRemoved: true`.
+
+```json
+{
+  "eventType": "reaction",
+  "sender": "15551234567@s.whatsapp.net",
+  "chatJID": "15551234567@s.whatsapp.net",
+  "isFromMe": true,
+  "content": "👍",
+  "messageId": "reaction-stanza-id",
+  "mediaType": "reaction",
+  "reactionToMessageId": "target-message-id",
+  "reactionEmoji": "👍",
+  "reactionRemoved": false
+}
+```
+
 **Natural Language Examples:**
 
 - "React to that message with a thumbs up"

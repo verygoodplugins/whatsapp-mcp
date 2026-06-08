@@ -1147,6 +1147,26 @@ func captureWebhook(t *testing.T) (*httptest.Server, <-chan WebhookPayload) {
 	return srv, ch
 }
 
+// captureRawWebhook starts a local httptest server that records the first raw
+// JSON webhook payload it receives.
+func captureRawWebhook(t *testing.T) (*httptest.Server, <-chan map[string]any) {
+	t.Helper()
+	ch := make(chan map[string]any, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var p map[string]any
+		if err := json.Unmarshal(body, &p); err == nil {
+			select {
+			case ch <- p:
+			default:
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, ch
+}
+
 // TestHandleMessage_ImageOnly_WebhookForwarded verifies that an image message
 // with no text caption is forwarded to the webhook endpoint (not silently
 // dropped), and that the webhook payload contains the expected media fields.
@@ -1695,9 +1715,133 @@ func TestHandleMessage_EmptyEmojiReaction_Stored(t *testing.T) {
 	}
 }
 
+// TestHandleMessage_InboundReaction_WebhookForwarded verifies that inbound
+// reactions are forwarded as typed webhook events after being stored.
+func TestHandleMessage_InboundReaction_WebhookForwarded(t *testing.T) {
+	srv, webhookCh := captureRawWebhook(t)
+	t.Setenv("WEBHOOK_URL", srv.URL)
+
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+	chatJID := phonePN.String()
+	targetID := "3AABCDEF01234569"
+	emoji := "👍"
+
+	msg := buildReactionMessage(phonePN, phonePN, false, targetID, emoji)
+	handleMessage(client, ms, msg, logger)
+
+	mediaType, filename, found := queryMessageMediaTypeAndFilename(ms, chatJID, msg.Info.ID)
+	if !found {
+		t.Fatalf("expected reaction to be stored, but message row not found")
+	}
+	if mediaType != "reaction" {
+		t.Errorf("media_type = %q, want %q", mediaType, "reaction")
+	}
+	if filename != targetID {
+		t.Errorf("filename = %q, want %q", filename, targetID)
+	}
+
+	select {
+	case payload := <-webhookCh:
+		if payload["eventType"] != "reaction" {
+			t.Errorf("eventType = %v, want reaction", payload["eventType"])
+		}
+		if payload["mediaType"] != "reaction" {
+			t.Errorf("mediaType = %v, want reaction", payload["mediaType"])
+		}
+		if payload["messageId"] != msg.Info.ID {
+			t.Errorf("messageId = %v, want %s", payload["messageId"], msg.Info.ID)
+		}
+		if payload["reactionToMessageId"] != targetID {
+			t.Errorf("reactionToMessageId = %v, want %s", payload["reactionToMessageId"], targetID)
+		}
+		if payload["reactionEmoji"] != emoji {
+			t.Errorf("reactionEmoji = %v, want %s", payload["reactionEmoji"], emoji)
+		}
+		if payload["reactionRemoved"] != false {
+			t.Errorf("reactionRemoved = %v, want false", payload["reactionRemoved"])
+		}
+		if payload["content"] != emoji {
+			t.Errorf("content = %v, want %s", payload["content"], emoji)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for reaction webhook call")
+	}
+}
+
+// TestHandleMessage_EmptyEmojiReaction_WebhookForwarded verifies that reaction
+// removals are forwarded even though their content is the empty string.
+func TestHandleMessage_EmptyEmojiReaction_WebhookForwarded(t *testing.T) {
+	srv, webhookCh := captureRawWebhook(t)
+	t.Setenv("WEBHOOK_URL", srv.URL)
+
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+	targetID := "3AABCDEF01234570"
+
+	msg := buildReactionMessage(phonePN, phonePN, false, targetID, "")
+	handleMessage(client, ms, msg, logger)
+
+	select {
+	case payload := <-webhookCh:
+		if payload["eventType"] != "reaction" {
+			t.Errorf("eventType = %v, want reaction", payload["eventType"])
+		}
+		if payload["content"] != "" {
+			t.Errorf("content = %v, want empty string", payload["content"])
+		}
+		if payload["reactionEmoji"] != "" {
+			t.Errorf("reactionEmoji = %v, want empty string", payload["reactionEmoji"])
+		}
+		if payload["reactionRemoved"] != true {
+			t.Errorf("reactionRemoved = %v, want true", payload["reactionRemoved"])
+		}
+		if payload["reactionToMessageId"] != targetID {
+			t.Errorf("reactionToMessageId = %v, want %s", payload["reactionToMessageId"], targetID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for reaction removal webhook call")
+	}
+}
+
+// TestHandleMessage_SelfReactionWebhook_RespectsForwardSelf verifies that
+// self-authored reactions use the same FORWARD_SELF behavior as normal messages.
+func TestHandleMessage_SelfReactionWebhook_RespectsForwardSelf(t *testing.T) {
+	srv, webhookCh := captureRawWebhook(t)
+	t.Setenv("WEBHOOK_URL", srv.URL)
+
+	previous := forwardSelfMessages
+	forwardSelfMessages = false
+	t.Cleanup(func() {
+		forwardSelfMessages = previous
+	})
+
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	msg := buildReactionMessage(phonePN, phonePN, true, "3AABCDEF01234571", "👍")
+	handleMessage(client, ms, msg, logger)
+
+	if count := queryMessageCount(ms, phonePN.String()); count != 1 {
+		t.Errorf("expected self reaction to be stored, got %d stored messages", count)
+	}
+
+	select {
+	case payload := <-webhookCh:
+		t.Fatalf("unexpected webhook for self reaction when FORWARD_SELF=false: %#v", payload)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 // TestHandleMessage_ReactionWithoutKey_NotStored verifies that a reaction
 // with no key (no reacted-to message ID) is silently ignored and not stored.
 func TestHandleMessage_ReactionWithoutKey_NotStored(t *testing.T) {
+	srv, webhookCh := captureRawWebhook(t)
+	t.Setenv("WEBHOOK_URL", srv.URL)
+
 	client := newTestClient(&mockLIDStore{})
 	ms := newTestMessageStore(t)
 	logger := testLogger()
@@ -1723,6 +1867,12 @@ func TestHandleMessage_ReactionWithoutKey_NotStored(t *testing.T) {
 
 	if count := queryMessageCount(ms, phonePN.String()); count != 0 {
 		t.Errorf("expected reaction without key to be discarded, got %d stored messages", count)
+	}
+
+	select {
+	case payload := <-webhookCh:
+		t.Fatalf("unexpected webhook for reaction without key: %#v", payload)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 
