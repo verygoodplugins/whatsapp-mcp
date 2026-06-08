@@ -32,6 +32,9 @@ from whatsapp import (
     list_messages as whatsapp_list_messages,
 )
 from whatsapp import (
+    msg_to_dict,
+)
+from whatsapp import (
     search_contacts as whatsapp_search_contacts,
 )
 from whatsapp import (
@@ -287,17 +290,33 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> dic
         after: Number of messages to include after the target message (default 5)
     """
     context = whatsapp_get_message_context(message_id, before, after)
-    return context
+    return {
+        "message": msg_to_dict(context.message),
+        "before": [msg_to_dict(message) for message in context.before],
+        "after": [msg_to_dict(message) for message in context.after],
+    }
 
 
 @mcp.tool()
-def send_message(recipient: str, message: str) -> dict[str, Any]:
+def send_message(
+    recipient: str,
+    message: str,
+    quoted_message_id: str = "",
+    quoted_sender_jid: str = "",
+    quoted_content: str = "",
+) -> dict[str, Any]:
     """Send a WhatsApp message to a person or group. For group chats use the JID.
 
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
         message: The message text to send
+        quoted_message_id: ID of the message to reply to (optional). When set, the sent
+                           message will appear as a quoted reply in WhatsApp.
+        quoted_sender_jid: Full JID of the author of the quoted message. Required for
+                           group replies so WhatsApp renders the correct attribution.
+        quoted_content: Text content of the quoted message, used for the reply preview.
+                        Only plain text is supported; media previews are not included.
 
     Returns:
         A dictionary containing success status and a status message
@@ -307,7 +326,9 @@ def send_message(recipient: str, message: str) -> dict[str, Any]:
         return {"success": False, "message": "Recipient must be provided"}
 
     # Call the whatsapp_send_message function with the unified recipient parameter
-    success, status_message = whatsapp_send_message(recipient, message)
+    success, status_message = whatsapp_send_message(
+        recipient, message, quoted_message_id, quoted_sender_jid, quoted_content
+    )
     return {"success": success, "message": status_message}
 
 

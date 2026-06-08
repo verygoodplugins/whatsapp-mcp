@@ -60,6 +60,8 @@ class Message:
     # For media_type == "reaction", the bridge stores the reacted-to message ID
     # in the `filename` column. Exposed to callers as `reaction_to_message_id`.
     filename: str | None = None
+    # ID of the message this one is replying to (NULL for non-replies).
+    quoted_message_id: str | None = None
 
 
 @dataclass
@@ -125,6 +127,7 @@ def msg_to_dict(message: Message, include_sender_name: bool = True) -> dict[str,
         "chat_name": message.chat_name,
         "media_type": message.media_type,
         "reaction_to_message_id": (message.filename if message.media_type == "reaction" else None),
+        "quoted_message_id": message.quoted_message_id,
     }
 
 
@@ -387,7 +390,7 @@ def list_messages(
 
         # Build base query
         query_parts = [
-            "SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.filename FROM messages"
+            "SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename FROM messages"
         ]
         query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
         where_clauses = []
@@ -452,7 +455,8 @@ def list_messages(
                 chat_jid=msg[5],
                 id=msg[6],
                 media_type=msg[7],
-                filename=msg[8] if len(msg) > 8 else None,
+                quoted_message_id=msg[8] if len(msg) > 8 else None,
+                filename=msg[9] if len(msg) > 9 else None,
             )
             result.append(message)
 
@@ -496,7 +500,7 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> Mes
         # Get the target message first
         cursor.execute(
             """
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type, messages.filename
+            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type, messages.quoted_message_id, messages.filename
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.id = ?
@@ -517,13 +521,14 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> Mes
             chat_jid=msg_data[5],
             id=msg_data[6],
             media_type=msg_data[8],
-            filename=msg_data[9] if len(msg_data) > 9 else None,
+            quoted_message_id=msg_data[9] if len(msg_data) > 9 else None,
+            filename=msg_data[10] if len(msg_data) > 10 else None,
         )
 
         # Get messages before
         cursor.execute(
             """
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.filename
+            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.chat_jid = ? AND messages.timestamp < ?
@@ -545,14 +550,15 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> Mes
                     chat_jid=msg[5],
                     id=msg[6],
                     media_type=msg[7],
-                    filename=msg[8] if len(msg) > 8 else None,
+                    quoted_message_id=msg[8] if len(msg) > 8 else None,
+                    filename=msg[9] if len(msg) > 9 else None,
                 )
             )
 
         # Get messages after
         cursor.execute(
             """
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.filename
+            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.chat_jid = ? AND messages.timestamp > ?
@@ -574,7 +580,8 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> Mes
                     chat_jid=msg[5],
                     id=msg[6],
                     media_type=msg[7],
-                    filename=msg[8] if len(msg) > 8 else None,
+                    quoted_message_id=msg[8] if len(msg) > 8 else None,
+                    filename=msg[9] if len(msg) > 9 else None,
                 )
             )
 
@@ -775,12 +782,18 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
                 c.jid,
                 c.name,
                 c.last_message_time,
-                m.content as last_message,
-                m.sender as last_sender,
-                m.is_from_me as last_is_from_me
+                last_msg.content as last_message,
+                last_msg.sender as last_sender,
+                last_msg.is_from_me as last_is_from_me
             FROM chats c
-            JOIN messages m ON c.jid = m.chat_jid
-            WHERE m.sender IN ({placeholders}) OR c.jid = ?
+            LEFT JOIN messages last_msg ON c.jid = last_msg.chat_jid
+                AND c.last_message_time = last_msg.timestamp
+            WHERE EXISTS (
+                SELECT 1
+                FROM messages contact_msg
+                WHERE contact_msg.chat_jid = c.jid
+                    AND contact_msg.sender IN ({placeholders})
+            ) OR c.jid = ?
             ORDER BY c.last_message_time DESC
             LIMIT ? OFFSET ?
         """,
@@ -978,17 +991,27 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
             conn.close()
 
 
-def send_message(recipient: str, message: str) -> tuple[bool, str]:
+def send_message(
+    recipient: str,
+    message: str,
+    quoted_message_id: str = "",
+    quoted_sender_jid: str = "",
+    quoted_content: str = "",
+) -> tuple[bool, str]:
     try:
         # Validate input
         if not recipient:
             return False, "Recipient must be provided"
 
         url = f"{WHATSAPP_API_BASE_URL}/send"
-        payload = {
+        payload: dict[str, Any] = {
             "recipient": recipient,
             "message": message,
         }
+        if quoted_message_id:
+            payload["quoted_message_id"] = quoted_message_id
+            payload["quoted_sender_jid"] = quoted_sender_jid
+            payload["quoted_content"] = quoted_content
 
         response = requests.post(url, json=payload, headers=_bridge_headers())
 

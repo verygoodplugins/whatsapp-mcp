@@ -3,11 +3,19 @@
 [![CI](https://github.com/verygoodplugins/whatsapp-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/verygoodplugins/whatsapp-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Go 1.24+](https://img.shields.io/badge/go-1.24+-00ADD8.svg)](https://go.dev/)
+[![Go 1.25+](https://img.shields.io/badge/go-1.25+-00ADD8.svg)](https://go.dev/)
 
 A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and send WhatsApp messages.
 
 > Originally created by [Luke Harries](https://github.com/lharries/whatsapp-mcp). Maintained by [Very Good Plugins](https://verygoodplugins.com/?utm_source=github).
+
+<p align="center">
+  <a href="https://github.com/user-attachments/assets/9475af1d-2369-4315-9ccc-823dba2c5c32"><strong>Watch the WhatsApp MCP demo video</strong></a>
+</p>
+
+<p align="center">
+  <sub>Product demo generated with Remotion using simulated data.</sub>
+</p>
 
 ## Features
 
@@ -23,7 +31,7 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 
 ### Prerequisites
 
-- Go 1.24+
+- Go 1.25+
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) package manager
 - Claude Desktop or Cursor
@@ -173,17 +181,23 @@ Get messages with filters, date ranges, and sorting.
 
 #### `send_message`
 
-Send a text message to a contact or group.
+Send a text message to a contact or group, optionally as a quoted reply.
 
 **Parameters:**
 
 - `recipient` (required): Phone number or group JID
 - `message` (required): Text content to send
+- `quoted_message_id` (optional): ID of the message to reply to. When provided, the sent message appears as a quoted reply in WhatsApp.
+- `quoted_sender_jid` (optional): Full JID of the author of the quoted message. Required for group replies so WhatsApp renders the correct attribution header.
+- `quoted_content` (optional): Text content of the quoted message, used for the reply preview. Only plain text is supported.
+
+Inbound quoted replies are stored automatically. The `quoted_message_id` field in each message returned by `list_messages` indicates which message it is replying to (or `null` for non-replies).
 
 **Natural Language Examples:**
 
 - "Send 'Hello!' to +1234567890"
 - "Message the team group saying 'Meeting at 3pm'"
+- "Reply to that message saying 'Sounds good'"
 
 #### `send_reaction`
 
@@ -300,7 +314,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | ---------------------- | ---------------------------------------- | -------------------------------------------- |
 | `WHATSAPP_BRIDGE_PORT` | `8080`                                   | Port for Go bridge REST API                  |
 | `WEBHOOK_URL`          | `http://localhost:8769/whatsapp/webhook` | Webhook for incoming messages                |
-| `FORWARD_SELF`         | `false`                                  | Forward messages sent by self                |
+| `FORWARD_SELF`         | `true`                                   | Forward messages sent by self                |
 | `WHATSAPP_DB_PATH`     | `../whatsapp-bridge/store/messages.db`   | Path to SQLite database                      |
 | `WHATSMEOW_DB_PATH`    | `../whatsapp-bridge/store/whatsapp.db`   | whatsmeow DB used for LID ↔ phone resolution |
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
@@ -325,6 +339,61 @@ outbox is `~/.local/share/whatsapp-mcp/outbox`, created on bridge startup. Move
 files there before calling `send_file` or `send_audio_message`, or set
 `WHATSAPP_MEDIA_ROOTS` to a colon-separated list of absolute directories.
 
+### Run automatically on macOS
+
+macOS users can install optional per-user `launchd` jobs that start the Go
+bridge at login and monitor it every 60 seconds for API health, disconnects, and
+QR relink signals. The installer does not require `sudo` and does not install or
+start the MCP server.
+
+```bash
+scripts/install-launchd-macos.sh
+```
+
+The installer builds `whatsapp-bridge/whatsapp-bridge` with `go build` when Go is
+available, writes generated support files to
+`~/Library/Application Support/whatsapp-mcp/`, writes LaunchAgents to
+`~/Library/LaunchAgents/`, and writes logs to `~/Library/Logs/whatsapp-mcp/`.
+It safely reloads only these labels:
+
+- `com.whatsapp-mcp.bridge`
+- `com.whatsapp-mcp.bridge-monitor`
+
+To customize the launchd environment, export values before running the installer.
+Re-run the installer after changing them.
+
+```bash
+export WHATSAPP_BRIDGE_PORT=8080
+export WEBHOOK_URL=http://localhost:8769/whatsapp/webhook
+export FORWARD_SELF=false
+export WHATSAPP_MEDIA_ROOTS="$HOME/.local/share/whatsapp-mcp/outbox"
+scripts/install-launchd-macos.sh
+```
+
+Verify the jobs and inspect logs:
+
+```bash
+launchctl print gui/$(id -u)/com.whatsapp-mcp.bridge
+launchctl print gui/$(id -u)/com.whatsapp-mcp.bridge-monitor
+tail -n 100 ~/Library/Logs/whatsapp-mcp/bridge.err.log
+tail -n 100 ~/Library/Logs/whatsapp-mcp/monitor.err.log
+```
+
+The monitor sends a macOS notification once per failure type until recovery. It
+alerts when the bridge LaunchAgent is unloaded, the token is missing, the health
+endpoint is unreachable, WhatsApp is disconnected, or recent logs indicate that
+QR relinking is needed.
+
+Uninstall the generated LaunchAgents and support files with:
+
+```bash
+scripts/uninstall-launchd-macos.sh
+```
+
+Uninstall preserves `whatsapp-bridge/store/`, including WhatsApp session DBs,
+message DBs, media, and `.bridge-token`. Logs are left in
+`~/Library/Logs/whatsapp-mcp/` for manual cleanup.
+
 ### CLI flags (Go bridge)
 
 | Flag                  | Default | Description                                                                                                                                                                                                                                                       |
@@ -337,7 +406,7 @@ whatsmeow's default pairing asks for "recent sync" — roughly the last 3 months
 
 ```bash
 # Stop the bridge
-launchctl bootout gui/$UID/com.whatsapp-bridge    # or however you manage it
+launchctl bootout gui/$UID/com.whatsapp-mcp.bridge    # or however you manage it
 
 # Back up, then remove the auth session (keeps messages.db intact)
 cp whatsapp-bridge/store/whatsapp.db{,.bak}
@@ -545,7 +614,9 @@ are documented in [docs/RELEASING.md](docs/RELEASING.md).
 - **QR Code Not Displaying**: Restart the bridge. Check terminal QR code support.
 - **Device Limit Reached**: Remove a linked device from WhatsApp Settings > Linked Devices.
 - **No Messages Loading**: Initial sync can take several minutes for large chat histories.
-- **Out of Sync**: Delete `whatsapp-bridge/store/*.db` files and re-authenticate.
+- **Out of Sync**: Back up `whatsapp-bridge/store`, then move
+  `whatsapp-bridge/store/whatsapp.db` aside and re-authenticate. Keep
+  `messages.db` unless you intentionally want to discard local message history.
 - **Bridge returns 401 Unauthorized**: Restart the bridge so it creates
   `whatsapp-bridge/store/.bridge-token`, then restart the MCP server. If the MCP
   server cannot read that file, set `WHATSAPP_BRIDGE_TOKEN` to the same value in
@@ -556,6 +627,44 @@ are documented in [docs/RELEASING.md](docs/RELEASING.md).
 - **Bridge returns 403 Forbidden for media_path**: Move the file into
   `~/.local/share/whatsapp-mcp/outbox` or add its absolute parent directory to
   `WHATSAPP_MEDIA_ROOTS`.
+
+### App State / LTHash Conflicts
+
+Some WhatsApp account state is managed by whatsmeow in
+`whatsapp-bridge/store/whatsapp.db`. If the bridge reports errors like:
+
+```text
+SendAppState failed: server returned error updating app state (regular_low):
+<error code="409" text="conflict"/>
+failed to verify patch v12345: mismatching LTHash
+```
+
+then WhatsApp's app-state patch chain for the linked device is out of sync.
+This usually affects operations that write chat settings such as archive,
+mute, or pin state. Incoming and outgoing messages may still work because
+message storage lives separately in `messages.db`.
+
+Known manual resync attempts such as `FetchAppState(..., fullSync=true)` may
+still fail on this upstream app-state error class. The practical recovery path
+is to reset the whatsmeow session and re-pair:
+
+```bash
+# Stop the bridge first.
+launchctl bootout gui/$UID/com.whatsapp-mcp.bridge    # or however you manage it
+
+# Back up the whole runtime store.
+cp -a whatsapp-bridge/store whatsapp-bridge/store.bak.$(date +%Y%m%d%H%M%S)
+
+# Reset only the whatsmeow session/app-state DB.
+mv whatsapp-bridge/store/whatsapp.db whatsapp-bridge/store/whatsapp.db.lthash.bak
+
+# Restart the bridge and scan the new QR code.
+cd whatsapp-bridge
+./whatsapp-bridge    # or `go run .` during development
+```
+
+Do not remove `whatsapp-bridge/store/messages.db` for this recovery unless you
+also want to delete the local message archive.
 
 ### Windows
 
