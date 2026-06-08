@@ -218,7 +218,7 @@ When webhook forwarding is enabled, inbound reactions are also posted to `WEBHOO
 ```json
 {
   "eventType": "reaction",
-  "sender": "15551234567@s.whatsapp.net",
+  "sender": "15551234567",
   "chatJID": "15551234567@s.whatsapp.net",
   "isFromMe": true,
   "content": "👍",
