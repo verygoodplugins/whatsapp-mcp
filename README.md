@@ -3,7 +3,7 @@
 [![CI](https://github.com/verygoodplugins/whatsapp-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/verygoodplugins/whatsapp-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Go 1.24+](https://img.shields.io/badge/go-1.24+-00ADD8.svg)](https://go.dev/)
+[![Go 1.25+](https://img.shields.io/badge/go-1.25+-00ADD8.svg)](https://go.dev/)
 
 A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and send WhatsApp messages.
 
@@ -31,7 +31,7 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 
 ### Prerequisites
 
-- Go 1.24+
+- Go 1.25+
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) package manager
 - Claude Desktop or Cursor
