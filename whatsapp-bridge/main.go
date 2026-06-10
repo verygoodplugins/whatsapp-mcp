@@ -17,6 +17,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -39,6 +40,59 @@ import (
 // Whether to forward messages sent by self via webhook.
 // Defaults to true. Override with env FORWARD_SELF=false.
 var forwardSelfMessages = getEnvBool("FORWARD_SELF", true)
+
+// qrState holds the most recent device-pairing QR code emitted by whatsmeow
+// while the bridge is unlinked. It is exposed (loopback + bearer-token only)
+// via GET /api/qr so a local UI can render a scannable code, and cleared once
+// pairing succeeds. The code is short-lived and rotates ~every 20s, mirroring
+// what is printed to the terminal.
+var qrState struct {
+	mu      sync.Mutex
+	code    string
+	updated int64
+}
+
+func setQRCode(code string) {
+	qrState.mu.Lock()
+	qrState.code = code
+	qrState.updated = time.Now().Unix()
+	qrState.mu.Unlock()
+}
+
+func getQRCode() (string, int64) {
+	qrState.mu.Lock()
+	defer qrState.mu.Unlock()
+	return qrState.code, qrState.updated
+}
+
+func clearQRCode() {
+	qrState.mu.Lock()
+	qrState.code = ""
+	qrState.mu.Unlock()
+}
+
+// archiveMessagesDB moves the current messages.db (and its WAL/SHM sidecars)
+// into store/archive/ with a timestamped name, so a freshly linked number does
+// not inherit the previous number's chat history. The bridge recreates an empty
+// messages.db on its next start. Call only after MessageStore.Close().
+func archiveMessagesDB() error {
+	archiveDir := "store/archive"
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
+		return err
+	}
+	ts := time.Now().Unix()
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		src := "store/messages.db" + suffix
+		if _, err := os.Stat(src); err != nil {
+			continue // sidecar may not exist
+		}
+		dst := fmt.Sprintf("%s/messages-%d.db%s", archiveDir, ts, suffix)
+		if err := os.Rename(src, dst); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // CLI flag: request a full history sync at pair time.
 // Only meaningful on a fresh pair (whatsapp.db deleted). See the usage block
@@ -2130,6 +2184,66 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 		}
 	}))
 
+	// Report link state and the current pairing QR code (if any). Only useful
+	// while the bridge is unlinked; `code` is empty once paired. Loopback +
+	// token gated like every other endpoint.
+	mux.HandleFunc("/api/qr", auth(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		loggedIn := client.Store != nil && client.Store.ID != nil
+		code, updated := getQRCode()
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"logged_in": loggedIn,
+			"connected": client.IsConnected(),
+			"code":      code,
+			"updated":   updated,
+		})
+	}))
+
+	// Unlink the current device, then exit so the launchd KeepAlive supervisor
+	// restarts the bridge with no session — which makes it emit a fresh pairing
+	// QR (served via /api/qr). This is how a different number gets linked.
+	// POST only; destructive. With ?archive=true the current chat history
+	// (messages.db) is moved into store/archive/ so the next number starts
+	// clean instead of mixing histories.
+	mux.HandleFunc("/api/logout", auth(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "POST required"})
+			return
+		}
+		archive := r.URL.Query().Get("archive") == "true"
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "Unlinking device; the bridge will restart and present a new QR code.",
+		})
+		// Flush the response before tearing down.
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if err := client.Logout(ctx); err != nil {
+				fmt.Printf("⚠ Logout error (continuing to restart anyway): %v\n", err)
+			}
+			clearQRCode()
+			if archive {
+				// Close the DB so the files are quiescent before moving them,
+				// then archive history; the restart recreates a fresh store.
+				_ = messageStore.Close()
+				if err := archiveMessagesDB(); err != nil {
+					fmt.Printf("⚠ Could not archive messages.db: %v\n", err)
+				} else {
+					fmt.Println("✓ Archived chat history; new session will start clean.")
+				}
+			}
+			time.Sleep(700 * time.Millisecond)
+			// Exit cleanly; launchd (KeepAlive=true) restarts us unlinked.
+			os.Exit(0)
+		}()
+	}))
+
 	return mux
 }
 
@@ -2361,6 +2475,35 @@ func main() {
 		}
 	})
 
+	// Start the REST API server up front (it runs in its own goroutine) so that
+	// /api/qr, /api/health, etc. are reachable WHILE the bridge is unlinked and
+	// presenting a pairing QR — not only after login. The dashboard depends on
+	// this to render the QR code during (re)pairing.
+	port := 8080
+	if p := os.Getenv("WHATSAPP_BRIDGE_PORT"); p != "" {
+		if v, perr := strconv.Atoi(p); perr == nil && v >= 1 && v <= 65535 {
+			port = v
+		} else {
+			logger.Errorf("Invalid WHATSAPP_BRIDGE_PORT=%q, must be 1-65535", p)
+			return
+		}
+	}
+	bridgeToken, freshToken, tokErr := loadOrCreateBridgeToken()
+	if tokErr != nil {
+		logger.Errorf("Failed to initialize bridge token: %v", tokErr)
+		return
+	}
+	if freshToken {
+		printTokenBanner(bridgeToken, port)
+	}
+	allowedMediaRoots, mrErr := resolveMediaRoots()
+	if mrErr != nil {
+		logger.Errorf("Failed to resolve media roots: %v", mrErr)
+		return
+	}
+	logger.Infof("Allowed media roots: %v", allowedMediaRoots)
+	startRESTServer(client, messageStore, port, bridgeToken, allowedMediaRoots)
+
 	// Create channel to track connection success
 	connected := make(chan bool, 1)
 
@@ -2373,63 +2516,57 @@ func main() {
 
 		// Connect to WhatsApp
 		if client.Store.ID == nil {
-			// No ID stored, this is a new client, need to pair with phone
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer cancel()
-
-			qrChan, connErr := client.GetQRChannel(ctx)
-			if connErr != nil {
-				logger.Errorf("Failed to get QR channel: %v", connErr)
-				if attempt == maxRetries {
-					return
+			// Unlinked: present fresh pairing QR codes CONTINUOUSLY until the
+			// user scans one. whatsmeow's QR channel only emits a finite batch
+			// (~100s) before timing out, so when a batch expires we transparently
+			// request a new channel instead of giving up. Each code is published
+			// to /api/qr so the dashboard can render and auto-refresh it.
+			paired := false
+			for !paired {
+				qrCtx, qrCancel := context.WithCancel(context.Background())
+				qrChan, qrErr := client.GetQRChannel(qrCtx)
+				if qrErr != nil {
+					logger.Errorf("Failed to get QR channel: %v", qrErr)
+					qrCancel()
+					time.Sleep(3 * time.Second)
+					continue
 				}
-				time.Sleep(5 * time.Second)
-				continue
-			}
-
-			connErr = client.Connect()
-			if connErr != nil {
-				logger.Errorf("Failed to connect (attempt %d): %v", attempt, connErr)
-				if attempt == maxRetries {
-					return
+				if cErr := client.Connect(); cErr != nil {
+					logger.Errorf("Failed to connect for pairing: %v", cErr)
+					qrCancel()
+					time.Sleep(3 * time.Second)
+					continue
 				}
-				time.Sleep(5 * time.Second)
-				continue
-			}
 
-			// Print QR code for pairing with phone
-			qrCodeShown := false
-			for evt := range qrChan {
-				if evt.Event == "code" {
-					if !qrCodeShown {
-						fmt.Println("\nScan this QR code with your WhatsApp app:")
-						qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-						fmt.Println("\nWaiting for QR code scan...")
-						qrCodeShown = true
+				qrCodeShown := false
+				for evt := range qrChan {
+					if evt.Event == "code" {
+						setQRCode(evt.Code)
+						if !qrCodeShown {
+							fmt.Println("\nScan this QR code with your WhatsApp app (or use the dashboard):")
+							qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+							fmt.Println("\nWaiting for QR code scan...")
+							qrCodeShown = true
+						}
+					} else if evt.Event == "success" {
+						clearQRCode()
+						paired = true
+						break
+					} else if evt.Event == "timeout" {
+						logger.Infof("QR batch expired; generating a fresh QR code...")
+						break
 					}
-				} else if evt.Event == "success" {
-					connected <- true
-					break
-				} else if evt.Event == "timeout" {
-					logger.Warnf("QR code timed out")
-					break
+				}
+				qrCancel()
+				if !paired {
+					// Reset connection state before requesting a new QR channel.
+					clearQRCode()
+					client.Disconnect()
+					time.Sleep(1 * time.Second)
 				}
 			}
-
-			// Wait for connection with timeout
-			select {
-			case <-connected:
-				fmt.Println("\nSuccessfully connected and authenticated!")
-				goto connectionSuccess
-			case <-ctx.Done():
-				logger.Errorf("Timeout waiting for QR code scan (attempt %d)", attempt)
-				client.Disconnect()
-				if attempt == maxRetries {
-					return
-				}
-				time.Sleep(10 * time.Second)
-				continue
-			}
+			fmt.Println("\nSuccessfully connected and authenticated!")
+			goto connectionSuccess
 		} else {
 			// Already logged in, just connect
 			connErr = client.Connect()
@@ -2456,40 +2593,10 @@ connectionSuccess:
 		return
 	}
 
-	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
+	fmt.Println("\n✓ Connected to WhatsApp!")
 
-	// Start REST API server
-	port := 8080
-	if p := os.Getenv("WHATSAPP_BRIDGE_PORT"); p != "" {
-		v, err := strconv.Atoi(p)
-		if err != nil || v < 1 || v > 65535 {
-			logger.Errorf("Invalid WHATSAPP_BRIDGE_PORT=%q, must be 1-65535", p)
-			return
-		}
-		port = v
-	}
-
-	// Load (or generate on first run) the bearer token used to authenticate
-	// REST callers, and resolve the allow-listed roots that media_path values
-	// in /api/send must live under. See auth.go and media_path.go for the
-	// rationale.
-	bridgeToken, fresh, tokErr := loadOrCreateBridgeToken()
-	if tokErr != nil {
-		logger.Errorf("Failed to initialize bridge token: %v", tokErr)
-		return
-	}
-	if fresh {
-		printTokenBanner(bridgeToken, port)
-	}
-
-	allowedMediaRoots, mrErr := resolveMediaRoots()
-	if mrErr != nil {
-		logger.Errorf("Failed to resolve media roots: %v", mrErr)
-		return
-	}
-	logger.Infof("Allowed media roots: %v", allowedMediaRoots)
-
-	startRESTServer(client, messageStore, port, bridgeToken, allowedMediaRoots)
+	// The REST API server was already started before pairing (so /api/qr is
+	// reachable while unlinked); nothing to start here.
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)
