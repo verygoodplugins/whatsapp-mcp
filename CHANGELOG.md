@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/verygoodplugins/whatsapp-mcp/compare/v0.3.0...v0.4.0) (2026-06-11)
+
+
+### Features
+
+* **bridge:** forward reaction webhook events ([#129](https://github.com/verygoodplugins/whatsapp-mcp/issues/129)) ([22a03c2](https://github.com/verygoodplugins/whatsapp-mcp/commit/22a03c271ce4f1db19a4c9ff0a46a5770ce7cdff))
+* capture inbound reactions and add /api/react endpoint ([#108](https://github.com/verygoodplugins/whatsapp-mcp/issues/108)) ([a7dc663](https://github.com/verygoodplugins/whatsapp-mcp/commit/a7dc663f1ef9c0bb8044304abaf6f1dbee857059)), closes [#106](https://github.com/verygoodplugins/whatsapp-mcp/issues/106)
+
+
+### Bug Fixes
+
+* **bridge:** bump whatsmeow so WhatsApp accepts new device pairing ([#128](https://github.com/verygoodplugins/whatsapp-mcp/issues/128)) ([715be9d](https://github.com/verygoodplugins/whatsapp-mcp/commit/715be9dcfea2edd6d65b59565aa88123a7876353))
+* **bridge:** keep CDN auth tokens in directPath to fix 403 media downloads ([#132](https://github.com/verygoodplugins/whatsapp-mcp/issues/132)) ([1b67982](https://github.com/verygoodplugins/whatsapp-mcp/commit/1b67982c3a4e51dfbb802802a859739a76039706))
+* escape monitor-script shell vars in launchd installer ([#130](https://github.com/verygoodplugins/whatsapp-mcp/issues/130)) ([c758f5f](https://github.com/verygoodplugins/whatsapp-mcp/commit/c758f5f3d88a591e116a6af49f41f07965a9c450))
+
+
+### Documentation
+
+* make AGENTS.md canonical and fix FORWARD_SELF default ([#127](https://github.com/verygoodplugins/whatsapp-mcp/issues/127)) ([8c92254](https://github.com/verygoodplugins/whatsapp-mcp/commit/8c9225450ffd06f6db44445fa3007a4796d04839))
+* **readme:** add demo video overview ([#122](https://github.com/verygoodplugins/whatsapp-mcp/issues/122)) ([11672a3](https://github.com/verygoodplugins/whatsapp-mcp/commit/11672a3407f57060cf5efa720a90c9d165fee462))
+
 ## [0.3.0](https://github.com/verygoodplugins/whatsapp-mcp/compare/v0.2.1...v0.3.0) (2026-06-03)
 
 
