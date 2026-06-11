@@ -104,6 +104,10 @@ A failing blocking job is a hard block — fix it or explain in the PR why it's 
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox` | Path-list of directories allowed for outbound media files |
 | `WEBHOOK_URL` | `http://localhost:8769/whatsapp/webhook` | Outgoing webhook for incoming messages (empty = disabled) |
 | `FORWARD_SELF` | `true` | Whether self-sent messages are forwarded (`getEnvBool` default; set `FORWARD_SELF=false` to disable) |
+| `WHATSAPP_BRIDGE_AUTOSTART` | `true` | MCP server starts the bridge when it isn't running (`whatsapp-mcp-server/bridge.py`) |
+| `WHATSAPP_BRIDGE_BINARY` | `whatsapp-bridge/whatsapp-bridge` | Bridge binary launched by auto-start (built via `go build` on demand) |
+| `WHATSAPP_BRIDGE_DIR` | `whatsapp-bridge/` | Working directory for the auto-started bridge (where `store/` lives) |
+| `WHATSAPP_BRIDGE_STARTUP_TIMEOUT` | `60` | Seconds auto-start waits for the bridge REST API to come online |
 
 When adding a new env var: document it here, in `README.md`, and in `.env.example`.
 

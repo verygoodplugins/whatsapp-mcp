@@ -4,6 +4,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+import bridge
 from whatsapp import (
     download_media as whatsapp_download_media,
 )
@@ -420,6 +421,10 @@ if __name__ == "__main__":
     # Register signal handlers for clean shutdown
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
+
+    # Bring the Go bridge up in the background so message sync resumes and
+    # bridge-backed tools work without a manually started bridge.
+    bridge.start_background_autostart()
 
     # Initialize and run the server
     mcp.run(transport="stdio")
