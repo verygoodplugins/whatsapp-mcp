@@ -337,6 +337,32 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
 | `WHATSAPP_BRIDGE_TOKEN` | generated in `whatsapp-bridge/store/.bridge-token` | Bearer token required for bridge REST calls |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files |
+| `WHATSAPP_MCP_TRANSPORT` | `stdio`                                | MCP transport to serve clients: `stdio`, `http`, or `sse` |
+| `WHATSAPP_MCP_HOST`    | `127.0.0.1`                              | Bind address for the `http`/`sse` transports |
+| `WHATSAPP_MCP_PORT`    | `8000`                                   | Port for the `http`/`sse` transports |
+
+### MCP transport (stdio vs http/sse)
+
+By default the server speaks MCP over **stdio**, which is what local clients
+like Claude Desktop and Cursor launch. To serve the server over the network
+instead, set `WHATSAPP_MCP_TRANSPORT`:
+
+```bash
+# Streamable HTTP (current spec transport for remote MCP), endpoint at /mcp
+WHATSAPP_MCP_TRANSPORT=http WHATSAPP_MCP_PORT=8000 uv run main.py
+
+# Legacy Server-Sent Events transport (deprecated in the MCP spec), endpoint at /sse
+WHATSAPP_MCP_TRANSPORT=sse uv run main.py
+```
+
+`http` is an alias for the spec's `streamable-http` transport and is the
+recommended choice for remote connections; `sse` is kept for older clients.
+
+> **Security:** `WHATSAPP_MCP_HOST` defaults to `127.0.0.1`, so the HTTP/SSE
+> server is reachable only from the local machine. The server has no built-in
+> authentication, and the underlying bridge can read and send WhatsApp messages
+> on your account. Only bind to a non-loopback address (e.g. `0.0.0.0`) if you
+> place an authenticating reverse proxy or tunnel in front of it.
 
 ### Bridge authentication and media paths
 
