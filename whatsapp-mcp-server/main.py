@@ -1,9 +1,11 @@
+import os
 import signal
 import sys
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from mcp_config import resolve_host, resolve_port, resolve_transport
 from whatsapp import (
     download_media as whatsapp_download_media,
 )
@@ -50,7 +52,8 @@ from whatsapp import (
     send_reaction as whatsapp_send_reaction,
 )
 
-# Initialize FastMCP server
+# Initialize FastMCP server. Env-var handling is deferred to the __main__ block
+# so importing this module never parses env vars or exits the process.
 mcp = FastMCP("whatsapp")
 
 
@@ -421,5 +424,20 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
 
-    # Initialize and run the server
-    mcp.run(transport="stdio")
+    # Resolve the transport first: host/port are only used (and validated) for the
+    # network transports, so a bad WHATSAPP_MCP_PORT can't break a stdio launch.
+    # The localhost default keeps a remote server unreachable until explicitly opened up.
+    try:
+        transport = resolve_transport(os.getenv("WHATSAPP_MCP_TRANSPORT"))
+        if transport != "stdio":
+            mcp.settings.host = resolve_host(os.getenv("WHATSAPP_MCP_HOST"))
+            mcp.settings.port = resolve_port(os.getenv("WHATSAPP_MCP_PORT"))
+            # stdout is reserved for the protocol on stdio; log startup to stderr.
+            print(
+                f"WhatsApp MCP server listening on {mcp.settings.host}:{mcp.settings.port} via {transport}",
+                file=sys.stderr,
+            )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+
+    mcp.run(transport=transport)
