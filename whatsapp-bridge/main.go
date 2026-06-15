@@ -75,7 +75,8 @@ type Message struct {
 
 // Database handler for storing message history
 type MessageStore struct {
-	db *sql.DB
+	db   *sql.DB
+	waDB *sql.DB // whatsmeow's DB for contact name resolution fallback
 }
 
 type ChatEphemeralSettings struct {
@@ -148,12 +149,18 @@ func NewMessageStore() (*MessageStore, error) {
 		return nil, fmt.Errorf("failed to create tables: %v", err)
 	}
 
+	// Open whatsmeow's database for contact name resolution fallback
+	waDB, err := sql.Open("sqlite3", "file:store/whatsapp.db")
+	if err != nil {
+		fmt.Printf("Warning: could not open whatsmeow database for contact resolution: %v\n", err)
+	}
+
 	if err := ensureMessageStoreSchema(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 
-	return &MessageStore{db: db}, nil
+	return &MessageStore{db: db, waDB: waDB}, nil
 }
 
 func ensureMessageStoreSchema(db *sql.DB) error {
@@ -545,8 +552,11 @@ func (store *MessageStore) MigrateLegacyLIDSendersToPhones(whatsappDBPath string
 	return nil
 }
 
-// Close the database connection
+// Close the database connections
 func (store *MessageStore) Close() error {
+	if store.waDB != nil {
+		store.waDB.Close()
+	}
 	return store.db.Close()
 }
 
@@ -2611,16 +2621,31 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		// This is an individual contact
 		logger.Infof("Getting name for contact: %s", chatJID)
 
-		// Just use contact info (full name)
+		// Use contact info (full name)
 		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
 		if err == nil && contact.FullName != "" {
 			name = contact.FullName
-		} else if sender != "" {
-			// Fallback to sender
-			name = sender
 		} else {
-			// Last fallback to JID
-			name = jid.User
+			// Fallback: query local whatsmeow_contacts table
+			if messageStore.waDB != nil {
+				var localName string
+				waErr := messageStore.waDB.QueryRow(
+					"SELECT COALESCE(NULLIF(full_name,''), NULLIF(push_name,''), NULLIF(first_name,'')) FROM whatsmeow_contacts WHERE their_jid = ?",
+					chatJID,
+				).Scan(&localName)
+				if waErr == nil && localName != "" {
+					logger.Infof("Using local contact name for %s: %s", chatJID, localName)
+					name = localName
+				}
+			}
+
+			if name == "" {
+				if sender != "" {
+					name = sender
+				} else {
+					name = jid.User
+				}
+			}
 		}
 
 		logger.Infof("Using contact name: %s", name)
