@@ -46,6 +46,9 @@ var forwardSelfMessages = getEnvBool("FORWARD_SELF", true)
 var fullHistoryPairFlag = flag.Bool("full-history-pair", false,
 	"Request full history at pair time (only effective when re-pairing; no-op for existing sessions)")
 
+var pairPhoneFlag = flag.String("pair-phone", "",
+	"Phone number (country+number, no +) to pair via 8-digit code instead of QR. Only used on fresh pair.")
+
 // getEnvBool reads a boolean env var with a default.
 // Accepts: 1/true/yes/on and 0/false/no/off (case-insensitive)
 func getEnvBool(key string, def bool) bool {
@@ -821,6 +824,48 @@ func extractTextContent(msg *waProto.Message) string {
 	}
 	if doc := msg.GetDocumentMessage(); doc != nil {
 		return doc.GetCaption()
+	}
+
+	// WhatsApp Business templates arrive hydrated — body lives in
+	// HydratedTemplate.HydratedContentText. Without this branch every
+	// template-sent message (e.g. WABA Connect Hrms_* notifications)
+	// returns "" and the row is silently skipped at the storage gate.
+	if tpl := msg.GetTemplateMessage(); tpl != nil {
+		if h := tpl.GetHydratedTemplate(); h != nil {
+			if t := h.GetHydratedContentText(); t != "" {
+				return t
+			}
+		}
+	}
+	if btn := msg.GetButtonsMessage(); btn != nil {
+		if t := btn.GetContentText(); t != "" {
+			return t
+		}
+		if t := btn.GetText(); t != "" {
+			return t
+		}
+	}
+	if ia := msg.GetInteractiveMessage(); ia != nil {
+		if body := ia.GetBody(); body != nil {
+			if t := body.GetText(); t != "" {
+				return t
+			}
+		}
+	}
+	if lst := msg.GetListMessage(); lst != nil {
+		if t := lst.GetDescription(); t != "" {
+			return t
+		}
+	}
+	if br := msg.GetButtonsResponseMessage(); br != nil {
+		if t := br.GetSelectedDisplayText(); t != "" {
+			return t
+		}
+	}
+	if tbr := msg.GetTemplateButtonReplyMessage(); tbr != nil {
+		if t := tbr.GetSelectedDisplayText(); t != "" {
+			return t
+		}
 	}
 
 	return ""
@@ -2395,6 +2440,17 @@ func main() {
 			}
 
 			// Print QR code for pairing with phone
+			// --pair-phone flag → request 8-digit code from server instead of QR
+			if *pairPhoneFlag != "" {
+				logger.Infof("Requesting pair-phone code for %s ...", *pairPhoneFlag)
+				code, perr := client.PairPhone(ctx, *pairPhoneFlag, true, whatsmeow.PairClientChrome, "Chrome (Linux)")
+				if perr != nil {
+					logger.Errorf("PairPhone failed: %v", perr)
+				} else {
+					fmt.Printf("\n=== PAIR-PHONE CODE: %s ===\n", code)
+					fmt.Println("On phone: Settings -> Linked Devices -> Link a device -> Link with phone number -> enter code above.")
+				}
+			}
 			qrCodeShown := false
 			for evt := range qrChan {
 				if evt.Event == "code" {
