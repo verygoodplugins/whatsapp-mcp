@@ -21,9 +21,13 @@ WHATSMEOW_DB_PATH = os.getenv(
 )
 WHATSAPP_API_BASE_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:8080/api")
 
-_BRIDGE_TOKEN_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store", ".bridge-token"
-)
+# .bridge-token is written by the Go bridge into the same store directory as
+# whatsapp.db. Deriving it from WHATSMEOW_DB_PATH keeps it correct when the data
+# directory is relocated (e.g. a Docker volume): a path resolved relative to
+# __file__ then points outside the volume, so the MCP gets HTTP 401 from the
+# bridge on every download_media / send_* call. Falls back to the default layout
+# when WHATSMEOW_DB_PATH is unset, so non-containerized installs are unaffected.
+_BRIDGE_TOKEN_PATH = os.path.join(os.path.dirname(WHATSMEOW_DB_PATH), ".bridge-token")
 
 
 def _read_bridge_token() -> str | None:
