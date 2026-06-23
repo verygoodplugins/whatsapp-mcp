@@ -1363,3 +1363,45 @@ func TestCallChatJID_Precedence(t *testing.T) {
 		})
 	}
 }
+
+// TestExtractDirectPathFromURL_PreservesSignedQuery guards the media-download
+// 403 regression: whatsmeow's Download rebuilds the CDN request from directPath
+// and adds no auth header, so the oh/oe (+ccb,_nc_sid) signed query params MUST
+// survive extraction. Stripping the query (the old behavior) 403'd every image
+// and document download. (2026-06-23.)
+func TestExtractDirectPathFromURL_PreservesSignedQuery(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			name: "document url keeps oh/oe signature",
+			url:  "https://mmg.whatsapp.net/v/t62.7119-24/664491745_1869338370689236_4053721585674233390_n.enc?ccb=11-4&oh=01_Q5Aa4wEbuL947tSduFPEd0BXlrvfmw23J5ozmiTqTfvaEr4Hzg&oe=6A6246CF&_nc_sid=5e03e0&mms3=true",
+			want: "/v/t62.7119-24/664491745_1869338370689236_4053721585674233390_n.enc?ccb=11-4&oh=01_Q5Aa4wEbuL947tSduFPEd0BXlrvfmw23J5ozmiTqTfvaEr4Hzg&oe=6A6246CF&_nc_sid=5e03e0&mms3=true",
+		},
+		{
+			name: "cdn host with signed query",
+			url:  "https://media-ber1-1.cdn.whatsapp.net/v/t62.7118-24/img_n.enc?ccb=11-4&oh=AAA&oe=BBB&_nc_sid=CCC",
+			want: "/v/t62.7118-24/img_n.enc?ccb=11-4&oh=AAA&oe=BBB&_nc_sid=CCC",
+		},
+		{
+			name: "no query is fine",
+			url:  "https://mmg.whatsapp.net/v/t62.7118-24/plain_n.enc",
+			want: "/v/t62.7118-24/plain_n.enc",
+		},
+		{
+			name: "unparseable url returned as-is",
+			url:  "not-a-whatsapp-url",
+			want: "not-a-whatsapp-url",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractDirectPathFromURL(tc.url)
+			if got != tc.want {
+				t.Errorf("extractDirectPathFromURL(%q) = %q, want %q", tc.url, got, tc.want)
+			}
+		})
+	}
+}

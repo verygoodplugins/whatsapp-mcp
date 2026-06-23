@@ -825,6 +825,28 @@ func classifyMediaPath(mediaPath string) (whatsmeow.MediaType, string, string) {
 		return whatsmeow.MediaVideo, "video/avi", "video"
 	case "mov":
 		return whatsmeow.MediaVideo, "video/quicktime", "video"
+	case "pdf":
+		return whatsmeow.MediaDocument, "application/pdf", "document"
+	case "docx":
+		return whatsmeow.MediaDocument, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "document"
+	case "doc":
+		return whatsmeow.MediaDocument, "application/msword", "document"
+	case "xlsx":
+		return whatsmeow.MediaDocument, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "document"
+	case "xls":
+		return whatsmeow.MediaDocument, "application/vnd.ms-excel", "document"
+	case "pptx":
+		return whatsmeow.MediaDocument, "application/vnd.openxmlformats-officedocument.presentationml.presentation", "document"
+	case "ppt":
+		return whatsmeow.MediaDocument, "application/vnd.ms-powerpoint", "document"
+	case "txt":
+		return whatsmeow.MediaDocument, "text/plain", "document"
+	case "md":
+		return whatsmeow.MediaDocument, "text/markdown", "document"
+	case "csv":
+		return whatsmeow.MediaDocument, "text/csv", "document"
+	case "zip":
+		return whatsmeow.MediaDocument, "application/zip", "document"
 	default:
 		return whatsmeow.MediaDocument, "application/octet-stream", "document"
 	}
@@ -1678,22 +1700,26 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 
 // Extract direct path from a WhatsApp media URL
 func extractDirectPathFromURL(url string) string {
-	// The direct path is typically in the URL, we need to extract it
-	// Example URL: https://mmg.whatsapp.net/v/t62.7118-24/13812002_698058036224062_3424455886509161511_n.enc?ccb=11-4&oh=...
-
-	// Find the path part after the domain
+	// WhatsApp media URLs are <scheme>://<host><directPath>, where directPath is
+	// the path PLUS its signed query string, e.g.:
+	//   https://mmg.whatsapp.net/v/t62.7118-24/...n.enc?ccb=11-4&oh=...&oe=...&_nc_sid=...
+	//
+	// whatsmeow's Download builds the actual CDN request as
+	//   https://<freshMediaConnHost><directPath>&hash=...&mms-type=...&__wa-mms=
+	// (download.go DownloadMediaWithPath). It prepends a fresh media-conn host but
+	// adds NO auth header — the ONLY authorization is the oh/oe (+ccb,_nc_sid)
+	// query params carried inside directPath. So directPath MUST retain its query;
+	// stripping it (the old behavior) yields a 403 on every download — images AND
+	// documents alike. The host portion is discarded by whatsmeow anyway, so what
+	// we return here is exactly the protobuf DirectPath field: path + signed query.
 	parts := strings.SplitN(url, ".net/", 2)
 	if len(parts) < 2 {
 		return url // Return original URL if parsing fails
 	}
 
-	pathPart := parts[1]
-
-	// Remove query parameters
-	pathPart = strings.SplitN(pathPart, "?", 2)[0]
-
-	// Create proper direct path format
-	return "/" + pathPart
+	// Keep the full remainder (path + ?ccb=...&oh=...&oe=...&_nc_sid=...). Do NOT
+	// split off the query — those params are the CDN auth signature.
+	return "/" + parts[1]
 }
 
 // Start a REST API server to expose the WhatsApp client functionality
