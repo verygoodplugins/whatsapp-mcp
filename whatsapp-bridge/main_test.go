@@ -2188,3 +2188,25 @@ func TestExtractQuotedMessageInfo_NoContextInfo(t *testing.T) {
 		})
 	}
 }
+
+func TestNewMessageStoreCreatesMessagesChatJIDIndex(t *testing.T) {
+	// NewMessageStore writes to a relative "store/" directory, so run in a
+	// temporary working directory that is cleaned up automatically.
+	t.Chdir(t.TempDir())
+
+	ms, err := NewMessageStore()
+	if err != nil {
+		t.Fatalf("NewMessageStore() failed: %v", err)
+	}
+	defer func() { _ = ms.Close() }()
+
+	var count int
+	if err := ms.db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_messages_chat_jid';`,
+	).Scan(&count); err != nil {
+		t.Fatalf("failed to query index metadata: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected idx_messages_chat_jid to exist, found %d", count)
+	}
+}
