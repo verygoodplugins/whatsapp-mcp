@@ -1044,6 +1044,69 @@ func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 			want: "invoice attached",
 		},
 		{
+			name: "TemplateMessage with hydrated content text",
+			msg: &waProto.Message{
+				TemplateMessage: &waProto.TemplateMessage{
+					HydratedTemplate: &waProto.TemplateMessage_HydratedFourRowTemplate{
+						HydratedContentText: proto.String("template body"),
+					},
+				},
+			},
+			want: "template body",
+		},
+		{
+			name: "ButtonsMessage with content text",
+			msg: &waProto.Message{
+				ButtonsMessage: &waProto.ButtonsMessage{ContentText: proto.String("buttons body")},
+			},
+			want: "buttons body",
+		},
+		{
+			name: "ButtonsMessage with header text",
+			msg: &waProto.Message{
+				ButtonsMessage: &waProto.ButtonsMessage{
+					Header: &waProto.ButtonsMessage_Text{Text: "buttons fallback"},
+				},
+			},
+			want: "buttons fallback",
+		},
+		{
+			name: "InteractiveMessage with body text",
+			msg: &waProto.Message{
+				InteractiveMessage: &waProto.InteractiveMessage{
+					Body: &waProto.InteractiveMessage_Body{Text: proto.String("interactive body")},
+				},
+			},
+			want: "interactive body",
+		},
+		{
+			name: "ListMessage with description",
+			msg: &waProto.Message{
+				ListMessage: &waProto.ListMessage{Description: proto.String("choose an option")},
+			},
+			want: "choose an option",
+		},
+		{
+			name: "ButtonsResponseMessage with selected display text",
+			msg: &waProto.Message{
+				ButtonsResponseMessage: &waProto.ButtonsResponseMessage{
+					Response: &waProto.ButtonsResponseMessage_SelectedDisplayText{
+						SelectedDisplayText: "selected display",
+					},
+				},
+			},
+			want: "selected display",
+		},
+		{
+			name: "TemplateButtonReplyMessage with selected display text",
+			msg: &waProto.Message{
+				TemplateButtonReplyMessage: &waProto.TemplateButtonReplyMessage{
+					SelectedDisplayText: proto.String("template selection"),
+				},
+			},
+			want: "template selection",
+		},
+		{
 			name: "ImageMessage without caption returns empty",
 			msg:  &waProto.Message{ImageMessage: &waProto.ImageMessage{}},
 			want: "",

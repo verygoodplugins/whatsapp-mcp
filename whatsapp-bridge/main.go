@@ -46,9 +46,6 @@ var forwardSelfMessages = getEnvBool("FORWARD_SELF", true)
 var fullHistoryPairFlag = flag.Bool("full-history-pair", false,
 	"Request full history at pair time (only effective when re-pairing; no-op for existing sessions)")
 
-var pairPhoneFlag = flag.String("pair-phone", "",
-	"Phone number (country+number, no +) to pair via 8-digit code instead of QR. Only used on fresh pair.")
-
 // getEnvBool reads a boolean env var with a default.
 // Accepts: 1/true/yes/on and 0/false/no/off (case-insensitive)
 func getEnvBool(key string, def bool) bool {
@@ -2440,17 +2437,6 @@ func main() {
 			}
 
 			// Print QR code for pairing with phone
-			// --pair-phone flag → request 8-digit code from server instead of QR
-			if *pairPhoneFlag != "" {
-				logger.Infof("Requesting pair-phone code for %s ...", *pairPhoneFlag)
-				code, perr := client.PairPhone(ctx, *pairPhoneFlag, true, whatsmeow.PairClientChrome, "Chrome (Linux)")
-				if perr != nil {
-					logger.Errorf("PairPhone failed: %v", perr)
-				} else {
-					fmt.Printf("\n=== PAIR-PHONE CODE: %s ===\n", code)
-					fmt.Println("On phone: Settings -> Linked Devices -> Link a device -> Link with phone number -> enter code above.")
-				}
-			}
 			qrCodeShown := false
 			for evt := range qrChan {
 				if evt.Event == "code" {
