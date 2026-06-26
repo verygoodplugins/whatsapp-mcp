@@ -22,6 +22,7 @@ var webhookClient = &http.Client{Timeout: 30 * time.Second}
 
 // WebhookPayload represents the data sent to the webhook
 type WebhookPayload struct {
+	EventType       string `json:"eventType,omitempty"`
 	Sender          string `json:"sender"`
 	Content         string `json:"content"`
 	ChatJID         string `json:"chatJID"`
@@ -35,6 +36,10 @@ type WebhookPayload struct {
 	MimeType      string `json:"mimeType,omitempty"`
 	MediaFilename string `json:"mediaFilename,omitempty"`
 	MediaBase64   string `json:"mediaBase64,omitempty"`
+	// Reaction fields - populated when EventType is "reaction".
+	ReactionToMessageID string  `json:"reactionToMessageId,omitempty"`
+	ReactionEmoji       *string `json:"reactionEmoji,omitempty"`
+	ReactionRemoved     *bool   `json:"reactionRemoved,omitempty"`
 }
 
 // sendWebhookPayload marshals and POSTs a WebhookPayload to the configured webhook URL.
@@ -113,6 +118,23 @@ func SendWebhookWithMedia(
 		MimeType:        mimeType,
 		MediaFilename:   mediaFilename,
 		MediaBase64:     mediaBase64,
+	})
+}
+
+// SendReactionWebhook sends a typed reaction event to the webhook endpoint.
+func SendReactionWebhook(sender, chatJID string, isFromMe bool, messageID, reactionToMessageID, emoji string) {
+	removed := emoji == ""
+	sendWebhookPayload(WebhookPayload{
+		EventType:           "reaction",
+		Sender:              sender,
+		Content:             emoji,
+		ChatJID:             chatJID,
+		IsFromMe:            isFromMe,
+		MessageID:           messageID,
+		MediaType:           "reaction",
+		ReactionToMessageID: reactionToMessageID,
+		ReactionEmoji:       &emoji,
+		ReactionRemoved:     &removed,
 	})
 }
 

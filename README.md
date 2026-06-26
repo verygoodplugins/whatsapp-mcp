@@ -3,11 +3,19 @@
 [![CI](https://github.com/verygoodplugins/whatsapp-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/verygoodplugins/whatsapp-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Go 1.24+](https://img.shields.io/badge/go-1.24+-00ADD8.svg)](https://go.dev/)
+[![Go 1.25+](https://img.shields.io/badge/go-1.25+-00ADD8.svg)](https://go.dev/)
 
 A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and send WhatsApp messages.
 
 > Originally created by [Luke Harries](https://github.com/lharries/whatsapp-mcp). Maintained by [Very Good Plugins](https://verygoodplugins.com/?utm_source=github).
+
+<p align="center">
+  <a href="https://github.com/user-attachments/assets/9475af1d-2369-4315-9ccc-823dba2c5c32"><strong>Watch the WhatsApp MCP demo video</strong></a>
+</p>
+
+<p align="center">
+  <sub>Product demo generated with Remotion using simulated data.</sub>
+</p>
 
 ## Features
 
@@ -23,7 +31,7 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 
 ### Prerequisites
 
-- Go 1.24+
+- Go 1.25+
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) package manager
 - Claude Desktop or Cursor
@@ -191,6 +199,42 @@ Inbound quoted replies are stored automatically. The `quoted_message_id` field i
 - "Message the team group saying 'Meeting at 3pm'"
 - "Reply to that message saying 'Sounds good'"
 
+#### `send_reaction`
+
+Send (or remove) an emoji reaction to a message.
+
+**Parameters:**
+
+- `recipient` (required): Chat JID the message belongs to (phone JID or group JID)
+- `message_id` (required): ID of the message to react to
+- `emoji` (required): Reaction emoji (e.g. `"👍"`). Pass an empty string `""` to remove an existing reaction.
+- `from_me` (optional, default `false`): Whether the original message was sent by the current user
+- `sender_jid` (optional): Full JID of the original message sender — required for group messages when `from_me` is `false` so the correct WhatsApp key is built
+
+Inbound reactions received from others are stored automatically as messages with `media_type = "reaction"`. The `reaction_to_message_id` field in each reaction message indicates which message was reacted to.
+
+When webhook forwarding is enabled, inbound reactions are also posted to `WEBHOOK_URL` as typed events. Reaction removals use an empty `content`/`reactionEmoji` and `reactionRemoved: true`.
+
+```json
+{
+  "eventType": "reaction",
+  "sender": "15551234567",
+  "chatJID": "15551234567@s.whatsapp.net",
+  "isFromMe": true,
+  "content": "👍",
+  "messageId": "reaction-stanza-id",
+  "mediaType": "reaction",
+  "reactionToMessageId": "target-message-id",
+  "reactionEmoji": "👍",
+  "reactionRemoved": false
+}
+```
+
+**Natural Language Examples:**
+
+- "React to that message with a thumbs up"
+- "Remove my reaction from the last message in the group chat"
+
 #### `send_file`
 
 Send a media file (image, video, document).
@@ -287,7 +331,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | ---------------------- | ---------------------------------------- | -------------------------------------------- |
 | `WHATSAPP_BRIDGE_PORT` | `8080`                                   | Port for Go bridge REST API                  |
 | `WEBHOOK_URL`          | `http://localhost:8769/whatsapp/webhook` | Webhook for incoming messages                |
-| `FORWARD_SELF`         | `false`                                  | Forward messages sent by self                |
+| `FORWARD_SELF`         | `true`                                   | Forward messages sent by self                |
 | `WHATSAPP_DB_PATH`     | `../whatsapp-bridge/store/messages.db`   | Path to SQLite database                      |
 | `WHATSMEOW_DB_PATH`    | `../whatsapp-bridge/store/whatsapp.db`   | whatsmeow DB used for LID ↔ phone resolution |
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
@@ -484,6 +528,7 @@ flowchart LR
         direction TB
         SEND["/api/send"]
         DOWN["/api/download"]
+        REACT["/api/react"]
         TYPE["/api/typing"]
         HEALTH["/api/health"]
     end

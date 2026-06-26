@@ -32,6 +32,8 @@ class TestMessageConversion:
         assert result["chat_jid"] == "1234567890@s.whatsapp.net"
         assert result["chat_name"] == "John Doe"
         assert result["media_type"] is None
+        assert result["quoted_message_id"] is None
+        assert result["reaction_to_message_id"] is None
 
     def test_msg_to_dict_from_me(self):
         """Test message from self shows 'Me' as sender."""
@@ -64,6 +66,43 @@ class TestMessageConversion:
         result = msg_to_dict(msg, include_sender_name=False)
 
         assert result["media_type"] == "image"
+        assert result["reaction_to_message_id"] is None
+
+    def test_msg_to_dict_reaction_exposes_reaction_to_message_id(self):
+        """Reaction messages expose the reacted-to message ID via reaction_to_message_id."""
+        msg = Message(
+            id="react-001",
+            timestamp=datetime(2024, 1, 15, 10, 30, 0),
+            sender="1234567890@s.whatsapp.net",
+            content="👍",
+            is_from_me=False,
+            chat_jid="1234567890@s.whatsapp.net",
+            media_type="reaction",
+            filename="3AABCDEF01234567",  # reacted-to message ID stored in filename
+        )
+
+        result = msg_to_dict(msg, include_sender_name=False)
+
+        assert result["reaction_to_message_id"] == "3AABCDEF01234567"
+        assert result["quoted_message_id"] is None
+        assert result["media_type"] == "reaction"
+
+    def test_msg_to_dict_non_reaction_has_null_reaction_to_message_id(self):
+        """Non-reaction messages always have reaction_to_message_id as None."""
+        msg = Message(
+            id="msg-img",
+            timestamp=datetime(2024, 1, 15, 10, 30, 0),
+            sender="1234567890@s.whatsapp.net",
+            content="",
+            is_from_me=False,
+            chat_jid="1234567890@s.whatsapp.net",
+            media_type="image",
+            filename="photo.jpg",
+        )
+
+        result = msg_to_dict(msg, include_sender_name=False)
+
+        assert result["reaction_to_message_id"] is None
 
     def test_msg_to_dict_quoted_message_id_present(self):
         """Quoted-reply messages expose quoted_message_id."""
@@ -80,6 +119,7 @@ class TestMessageConversion:
         result = msg_to_dict(msg, include_sender_name=False)
 
         assert result["quoted_message_id"] == "3AORIGINAL0000001"
+        assert result["reaction_to_message_id"] is None
 
     def test_msg_to_dict_quoted_message_id_absent(self):
         """Plain messages have quoted_message_id as None."""
@@ -95,6 +135,26 @@ class TestMessageConversion:
         result = msg_to_dict(msg, include_sender_name=False)
 
         assert result["quoted_message_id"] is None
+        assert result["reaction_to_message_id"] is None
+
+    def test_msg_to_dict_reaction_preserves_quoted_message_id(self):
+        """Reaction messages still include quoted_message_id if the row has one."""
+        msg = Message(
+            id="react-quote-001",
+            timestamp=datetime(2024, 1, 15, 10, 30, 0),
+            sender="1234567890@s.whatsapp.net",
+            content="👍",
+            is_from_me=False,
+            chat_jid="1234567890@s.whatsapp.net",
+            media_type="reaction",
+            filename="3AREACTED0000001",
+            quoted_message_id="3AORIGINAL0000001",
+        )
+
+        result = msg_to_dict(msg, include_sender_name=False)
+
+        assert result["reaction_to_message_id"] == "3AREACTED0000001"
+        assert result["quoted_message_id"] == "3AORIGINAL0000001"
 
 
 class TestChatConversion:
