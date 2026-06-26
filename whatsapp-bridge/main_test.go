@@ -131,6 +131,45 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 	return &MessageStore{db: db}
 }
 
+func TestOpenWhatsmeowContactsDB_MissingPathDoesNotCreateDB(t *testing.T) {
+	missingPath := filepath.Join(t.TempDir(), "whatsapp.db")
+
+	db, err := openWhatsmeowContactsDB(missingPath)
+	if err != nil {
+		t.Fatalf("openWhatsmeowContactsDB returned error: %v", err)
+	}
+	if db != nil {
+		t.Fatalf("expected missing DB to return nil handle")
+	}
+	if _, err := os.Stat(missingPath); !os.IsNotExist(err) {
+		t.Fatalf("expected missing DB path to stay absent, stat error: %v", err)
+	}
+}
+
+func TestOpenWhatsmeowContactsDB_ReadOnly(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "whatsapp.db")
+	seedDB, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("open seed db: %v", err)
+	}
+	if _, err := seedDB.Exec("CREATE TABLE marker (id INTEGER)"); err != nil {
+		t.Fatalf("create marker table: %v", err)
+	}
+	if err := seedDB.Close(); err != nil {
+		t.Fatalf("close seed db: %v", err)
+	}
+
+	db, err := openWhatsmeowContactsDB(dbPath)
+	if err != nil {
+		t.Fatalf("openWhatsmeowContactsDB returned error: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if _, err := db.Exec("INSERT INTO marker (id) VALUES (1)"); err == nil {
+		t.Fatalf("expected read-only whatsmeow DB handle to reject writes")
+	}
+}
+
 func TestExtractDirectPathFromURL(t *testing.T) {
 	cases := []struct {
 		name                   string
@@ -496,6 +535,63 @@ var (
 	phoneLID = types.JID{User: "185366493536339", Server: types.HiddenUserServer}
 	phonePN  = types.JID{User: "11234567890", Server: types.DefaultUserServer}
 )
+
+func TestGetChatName_LocalContactFallbackScopesToActiveAccount(t *testing.T) {
+	activeSelf := types.JID{User: "15550000001", Server: types.DefaultUserServer}
+	otherSelf := types.JID{User: "15550000002", Server: types.DefaultUserServer}
+
+	client := newTestClientWithSelf(&mockLIDStore{}, activeSelf)
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	waDB, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open whatsmeow db: %v", err)
+	}
+	t.Cleanup(func() { _ = waDB.Close() })
+	ms.waDB = waDB
+
+	if _, err := waDB.Exec(`
+		CREATE TABLE whatsmeow_contacts (
+			our_jid TEXT,
+			their_jid TEXT,
+			first_name TEXT,
+			full_name TEXT,
+			push_name TEXT,
+			business_name TEXT,
+			PRIMARY KEY (our_jid, their_jid)
+		);
+		INSERT INTO whatsmeow_contacts (our_jid, their_jid, first_name, full_name, push_name, business_name)
+			VALUES (?, ?, 'Wrong', 'Wrong Account', '', '');
+		INSERT INTO whatsmeow_contacts (our_jid, their_jid, first_name, full_name, push_name, business_name)
+			VALUES (?, ?, 'Active First', '', 'Active Push', 'Active Business');
+	`, otherSelf.String(), phonePN.String(), activeSelf.String(), phonePN.String()); err != nil {
+		t.Fatalf("seed whatsmeow contacts: %v", err)
+	}
+
+	got := GetChatName(client, ms, phonePN, phonePN.String(), nil, "Sender Fallback", logger)
+	if got != "Active Push" {
+		t.Fatalf("GetChatName() = %q, want active account contact name", got)
+	}
+}
+
+func TestGetChatName_LocalContactFallbackMissingTableFallsBack(t *testing.T) {
+	client := newTestClientWithSelf(&mockLIDStore{}, selfPhone)
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	waDB, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open whatsmeow db: %v", err)
+	}
+	t.Cleanup(func() { _ = waDB.Close() })
+	ms.waDB = waDB
+
+	got := GetChatName(client, ms, phonePN, phonePN.String(), nil, "Sender Fallback", logger)
+	if got != "Sender Fallback" {
+		t.Fatalf("GetChatName() = %q, want sender fallback", got)
+	}
+}
 
 // --- Integration tests: handleMessage stores under correct JID ---
 
