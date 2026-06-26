@@ -11,19 +11,18 @@ import requests
 import audio
 
 # Configuration via environment variables with sensible defaults
+_DEFAULT_BRIDGE_STORE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store")
 MESSAGES_DB_PATH = os.getenv(
     "WHATSAPP_DB_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store", "messages.db"),
+    os.path.join(_DEFAULT_BRIDGE_STORE_DIR, "messages.db"),
 )
 WHATSMEOW_DB_PATH = os.getenv(
     "WHATSMEOW_DB_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store", "whatsapp.db"),
+    os.path.join(_DEFAULT_BRIDGE_STORE_DIR, "whatsapp.db"),
 )
 WHATSAPP_API_BASE_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:8080/api")
 
-_BRIDGE_TOKEN_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store", ".bridge-token"
-)
+_BRIDGE_TOKEN_PATH = os.path.join(os.path.dirname(WHATSMEOW_DB_PATH), ".bridge-token")
 
 
 def _read_bridge_token() -> str | None:

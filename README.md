@@ -335,7 +335,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_DB_PATH`     | `../whatsapp-bridge/store/messages.db`   | Path to SQLite database                      |
 | `WHATSMEOW_DB_PATH`    | `../whatsapp-bridge/store/whatsapp.db`   | whatsmeow DB used for LID ↔ phone resolution |
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
-| `WHATSAPP_BRIDGE_TOKEN` | generated in `whatsapp-bridge/store/.bridge-token` | Bearer token required for bridge REST calls |
+| `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token required for bridge REST calls |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_MCP_TRANSPORT` | `stdio`                                | MCP transport to serve clients: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST`    | `127.0.0.1`                              | Bind address for the `http`/`sse` transports |
@@ -371,10 +371,11 @@ accepts only exact loopback Host headers for its configured port. This protects
 the local REST API from other local processes and browser DNS-rebinding attacks.
 
 On first start, the bridge generates a 256-bit token, writes it to
-`whatsapp-bridge/store/.bridge-token` with owner-only permissions, and prints a
-setup banner. The MCP server reads `WHATSAPP_BRIDGE_TOKEN` first, then falls
-back to that token file. For split deployments, containers, or process managers
-that do not share the repository directory, set the same
+`.bridge-token` in the active bridge store directory with owner-only
+permissions, and prints a setup banner. The MCP server reads
+`WHATSAPP_BRIDGE_TOKEN` first, then falls back to `.bridge-token` in the same
+directory as `WHATSMEOW_DB_PATH`. For split deployments, containers, or process
+managers that do not share the store directory, set the same
 `WHATSAPP_BRIDGE_TOKEN` value for both the bridge and MCP server.
 
 Outbound `media_path` values are confined to `WHATSAPP_MEDIA_ROOTS`. The default
@@ -661,9 +662,9 @@ are documented in [docs/RELEASING.md](docs/RELEASING.md).
   `whatsapp-bridge/store/whatsapp.db` aside and re-authenticate. Keep
   `messages.db` unless you intentionally want to discard local message history.
 - **Bridge returns 401 Unauthorized**: Restart the bridge so it creates
-  `whatsapp-bridge/store/.bridge-token`, then restart the MCP server. If the MCP
-  server cannot read that file, set `WHATSAPP_BRIDGE_TOKEN` to the same value in
-  both environments.
+  `.bridge-token` next to `WHATSMEOW_DB_PATH`, then restart the MCP server. If
+  the MCP server cannot read that file, set `WHATSAPP_BRIDGE_TOKEN` to the same
+  value in both environments.
 - **Bridge returns 403 Forbidden for Host**: Use `WHATSAPP_API_URL` with
   `http://127.0.0.1:<port>/api`, `http://localhost:<port>/api`, or
   `http://[::1]:<port>/api`; custom hostnames and missing ports are rejected.

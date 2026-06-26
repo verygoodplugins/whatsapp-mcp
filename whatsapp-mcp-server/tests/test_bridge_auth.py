@@ -1,3 +1,5 @@
+import importlib
+
 import pytest
 
 import whatsapp
@@ -26,6 +28,22 @@ def test_bridge_headers_falls_back_to_token_file(monkeypatch, tmp_path):
     monkeypatch.setattr(whatsapp, "_BRIDGE_TOKEN_PATH", str(token_file))
 
     assert whatsapp._bridge_headers() == {"Authorization": "Bearer file-token"}
+
+
+def test_bridge_headers_reads_token_next_to_whatsmeow_db_path(monkeypatch, tmp_path):
+    store_dir = tmp_path / "store"
+    store_dir.mkdir()
+    (store_dir / ".bridge-token").write_text("volume-token\n", encoding="utf-8")
+
+    monkeypatch.delenv("WHATSAPP_BRIDGE_TOKEN", raising=False)
+    monkeypatch.setenv("WHATSMEOW_DB_PATH", str(store_dir / "whatsapp.db"))
+
+    try:
+        importlib.reload(whatsapp)
+        assert whatsapp._bridge_headers() == {"Authorization": "Bearer volume-token"}
+    finally:
+        monkeypatch.delenv("WHATSMEOW_DB_PATH", raising=False)
+        importlib.reload(whatsapp)
 
 
 def test_bridge_headers_prefers_env_over_token_file(monkeypatch, tmp_path):
