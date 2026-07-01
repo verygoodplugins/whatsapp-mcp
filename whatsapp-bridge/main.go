@@ -17,6 +17,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -1525,6 +1526,52 @@ func senderAltForMessage(client *whatsmeow.Client, info types.MessageInfo) types
 }
 
 // Handle regular incoming messages with media support
+// origMsgTime remembers the true send-time of messages that first arrived
+// undecryptable (e.g. after an offline gap, when our session lacked the sender
+// key). WhatsApp re-sends such messages after a retry receipt, but the re-sent
+// copy carries a fresh `t` (the resend time) rather than the original send time.
+// The first (undecryptable) delivery *does* carry the original `t`, so we cache
+// it here and reuse it when the decrypted retry finally lands — otherwise those
+// messages get stored with reconnect-time and corrupt recency ordering.
+var (
+	origMsgTimeMu sync.Mutex
+	origMsgTime   = make(map[string]time.Time)
+)
+
+// rememberOriginalTimestamp records the earliest timestamp seen for a message ID.
+// A resend's `t` is always >= the original, so the earliest is the true one.
+func rememberOriginalTimestamp(id string, ts time.Time) {
+	if id == "" || ts.IsZero() {
+		return
+	}
+	origMsgTimeMu.Lock()
+	defer origMsgTimeMu.Unlock()
+	if existing, ok := origMsgTime[id]; !ok || ts.Before(existing) {
+		origMsgTime[id] = ts
+	}
+	// Soft cap so a burst of never-retried undecryptable messages can't grow this
+	// map unbounded. Entries are normally consumed on successful decrypt.
+	if len(origMsgTime) > 5000 {
+		for k := range origMsgTime {
+			delete(origMsgTime, k)
+			if len(origMsgTime) <= 4000 {
+				break
+			}
+		}
+	}
+}
+
+// takeOriginalTimestamp returns and removes the cached original timestamp for id.
+func takeOriginalTimestamp(id string) (time.Time, bool) {
+	origMsgTimeMu.Lock()
+	defer origMsgTimeMu.Unlock()
+	ts, ok := origMsgTime[id]
+	if ok {
+		delete(origMsgTime, id)
+	}
+	return ts, ok
+}
+
 func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
 	// Resolve LID-based chats to phone-based JIDs so that incoming
 	// and outgoing messages land in the same chat entry.
@@ -1550,8 +1597,18 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}
 	}
 
+	// Recover the true send-time if this message first arrived undecryptable and is
+	// now landing via a retry-resend (whose stanza `t` is the resend time, not the
+	// original). See origMsgTime / rememberOriginalTimestamp.
+	msgTimestamp := msg.Info.Timestamp
+	if orig, ok := takeOriginalTimestamp(msg.Info.ID); ok && orig.Before(msgTimestamp) {
+		logger.Infof("Using original pre-retry timestamp for %s: %s (resend `t` was %s)",
+			msg.Info.ID, orig.Format(time.RFC3339), msgTimestamp.Format(time.RFC3339))
+		msgTimestamp = orig
+	}
+
 	// Update chat in database with the message timestamp (keeps last message time updated)
-	err := messageStore.StoreChat(chatJID, name, msg.Info.Timestamp)
+	err := messageStore.StoreChat(chatJID, name, msgTimestamp)
 	if err != nil {
 		logger.Warnf("Failed to store chat: %v", err)
 	}
@@ -1585,7 +1642,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			emoji := reaction.GetText()
 			if err := messageStore.StoreMessage(
 				msg.Info.ID, chatJID, sender, emoji,
-				msg.Info.Timestamp, msg.Info.IsFromMe,
+				msgTimestamp, msg.Info.IsFromMe,
 				"reaction", reactedToID, "", nil, nil, nil, 0, "",
 			); err != nil {
 				logger.Warnf("Failed to store reaction: %v", err)
@@ -1618,7 +1675,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		chatJID,
 		sender,
 		content,
-		msg.Info.Timestamp,
+		msgTimestamp,
 		msg.Info.IsFromMe,
 		mediaType,
 		filename,
@@ -2352,6 +2409,12 @@ func main() {
 		case *events.Message:
 			// Process regular messages
 			handleMessage(client, messageStore, v, logger)
+
+		case *events.UndecryptableMessage:
+			// The first (failed) delivery carries the original send-time. WhatsApp
+			// re-sends after our retry receipt, but that copy's `t` is the resend
+			// time — so stash the original now and reuse it in handleMessage.
+			rememberOriginalTimestamp(v.Info.ID, v.Info.Timestamp)
 
 		case *events.HistorySync:
 			// Process history sync events
