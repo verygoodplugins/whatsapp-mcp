@@ -142,10 +142,13 @@ def get_contact(
     if chat and chat.get("name"):
         display_name = chat["name"]
         resolved = display_name not in (jid, jid_user)
-    else:
+
+    if not resolved:
         # Fallback: best-effort sender-name resolution (may use fuzzy LIKE lookup).
-        display_name = whatsapp_get_sender_name(jid)
-        resolved = display_name not in (jid, jid_user, identifier)
+        fallback_name = whatsapp_get_sender_name(jid)
+        if fallback_name not in (jid, jid_user, identifier):
+            display_name = fallback_name
+            resolved = True
 
     return {
         "identifier": identifier,
