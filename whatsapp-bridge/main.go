@@ -2343,6 +2343,21 @@ func main() {
 		return
 	}
 
+	// Load (or generate on first run) the bearer token used to authenticate
+	// REST callers, and attach it to outbound webhook POSTs so the hub's
+	// fail-closed inbound-auth middleware accepts them (see auth.go and
+	// webhook.go). This MUST happen before the event handler below is
+	// registered: WhatsApp can deliver messages — including a burst of
+	// history-sync backlog — as soon as the connection succeeds, and any
+	// message handled before this assignment would go out with no bridge
+	// token attached.
+	bridgeToken, fresh, tokErr := loadOrCreateBridgeToken()
+	if tokErr != nil {
+		logger.Errorf("Failed to initialize bridge token: %v", tokErr)
+		return
+	}
+	webhookAuthToken = bridgeToken
+
 	// Channel to signal reconnection needs
 	reconnectChan := make(chan bool, 1)
 
@@ -2564,23 +2579,14 @@ connectionSuccess:
 		port = v
 	}
 
-	// Load (or generate on first run) the bearer token used to authenticate
-	// REST callers, and resolve the allow-listed roots that media_path values
-	// in /api/send must live under. See auth.go and media_path.go for the
-	// rationale.
-	bridgeToken, fresh, tokErr := loadOrCreateBridgeToken()
-	if tokErr != nil {
-		logger.Errorf("Failed to initialize bridge token: %v", tokErr)
-		return
-	}
+	// bridgeToken was already loaded above (before the event handler was
+	// registered); print the one-time setup banner now that port is known.
 	if fresh {
 		printTokenBanner(bridgeToken, port)
 	}
 
-	// Attach the same bridge token to outbound webhook POSTs so the hub's
-	// fail-closed inbound-auth middleware accepts them. See webhook.go.
-	webhookAuthToken = bridgeToken
-
+	// Resolve the allow-listed roots that media_path values in /api/send must
+	// live under. See media_path.go for the rationale.
 	allowedMediaRoots, mrErr := resolveMediaRoots()
 	if mrErr != nil {
 		logger.Errorf("Failed to resolve media roots: %v", mrErr)

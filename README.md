@@ -379,11 +379,16 @@ managers that do not share the store directory, set the same
 `WHATSAPP_BRIDGE_TOKEN` value for both the bridge and MCP server.
 
 The bridge also signs its **outbound** webhook POSTs (to `WEBHOOK_URL`) with this
-same token, sent as `Authorization: Bearer <token>`. The header is attached
+same token, sent as an `X-Bridge-Token: <token>` header — a dedicated header
+rather than `Authorization`, so it never collides with a receiver's own
+Authorization-based auth (e.g. HTTP Basic auth embedded in `WEBHOOK_URL` as
+`http://user:pass@host/...`, which `net/http` applies automatically as long as
+the bridge doesn't set its own `Authorization` header). The header is attached
 whenever a token is configured and omitted otherwise, so upgrades that predate a
 token rollout keep working. If your webhook receiver enforces the token, set its
 copy to this exact value: e.g. the AutoHub hub's `WHATSAPP_BRIDGE_TOKEN` must
-equal this bridge's token (from `.bridge-token` or its own env). The bridge always
+equal this bridge's token (from `.bridge-token` or its own env) — the hub
+accepts it via `X-Bridge-Token` or `Authorization: Bearer`. The bridge always
 sends the token it has; the hub rejects unauthenticated forwards only once its
 `WHATSAPP_BRIDGE_TOKEN` is set to the matching value.
 

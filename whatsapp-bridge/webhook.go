@@ -21,13 +21,17 @@ const maxMediaBase64Bytes = 10 * 1024 * 1024 // 10 MB
 var webhookClient = &http.Client{Timeout: 30 * time.Second}
 
 // webhookAuthToken is the shared bridge token attached as an
-// "Authorization: Bearer <token>" header to every outbound webhook POST. It is
-// populated once at startup from loadOrCreateBridgeToken() (see auth.go and
-// main.go) — the same token the bridge already requires on inbound /api/*
-// requests. When empty (no token configured yet) the header is omitted so
-// deployments that predate the token rollout keep working. The receiving hub
-// enforces this token on its inbound webhook route once its own
-// WHATSAPP_BRIDGE_TOKEN is set to the matching value (autohub PR #898).
+// "X-Bridge-Token" header to every outbound webhook POST. It is populated
+// once at startup from loadOrCreateBridgeToken() (see auth.go and main.go) —
+// the same token the bridge already requires on inbound /api/* requests.
+// When empty (no token configured yet) the header is omitted so deployments
+// that predate the token rollout keep working. The receiving hub enforces
+// this token on its inbound webhook route once its own WHATSAPP_BRIDGE_TOKEN
+// is set to the matching value (autohub PR #898), which accepts the token via
+// this header or "Authorization: Bearer". A dedicated header is used here
+// (rather than Authorization) so it never collides with a receiver's own
+// Authorization-based auth — e.g. HTTP Basic auth that net/http derives
+// automatically from credentials embedded in WEBHOOK_URL.
 var webhookAuthToken string
 
 // WebhookPayload represents the data sent to the webhook
@@ -72,10 +76,12 @@ func sendWebhookPayload(payload WebhookPayload) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	// Authenticate to the hub's fail-closed inbound webhook route with the
-	// shared bridge token. Only attach the header when a token is configured so
+	// shared bridge token, via a dedicated header so it can never clobber a
+	// receiver's own Authorization-based auth (see webhookAuthToken doc
+	// comment above). Only attach the header when a token is configured so
 	// nothing breaks before the hub's WHATSAPP_BRIDGE_TOKEN is rolled out.
 	if webhookAuthToken != "" {
-		req.Header.Set("Authorization", "Bearer "+webhookAuthToken)
+		req.Header.Set("X-Bridge-Token", webhookAuthToken)
 	}
 
 	resp, err := webhookClient.Do(req)

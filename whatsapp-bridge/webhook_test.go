@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 )
 
@@ -16,15 +18,18 @@ func setWebhookAuthToken(t *testing.T, token string) {
 	t.Cleanup(func() { webhookAuthToken = prev })
 }
 
-// TestSendWebhookAttachesBearerToken verifies that outbound webhook POSTs carry
-// the shared bridge token as an "Authorization: Bearer <token>" header so the
-// hub's fail-closed inbound-auth middleware (autohub PR #898) accepts them.
-func TestSendWebhookAttachesBearerToken(t *testing.T) {
+// TestSendWebhookAttachesBridgeTokenHeader verifies that outbound webhook POSTs
+// carry the shared bridge token as an "X-Bridge-Token" header so the hub's
+// fail-closed inbound-auth middleware (autohub PR #898) accepts them. The token
+// travels on a dedicated header, not Authorization, so it never collides with a
+// receiver's own Authorization-based auth (see
+// TestSendWebhookPreservesURLBasicAuth).
+func TestSendWebhookAttachesBridgeTokenHeader(t *testing.T) {
 	const token = "test-bridge-token-1234567890abcdef"
 
-	var gotAuth, gotContentType string
+	var gotToken, gotContentType string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
+		gotToken = r.Header.Get("X-Bridge-Token")
 		gotContentType = r.Header.Get("Content-Type")
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.WriteHeader(http.StatusOK)
@@ -36,23 +41,23 @@ func TestSendWebhookAttachesBearerToken(t *testing.T) {
 
 	SendWebhook("123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false, "", "", "")
 
-	if want := "Bearer " + token; gotAuth != want {
-		t.Fatalf("Authorization header = %q, want %q", gotAuth, want)
+	if gotToken != token {
+		t.Fatalf("X-Bridge-Token header = %q, want %q", gotToken, token)
 	}
 	if gotContentType != "application/json" {
 		t.Fatalf("Content-Type header = %q, want application/json", gotContentType)
 	}
 }
 
-// TestSendWebhookOmitsBearerWhenNoToken verifies that when no bridge token is
-// configured the webhook still fires WITHOUT an Authorization header, so
-// deployments that predate the token rollout keep working.
-func TestSendWebhookOmitsBearerWhenNoToken(t *testing.T) {
-	var gotAuth string
+// TestSendWebhookOmitsBridgeTokenHeaderWhenNoToken verifies that when no bridge
+// token is configured the webhook still fires WITHOUT an X-Bridge-Token header,
+// so deployments that predate the token rollout keep working.
+func TestSendWebhookOmitsBridgeTokenHeaderWhenNoToken(t *testing.T) {
+	var gotToken string
 	var received bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		received = true
-		gotAuth = r.Header.Get("Authorization")
+		gotToken = r.Header.Get("X-Bridge-Token")
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -65,7 +70,47 @@ func TestSendWebhookOmitsBearerWhenNoToken(t *testing.T) {
 	if !received {
 		t.Fatal("webhook was not delivered")
 	}
-	if gotAuth != "" {
-		t.Fatalf("expected no Authorization header, got %q", gotAuth)
+	if gotToken != "" {
+		t.Fatalf("expected no X-Bridge-Token header, got %q", gotToken)
+	}
+}
+
+// TestSendWebhookPreservesURLBasicAuth is a regression test for a Codex review
+// finding on PR #153: net/http automatically derives an "Authorization: Basic"
+// header from credentials embedded in the webhook URL (http://user:pass@host/...)
+// whenever the outgoing request's Authorization header is otherwise unset. An
+// earlier version of this fix sent the bridge token via Authorization, which
+// silently clobbered that behavior for any receiver relying on URL userinfo.
+// Sending the token as X-Bridge-Token instead must leave Authorization
+// untouched so Go's built-in URL-credential handling keeps working.
+func TestSendWebhookPreservesURLBasicAuth(t *testing.T) {
+	const user, pass = "hookuser", "hookpass"
+	const token = "test-bridge-token-1234567890abcdef"
+
+	var gotAuth, gotToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotToken = r.Header.Get("X-Bridge-Token")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("failed to parse test server URL: %v", err)
+	}
+	u.User = url.UserPassword(user, pass)
+
+	t.Setenv("WEBHOOK_URL", u.String())
+	setWebhookAuthToken(t, token)
+
+	SendWebhook("123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false, "", "", "")
+
+	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
+	if gotAuth != wantAuth {
+		t.Fatalf("Authorization header = %q, want %q (URL basic auth must survive)", gotAuth, wantAuth)
+	}
+	if gotToken != token {
+		t.Fatalf("X-Bridge-Token header = %q, want %q", gotToken, token)
 	}
 }
