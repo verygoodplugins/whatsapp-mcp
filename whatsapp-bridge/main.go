@@ -2577,6 +2577,10 @@ connectionSuccess:
 		printTokenBanner(bridgeToken, port)
 	}
 
+	// Attach the same bridge token to outbound webhook POSTs so the hub's
+	// fail-closed inbound-auth middleware accepts them. See webhook.go.
+	webhookAuthToken = bridgeToken
+
 	allowedMediaRoots, mrErr := resolveMediaRoots()
 	if mrErr != nil {
 		logger.Errorf("Failed to resolve media roots: %v", mrErr)

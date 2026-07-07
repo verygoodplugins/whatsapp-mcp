@@ -335,7 +335,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_DB_PATH`     | `../whatsapp-bridge/store/messages.db`   | Path to SQLite database                      |
 | `WHATSMEOW_DB_PATH`    | `../whatsapp-bridge/store/whatsapp.db`   | whatsmeow DB used for LID ↔ phone resolution |
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
-| `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token required for bridge REST calls |
+| `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token for bridge REST calls; also signed onto outbound webhook POSTs |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_MCP_TRANSPORT` | `stdio`                                | MCP transport to serve clients: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST`    | `127.0.0.1`                              | Bind address for the `http`/`sse` transports |
@@ -377,6 +377,15 @@ permissions, and prints a setup banner. The MCP server reads
 directory as `WHATSMEOW_DB_PATH`. For split deployments, containers, or process
 managers that do not share the store directory, set the same
 `WHATSAPP_BRIDGE_TOKEN` value for both the bridge and MCP server.
+
+The bridge also signs its **outbound** webhook POSTs (to `WEBHOOK_URL`) with this
+same token, sent as `Authorization: Bearer <token>`. The header is attached
+whenever a token is configured and omitted otherwise, so upgrades that predate a
+token rollout keep working. If your webhook receiver enforces the token, set its
+copy to this exact value: e.g. the AutoHub hub's `WHATSAPP_BRIDGE_TOKEN` must
+equal this bridge's token (from `.bridge-token` or its own env). The bridge always
+sends the token it has; the hub rejects unauthenticated forwards only once its
+`WHATSAPP_BRIDGE_TOKEN` is set to the matching value.
 
 Outbound `media_path` values are confined to `WHATSAPP_MEDIA_ROOTS`. The default
 outbox is `~/.local/share/whatsapp-mcp/outbox`, created on bridge startup. Move
