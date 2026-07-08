@@ -17,8 +17,16 @@ const maxMediaBase64Bytes = 10 * 1024 * 1024 // 10 MB
 
 // webhookClient is used for all outbound webhook POSTs. The 30-second timeout
 // prevents a slow or unreachable endpoint from blocking message handling
-// indefinitely.
-var webhookClient = &http.Client{Timeout: 30 * time.Second}
+// indefinitely. Redirects are never followed: WEBHOOK_URL is a single
+// operator-configured endpoint, not a browsable URL, and following a 3xx
+// would forward X-Bridge-Token to whatever host the redirect names — Go only
+// strips Authorization/Cookie on cross-origin redirects, not custom headers.
+var webhookClient = &http.Client{
+	Timeout: 30 * time.Second,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
 
 // webhookAuthToken is the shared bridge token attached as an
 // "X-Bridge-Token" header to every outbound webhook POST. It is populated
@@ -33,6 +41,13 @@ var webhookClient = &http.Client{Timeout: 30 * time.Second}
 // Authorization-based auth — e.g. HTTP Basic auth that net/http derives
 // automatically from credentials embedded in WEBHOOK_URL.
 var webhookAuthToken string
+
+// defaultWebhookURL is used when WEBHOOK_URL is not set. It is a var (not a
+// const) so tests can point it at a local test server. It must never receive
+// the bridge token: unlike an operator-configured WEBHOOK_URL, nothing has
+// vetted this address, so any other local process that happens to bind this
+// port could otherwise capture the token just by being reachable.
+var defaultWebhookURL = "http://localhost:8769/whatsapp/webhook"
 
 // WebhookPayload represents the data sent to the webhook
 type WebhookPayload struct {
@@ -59,8 +74,9 @@ type WebhookPayload struct {
 // sendWebhookPayload marshals and POSTs a WebhookPayload to the configured webhook URL.
 func sendWebhookPayload(payload WebhookPayload) {
 	webhookURL := os.Getenv("WEBHOOK_URL")
-	if webhookURL == "" {
-		webhookURL = "http://localhost:8769/whatsapp/webhook"
+	explicitlyConfigured := webhookURL != ""
+	if !explicitlyConfigured {
+		webhookURL = defaultWebhookURL
 	}
 
 	jsonData, err := json.Marshal(payload)
@@ -78,9 +94,11 @@ func sendWebhookPayload(payload WebhookPayload) {
 	// Authenticate to the hub's fail-closed inbound webhook route with the
 	// shared bridge token, via a dedicated header so it can never clobber a
 	// receiver's own Authorization-based auth (see webhookAuthToken doc
-	// comment above). Only attach the header when a token is configured so
-	// nothing breaks before the hub's WHATSAPP_BRIDGE_TOKEN is rolled out.
-	if webhookAuthToken != "" {
+	// comment above). Only attach it when BOTH a token is configured AND
+	// WEBHOOK_URL was explicitly set by the operator — the bridge token also
+	// authorizes /api/* calls like sending messages, and the implicit local
+	// default is not a destination anyone vetted, so it must never receive it.
+	if webhookAuthToken != "" && explicitlyConfigured {
 		req.Header.Set("X-Bridge-Token", webhookAuthToken)
 	}
 
