@@ -10,12 +10,12 @@ import (
 	"math"
 	"math/rand"
 	"mime"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -2228,17 +2228,19 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 	return mux
 }
 
-func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []string) {
+// startRESTServer serves on a listener that main already bound (see
+// bindBridgePort). Binding is not done here: by this point the WhatsApp session
+// is live, so discovering a port clash now would be too late to back out of it
+// without having already evicted a running bridge.
+func startRESTServer(listener net.Listener, client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []string) {
 	handler := newRESTMux(client, messageStore, port, token, allowedMediaRoots)
 
-	// Start the server with proper timeouts. Bind to loopback so the bridge is
-	// not reachable from the LAN; MCP clients talk to it over localhost.
-	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
-	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
+	// The listener is already bound to loopback, so the bridge is not reachable
+	// from the LAN; MCP clients talk to it over localhost.
+	fmt.Printf("Starting REST API server on %s...\n", listener.Addr())
 
 	// Create server with timeouts for stability
 	server := &http.Server{
-		Addr:         serverAddr,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 60 * time.Second, // Longer for media downloads
 		IdleTimeout:  120 * time.Second,
@@ -2247,7 +2249,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 	// Run server in a goroutine so it doesn't block
 	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			fmt.Printf("REST API server error: %v\n", err)
 		}
 	}()
@@ -2274,6 +2276,30 @@ func main() {
 		logger.Errorf("Failed to create store directory: %v", err)
 		return
 	}
+
+	// Claim the store and the REST port before opening the session database or
+	// dialling WhatsApp. A second bridge that gets as far as connecting would
+	// evict the running one from the shared device session (see singleton.go),
+	// so a losing instance has to bail out before it can do any damage.
+	port, err := resolveBridgePort()
+	if err != nil {
+		logger.Errorf("%v", err)
+		os.Exit(1)
+	}
+
+	lockFile, err := acquireBridgeLock("store")
+	if err != nil {
+		logger.Errorf("%v", err)
+		os.Exit(1)
+	}
+	defer func() { _ = lockFile.Close() }()
+
+	restListener, err := bindBridgePort(port)
+	if err != nil {
+		logger.Errorf("%v", err)
+		os.Exit(1)
+	}
+	logger.Infof("Bridge lock acquired; REST API bound to 127.0.0.1:%d", port)
 
 	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
 	if err != nil {
@@ -2553,16 +2579,7 @@ connectionSuccess:
 
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
 
-	// Start REST API server
-	port := 8080
-	if p := os.Getenv("WHATSAPP_BRIDGE_PORT"); p != "" {
-		v, err := strconv.Atoi(p)
-		if err != nil || v < 1 || v > 65535 {
-			logger.Errorf("Invalid WHATSAPP_BRIDGE_PORT=%q, must be 1-65535", p)
-			return
-		}
-		port = v
-	}
+	// Start REST API server on the listener claimed before we connected.
 
 	// Load (or generate on first run) the bearer token used to authenticate
 	// REST callers, and resolve the allow-listed roots that media_path values
@@ -2584,7 +2601,7 @@ connectionSuccess:
 	}
 	logger.Infof("Allowed media roots: %v", allowedMediaRoots)
 
-	startRESTServer(client, messageStore, port, bridgeToken, allowedMediaRoots)
+	startRESTServer(restListener, client, messageStore, port, bridgeToken, allowedMediaRoots)
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)

@@ -118,6 +118,7 @@ When adding a new env var: document it here, in `README.md`, and in `.env.exampl
 4. **History sync** is controlled by the *primary* device (the phone). The bridge can request more (see the `--full-history-pair` flag), but the phone has the final word.
 5. **`messages.db` is the source of truth for the MCP server.** Don't make the MCP server dependent on the bridge being up for *read* operations.
 6. **Outgoing calls are not visible to linked devices.** Don't promise features that depend on them.
+7. **One bridge per store.** Two bridges sharing a store share one WhatsApp device session, and WhatsApp permits a single live connection per device: the second login evicts the first with `<stream:error><conflict type="replaced"/>`, the first reconnects and evicts the second, and neither reliably persists messages while they flap — all while `/api/health` on the surviving socket still reports `connected:true`, so the failure is silent. The bridge therefore takes an exclusive `flock` on `store/.bridge.lock` **and** binds the REST port *before* it connects, exiting if either is taken. Don't move that claim after `client.Connect()`: by then a duplicate has already evicted the running bridge.
 
 ## Where to make changes
 

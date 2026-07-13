@@ -672,6 +672,20 @@ are documented in [docs/RELEASING.md](docs/RELEASING.md).
   `~/.local/share/whatsapp-mcp/outbox` or add its absolute parent directory to
   `WHATSAPP_MEDIA_ROOTS`.
 
+### Bridge Won't Start
+
+- **`another whatsapp-bridge already holds store/.bridge.lock`**: A bridge is
+  already running against this store. Two bridges share one WhatsApp device
+  session and WhatsApp allows a single live connection per device, so they would
+  take turns evicting each other and message sync would stop — the bridge
+  refuses to start rather than let that happen. Stop the running bridge first
+  (the message names its PID), or point the new one at a different store.
+- **`cannot bind REST API to 127.0.0.1:<port> (port already in use?)`**: Another
+  process holds the REST port. Free it, or set `WHATSAPP_BRIDGE_PORT` to a free
+  port — and set `WHATSAPP_API_URL` to the matching
+  `http://localhost:<port>/api` for the MCP server, or it will keep calling the
+  old one.
+
 ### App State / LTHash Conflicts
 
 Some WhatsApp account state is managed by whatsmeow in
