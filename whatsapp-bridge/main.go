@@ -46,6 +46,14 @@ var forwardSelfMessages = getEnvBool("FORWARD_SELF", true)
 var fullHistoryPairFlag = flag.Bool("full-history-pair", false,
 	"Request full history at pair time (only effective when re-pairing; no-op for existing sessions)")
 
+// CLI flag: pair using an 8-character phone linking code instead of a QR code.
+// Value is the full international phone number, digits only (country code +
+// number, no '+', spaces, or dashes), e.g. 5511987654321. Only effective on a
+// fresh pair (no existing whatsapp.db). On the phone: WhatsApp → Linked Devices
+// → Link a Device → "Link with phone number instead", then enter the code.
+var pairPhoneFlag = flag.String("pair-phone", "",
+	"Pair via phone linking code instead of QR. Value is your full international number, digits only (e.g. 5511987654321). Only effective on a fresh pair.")
+
 const whatsmeowDBPath = "store/whatsapp.db"
 
 // getEnvBool reads a boolean env var with a default.
@@ -2386,6 +2394,11 @@ func main() {
 	// Channel to signal reconnection needs
 	reconnectChan := make(chan bool, 1)
 
+	// Channel to track pairing/connection success. Declared before the event
+	// handler below so the *events.PairSuccess case can signal it (needed for
+	// the phone linking-code path, which has no QR channel to watch).
+	connected := make(chan bool, 1)
+
 	// Setup event handling for messages and history sync
 	client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
@@ -2446,6 +2459,17 @@ func main() {
 				logger.Infof("Call terminated: id=%s reason=%q", v.CallID, v.Reason)
 			}
 
+		case *events.PairSuccess:
+			// Fired when pairing completes — via QR scan or phone linking code.
+			// Signal the connect loop non-blockingly so the phone-pairing path
+			// (which has no QR channel to watch) can proceed, without risking a
+			// deadlock if the QR path already filled the buffered channel.
+			logger.Infof("✓ Pairing successful")
+			select {
+			case connected <- true:
+			default:
+			}
+
 		case *events.Connected:
 			logger.Infof("✓ Successfully connected to WhatsApp servers")
 
@@ -2496,9 +2520,6 @@ func main() {
 		}
 	})
 
-	// Create channel to track connection success
-	connected := make(chan bool, 1)
-
 	// Add connection retry logic
 	maxRetries := 3
 	var connErr error
@@ -2511,6 +2532,60 @@ func main() {
 			// No ID stored, this is a new client, need to pair with phone
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
+
+			// Phone linking-code pairing (no QR). Requires an active connection
+			// first, then PairPhone returns an 8-character code the user types
+			// on their phone under "Link with phone number instead". Success is
+			// delivered asynchronously via *events.PairSuccess (handled above),
+			// which signals the `connected` channel.
+			if *pairPhoneFlag != "" {
+				connErr = client.Connect()
+				if connErr != nil {
+					logger.Errorf("Failed to connect (attempt %d): %v", attempt, connErr)
+					if attempt == maxRetries {
+						return
+					}
+					time.Sleep(5 * time.Second)
+					continue
+				}
+
+				code, pairErr := client.PairPhone(ctx, *pairPhoneFlag, true, whatsmeow.PairClientChrome, "Chrome (WhatsApp MCP)")
+				if pairErr != nil {
+					logger.Errorf("Failed to request phone linking code (attempt %d): %v", attempt, pairErr)
+					client.Disconnect()
+					if attempt == maxRetries {
+						return
+					}
+					time.Sleep(5 * time.Second)
+					continue
+				}
+
+				fmt.Printf("\n"+
+					"════════════════════════════════════════════════════════════════════\n"+
+					"  LINK WITH PHONE NUMBER — enter this code on your phone\n"+
+					"════════════════════════════════════════════════════════════════════\n"+
+					"  Linking code:   %s\n"+
+					"  Phone number:   %s\n\n"+
+					"  On your phone: WhatsApp → Settings → Linked Devices →\n"+
+					"  Link a Device → \"Link with phone number instead\", then type the code.\n"+
+					"════════════════════════════════════════════════════════════════════\n\n",
+					code, *pairPhoneFlag)
+				fmt.Println("Waiting for phone linking code entry...")
+
+				select {
+				case <-connected:
+					fmt.Println("\nSuccessfully connected and authenticated!")
+					goto connectionSuccess
+				case <-ctx.Done():
+					logger.Errorf("Timeout waiting for phone linking code entry (attempt %d)", attempt)
+					client.Disconnect()
+					if attempt == maxRetries {
+						return
+					}
+					time.Sleep(10 * time.Second)
+					continue
+				}
+			}
 
 			qrChan, connErr := client.GetQRChannel(ctx)
 			if connErr != nil {
@@ -2543,7 +2618,10 @@ func main() {
 						qrCodeShown = true
 					}
 				} else if evt.Event == "success" {
-					connected <- true
+					select {
+					case connected <- true:
+					default:
+					}
 					break
 				} else if evt.Event == "timeout" {
 					logger.Warnf("QR code timed out")
