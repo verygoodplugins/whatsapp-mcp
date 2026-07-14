@@ -211,3 +211,42 @@ def test_send_message_without_quote_omits_quote_fields(monkeypatch):
     assert "quoted_message_id" not in payload
     assert "quoted_sender_jid" not in payload
     assert "quoted_content" not in payload
+
+
+def test_send_message_with_mentions_includes_mentions_field(monkeypatch):
+    """send_message passes the mentions list to /api/send."""
+    calls = []
+    monkeypatch.setenv("WHATSAPP_BRIDGE_TOKEN", "test-token")
+
+    def fake_post(url, json, headers=None):
+        calls.append({"url": url, "json": json})
+        return DummyResponse()
+
+    monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+
+    success, _ = whatsapp.send_message(
+        "123456789@g.us",
+        "thanks @12025551234!",
+        mentions=["12025551234"],
+    )
+
+    assert success is True
+    payload = calls[0]["json"]
+    assert payload["mentions"] == ["12025551234"]
+
+
+def test_send_message_without_mentions_omits_mentions_field(monkeypatch):
+    """send_message without mentions does not include the mentions field."""
+    calls = []
+    monkeypatch.setenv("WHATSAPP_BRIDGE_TOKEN", "test-token")
+
+    def fake_post(url, json, headers=None):
+        calls.append({"url": url, "json": json})
+        return DummyResponse()
+
+    monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+
+    whatsapp.send_message("12025551234@s.whatsapp.net", "Hello!")
+
+    payload = calls[0]["json"]
+    assert "mentions" not in payload

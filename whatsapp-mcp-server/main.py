@@ -307,6 +307,7 @@ def send_message(
     quoted_message_id: str = "",
     quoted_sender_jid: str = "",
     quoted_content: str = "",
+    mentions: list[str] | None = None,
 ) -> dict[str, Any]:
     """Send a WhatsApp message to a person or group. For group chats use the JID.
 
@@ -320,6 +321,10 @@ def send_message(
                            group replies so WhatsApp renders the correct attribution.
         quoted_content: Text content of the quoted message, used for the reply preview.
                         Only plain text is supported; media previews are not included.
+        mentions: Users to @-mention, as phone numbers with country code but no + (e.g.
+                  ["420601234567"]) or JIDs. For each entry the message text must contain
+                  a matching "@<number>" token (e.g. "hi @420601234567"), otherwise the
+                  mention won't render on recipients' devices. Only meaningful in groups.
 
     Returns:
         A dictionary containing success status and a status message
@@ -330,7 +335,7 @@ def send_message(
 
     # Call the whatsapp_send_message function with the unified recipient parameter
     success, status_message = whatsapp_send_message(
-        recipient, message, quoted_message_id, quoted_sender_jid, quoted_content
+        recipient, message, quoted_message_id, quoted_sender_jid, quoted_content, mentions
     )
     return {"success": success, "message": status_message}
 
