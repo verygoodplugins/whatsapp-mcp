@@ -676,6 +676,27 @@ are documented in [docs/RELEASING.md](docs/RELEASING.md).
 ### Authentication Issues
 
 - **QR Code Not Displaying**: Restart the bridge. Check terminal QR code support.
+- **Pairing fails with "Couldn't link device / check your connection"** (phone
+  shows a connection error even after scanning a fresh, non-expired QR code):
+  this is almost always an **outdated `whatsmeow`**. WhatsApp periodically forces
+  a web-client version bump and rejects the companion handshake once the pinned
+  version falls behind, and the phone surfaces that server-side rejection as a
+  generic connection error. Confirm the machine can reach WhatsApp first
+  (`curl -sS -o /dev/null -w '%{http_code}\n' https://web.whatsapp.com/` should
+  print `200`; also rule out VPN/proxy/app-firewall interference), then update
+  the bridge dependency and rebuild:
+
+  ```bash
+  cd whatsapp-bridge
+  go get go.mau.fi/whatsmeow@latest
+  go mod tidy
+  CGO_ENABLED=1 go build -o whatsapp-bridge .
+  ./whatsapp-bridge          # scan the fresh QR again
+  ```
+
+  A stale QR (each code rotates every ~20s) produces the *same* phone-side
+  message, so make sure the bridge is actively running and scan the code
+  currently on screen — not a screenshot or a code from an exited process.
 - **Device Limit Reached**: Remove a linked device from WhatsApp Settings > Linked Devices.
 - **No Messages Loading**: Initial sync can take several minutes for large chat histories.
 - **Out of Sync**: Back up `whatsapp-bridge/store`, then move
