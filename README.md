@@ -463,6 +463,24 @@ message DBs, media, and `.bridge-token`. Logs are left in
 | Flag                  | Default | Description                                                                                                                                                                                                                                                       |
 | --------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--full-history-pair` | `false` | Request full history at pair time. Only takes effect on a fresh pair (no existing `whatsapp.db`); no-op for already-paired sessions. The phone ultimately decides the actual history window sent — see [Requesting full history](#requesting-full-history) below. |
+| `--pair-phone`        | `""`    | Pair via an 8-character phone linking code instead of a QR code. Value is your full international number, digits only (country code + number, no `+`, spaces, or dashes), e.g. `5511987654321`. Only effective on a fresh pair (before `Store.ID` is set). See [Pairing without a QR code](#pairing-without-a-qr-code) below. |
+
+### Pairing without a QR code
+
+If you can't scan the QR code (headless server, camera issues, or a terminal
+that mangles the QR), pair with an 8-character linking code instead:
+
+```bash
+cd whatsapp-bridge
+./whatsapp-bridge --pair-phone 5511987654321   # your full international number, digits only
+```
+
+The bridge prints a code like `ABCD-1234`. On your phone: **WhatsApp → Settings
+→ Linked Devices → Link a Device → "Link with phone number instead"**, then type
+the code. Pairing completes over the same connection as QR pairing, so if a QR
+scan was failing because of an outdated `whatsmeow` (see
+[Troubleshooting](#authentication-issues)), update the dependency first — the
+linking code will fail the same way against a rejected client version.
 
 ### Requesting full history
 
@@ -676,6 +694,29 @@ are documented in [docs/RELEASING.md](docs/RELEASING.md).
 ### Authentication Issues
 
 - **QR Code Not Displaying**: Restart the bridge. Check terminal QR code support.
+- **Pairing fails with "Couldn't link device / check your connection"** (phone
+  shows a connection error even after scanning a fresh, non-expired QR code):
+  this is almost always an **outdated `whatsmeow`**. WhatsApp periodically forces
+  a web-client version bump and rejects the companion handshake once the pinned
+  version falls behind, and the phone surfaces that server-side rejection as a
+  generic connection error. Confirm the machine can reach WhatsApp first
+  (`curl -sS -o /dev/null -w '%{http_code}\n' https://web.whatsapp.com/` should
+  print `200`; also rule out VPN/proxy/app-firewall interference), then update
+  the bridge dependency and rebuild:
+
+  ```bash
+  cd whatsapp-bridge
+  go get go.mau.fi/whatsmeow@latest
+  go mod tidy
+  CGO_ENABLED=1 go build -o whatsapp-bridge .
+  ./whatsapp-bridge          # scan the fresh QR again
+  ```
+
+  A stale QR (each code rotates every ~20s) produces the *same* phone-side
+  message, so make sure the bridge is actively running and scan the code
+  currently on screen — not a screenshot or a code from an exited process. If
+  scanning still fails after updating, pair without a QR using the phone
+  linking-code flow (see [Pairing without a QR code](#pairing-without-a-qr-code)).
 - **Device Limit Reached**: Remove a linked device from WhatsApp Settings > Linked Devices.
 - **No Messages Loading**: Initial sync can take several minutes for large chat histories.
 - **Out of Sync**: Back up `whatsapp-bridge/store`, then move
