@@ -190,6 +190,7 @@ Send a text message to a contact or group, optionally as a quoted reply.
 - `quoted_message_id` (optional): ID of the message to reply to. When provided, the sent message appears as a quoted reply in WhatsApp.
 - `quoted_sender_jid` (optional): Full JID of the author of the quoted message. Required for group replies so WhatsApp renders the correct attribution header.
 - `quoted_content` (optional): Text content of the quoted message, used for the reply preview. Only plain text is supported.
+- `mentions` (optional): List of users to @-mention, as phone numbers with country code (e.g. `["12025551234"]`) or JIDs. For each entry the message text must contain a matching `@<number>` token (e.g. `"thanks @12025551234!"`), which recipients' devices render as a highlighted, tappable mention that also notifies the user. Only meaningful in group chats.
 
 Inbound quoted replies are stored automatically. The `quoted_message_id` field in each message returned by `list_messages` indicates which message it is replying to (or `null` for non-replies).
 

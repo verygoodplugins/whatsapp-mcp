@@ -996,6 +996,7 @@ def send_message(
     quoted_message_id: str = "",
     quoted_sender_jid: str = "",
     quoted_content: str = "",
+    mentions: list[str] | None = None,
 ) -> tuple[bool, str]:
     try:
         # Validate input
@@ -1011,6 +1012,8 @@ def send_message(
             payload["quoted_message_id"] = quoted_message_id
             payload["quoted_sender_jid"] = quoted_sender_jid
             payload["quoted_content"] = quoted_content
+        if mentions:
+            payload["mentions"] = mentions
 
         response = requests.post(url, json=payload, headers=_bridge_headers())
 

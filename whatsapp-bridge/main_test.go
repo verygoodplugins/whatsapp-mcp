@@ -2486,3 +2486,79 @@ func TestResolveDeviceName(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveMentionJIDs verifies mapping of mention entries to the JID
+// strings placed in ContextInfo.MentionedJID, including the dual phone+LID
+// form for LID-addressed groups.
+func TestResolveMentionJIDs(t *testing.T) {
+	phonePN := types.JID{User: "12025551234", Server: types.DefaultUserServer}
+	phoneLID := types.JID{User: "111222333444555", Server: types.HiddenUserServer}
+	lidStore := &mockLIDStore{lidByPN: map[types.JID]types.JID{phonePN: phoneLID}}
+	client := newTestClient(lidStore)
+
+	cases := []struct {
+		name     string
+		mentions []string
+		want     []string
+	}{
+		{
+			"phone number with LID mapping yields both forms",
+			[]string{"12025551234"},
+			[]string{phonePN.String(), phoneLID.String()},
+		},
+		{
+			"phone number without LID mapping yields phone JID only",
+			[]string{"19998887777"},
+			[]string{"19998887777@" + types.DefaultUserServer},
+		},
+		{
+			"explicit LID JID passed through unchanged",
+			[]string{phoneLID.String()},
+			[]string{phoneLID.String()},
+		},
+		{
+			"unparseable entry skipped",
+			[]string{"1.2.3@s.whatsapp.net", "12025551234"},
+			[]string{phonePN.String(), phoneLID.String()},
+		},
+		{
+			"empty input yields nil",
+			nil,
+			nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveMentionJIDs(client, tc.mentions)
+			if len(got) != len(tc.want) {
+				t.Fatalf("resolveMentionJIDs(%v) = %v, want %v", tc.mentions, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("resolveMentionJIDs(%v)[%d] = %q, want %q", tc.mentions, i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestSendHandler_MentionsField_PassedThrough proves the mentions JSON field
+// is parsed by /api/send — mirrors the quoted-reply field test above.
+func TestSendHandler_MentionsField_PassedThrough(t *testing.T) {
+	const token = "supersecrettoken1234567890abcdef"
+	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
+
+	// POST with mentions but no recipient — should 400 before any send
+	// attempt, proving the new field parses without error.
+	body := `{"recipient":"","message":"hi @12025551234","mentions":["12025551234"]}`
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/send", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for empty recipient with mentions field, got %d", resp.Code)
+	}
+}
