@@ -51,6 +51,9 @@ from whatsapp import (
 from whatsapp import (
     send_reaction as whatsapp_send_reaction,
 )
+from whatsapp import (
+    transcribe_audio as whatsapp_transcribe_audio,
+)
 
 # Initialize FastMCP server. Env-var handling is deferred to the __main__ block
 # so importing this module never parses env vars or exits the process.
@@ -412,6 +415,33 @@ def download_media(message_id: str, chat_jid: str) -> dict[str, Any]:
         return {"success": True, "message": "Media downloaded successfully", "file_path": file_path}
     else:
         return {"success": False, "message": "Failed to download media"}
+
+
+@mcp.tool()
+def transcribe_audio(
+    message_id: str,
+    chat_jid: str,
+    language: str | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Transcribe a WhatsApp voice/audio message to text using local Whisper.
+
+    Downloads the audio if it isn't already cached, then runs an OpenAI-Whisper-
+    compatible CLI locally (nothing is sent to any external service). Requires
+    `whisper` (or a compatible CLI set via WHISPER_BIN) and FFmpeg installed.
+
+    Args:
+        message_id: The ID of the message containing the audio
+        chat_jid: The JID of the chat containing the message
+        language: Optional language code (e.g. "pt", "en"). Defaults to auto-detect
+                  or the WHISPER_LANGUAGE env var.
+        model: Optional Whisper model (e.g. "base", "small", "large-v3-turbo").
+               Defaults to the WHISPER_MODEL env var or "base".
+
+    Returns:
+        A dictionary with success status and the transcribed text (or an error message).
+    """
+    return whatsapp_transcribe_audio(message_id, chat_jid, language, model)
 
 
 def shutdown_handler(signum, frame):

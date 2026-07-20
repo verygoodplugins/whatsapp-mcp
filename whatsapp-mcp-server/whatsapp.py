@@ -1,7 +1,10 @@
 import json
 import os
 import os.path
+import shutil
 import sqlite3
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -1190,3 +1193,97 @@ def download_media(message_id: str, chat_jid: str) -> str | None:
     except Exception as e:
         print(f"Unexpected error: {str(e)}")
         return None
+
+
+# Transcription config via environment variables. The Whisper CLI is an external
+# dependency (not vendored) so installs stay lightweight; override any of these
+# without touching code.
+WHISPER_BIN = os.getenv("WHISPER_BIN", "whisper")
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
+WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE") or None  # None => auto-detect
+
+
+def transcribe_audio(
+    message_id: str,
+    chat_jid: str,
+    language: str | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Download a voice/audio message and transcribe it to text with Whisper.
+
+    Requires an OpenAI-Whisper-compatible CLI on PATH (``whisper`` by default;
+    override with the ``WHISPER_BIN`` env var) and FFmpeg to decode the audio.
+    Model and language default to the ``WHISPER_MODEL`` / ``WHISPER_LANGUAGE``
+    env vars and can be overridden per call.
+
+    Args:
+        message_id: The ID of the message containing the audio.
+        chat_jid: The JID of the chat containing the message.
+        language: Optional language code (e.g. "pt", "en"); None auto-detects.
+        model: Optional Whisper model name (e.g. "base", "small", "large-v3-turbo").
+
+    Returns:
+        On success: ``{"success": True, "text": ..., "model": ..., "language": ...,
+        "file_path": ...}``. On failure: ``{"success": False, "message": ...}``.
+    """
+    whisper_bin = shutil.which(WHISPER_BIN)
+    if not whisper_bin:
+        return {
+            "success": False,
+            "message": (
+                f"Whisper CLI '{WHISPER_BIN}' not found on PATH. Install openai-whisper "
+                "(`pip install -U openai-whisper`) or set the WHISPER_BIN env var."
+            ),
+        }
+
+    file_path = download_media(message_id, chat_jid)
+    if not file_path:
+        return {"success": False, "message": "Could not download the audio message to transcribe."}
+
+    use_model = model or WHISPER_MODEL
+    use_language = language or WHISPER_LANGUAGE
+
+    with tempfile.TemporaryDirectory() as out_dir:
+        cmd = [
+            whisper_bin,
+            file_path,
+            "--model",
+            use_model,
+            "--task",
+            "transcribe",
+            "--output_format",
+            "txt",
+            "--output_dir",
+            out_dir,
+            "--fp16",
+            "False",
+            "--verbose",
+            "False",
+        ]
+        if use_language:
+            cmd += ["--language", use_language]
+
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+        except Exception as e:
+            return {"success": False, "message": f"Failed to run Whisper: {e}"}
+
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            return {"success": False, "message": f"Whisper failed (exit {proc.returncode}): {detail[:500]}"}
+
+        base = os.path.splitext(os.path.basename(file_path))[0]
+        txt_path = os.path.join(out_dir, base + ".txt")
+        try:
+            with open(txt_path, encoding="utf-8") as fh:
+                text = fh.read().strip()
+        except OSError:
+            return {"success": False, "message": "Whisper produced no transcript output."}
+
+    return {
+        "success": True,
+        "text": text,
+        "model": use_model,
+        "language": use_language or "auto",
+        "file_path": file_path,
+    }

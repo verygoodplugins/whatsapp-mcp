@@ -23,6 +23,7 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 - **Contact Search**: Search contacts by name or phone number with `sender_display` format ("Name (phone)")
 - **Send Messages**: Send text messages to individuals or groups
 - **Media Support**: Send and download images, videos, documents, and voice messages
+- **Voice Transcription**: Transcribe received voice/audio messages to text locally with Whisper (`transcribe_audio`)
 - **Call History**: Capture incoming voice/video calls into a local SQLite table (live, 1:1 and group)
 - **Webhook Integration**: Forward incoming messages to external services
 - **Local Storage**: All messages stored locally in SQLite - only sent to Claude when you allow it
@@ -35,7 +36,8 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) package manager
 - Claude Desktop or Cursor
-- FFmpeg (optional, for voice message conversion)
+- FFmpeg (optional, for voice message conversion and Whisper transcription)
+- [OpenAI Whisper](https://github.com/openai/whisper) CLI (optional, only for `transcribe_audio`; override the binary with `WHISPER_BIN`)
 
 ### Quick Start
 
@@ -269,6 +271,24 @@ Download media from a received message.
 
 - `message_id` (required): ID of the message with media
 - `chat_jid` (required): JID of the chat containing the message
+
+#### `transcribe_audio`
+
+Download a received voice/audio message (if not already cached) and transcribe
+it to text with a local Whisper CLI. Nothing is sent to any external service.
+
+**Parameters:**
+
+- `message_id` (required): ID of the message with the audio
+- `chat_jid` (required): JID of the chat containing the message
+- `language` (optional): Language code such as `pt` or `en`. Defaults to
+  auto-detect, or the `WHISPER_LANGUAGE` env var.
+- `model` (optional): Whisper model such as `base`, `small`, or
+  `large-v3-turbo`. Defaults to the `WHISPER_MODEL` env var (falls back to `base`).
+
+Requires an OpenAI-Whisper-compatible CLI (`whisper` by default; override with
+`WHISPER_BIN`) and FFmpeg on `PATH`. If the CLI is missing, the tool returns a
+clear error instead of failing hard.
 
 ### Chat Operations
 
@@ -580,7 +600,7 @@ flowchart LR
         HEALTH["/api/health"]
     end
 
-    subgraph MCPTools["MCP Tools (14 total)"]
+    subgraph MCPTools["MCP Tools (15 total)"]
         direction TB
         CONT["Contact Tools<br/>search_contacts, get_contact"]
         MSG["Message Tools<br/>list_messages, send_message, etc."]
