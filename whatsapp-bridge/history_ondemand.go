@@ -10,8 +10,9 @@ package main
 // whatsmeow already exposes the primitive for a targeted request
 // (Client.BuildHistorySyncRequest); it just isn't reachable from the bridge.
 // This file wires it to POST /api/history so older messages can be requested
-// for one chat at runtime. Results arrive through the existing
-// events.HistorySync handler, so no new storage or parsing path is introduced.
+// for one chat at runtime. The response arrives as an events.HistorySync with
+// type ON_DEMAND, which the existing handler already stores, so no new storage
+// or parsing path is introduced.
 //
 // As with pair-time sync, the phone has the final word on how much it returns
 // (see AGENTS.md gotcha #4), so Count is a request, not a guarantee.
@@ -35,10 +36,12 @@ type HistoryRequest struct {
 }
 
 const (
-	// defaultHistoryCount is used when the caller omits count.
+	// defaultHistoryCount is used when the caller omits count. whatsmeow
+	// documents 50 as the recommended number to request at a time.
 	defaultHistoryCount = 50
 	// maxHistoryCount bounds a single request so a typo can't ask the phone
-	// for an unbounded backfill.
+	// for an unbounded backfill. Callers wanting more should page by calling
+	// again, since the anchor moves back as older messages land.
 	maxHistoryCount = 500
 )
 
@@ -191,7 +194,10 @@ func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) htt
 			return
 		}
 
-		if _, err := client.SendMessage(context.Background(), own, msg, whatsmeow.SendRequestExtra{Peer: true}); err != nil {
+		// SendPeerMessage is the transport whatsmeow documents for this request
+		// type. It resolves our own JID and sets the peer flag internally, so
+		// that addressing logic isn't duplicated (and drifted) here.
+		if _, err := client.SendPeerMessage(context.Background(), msg); err != nil {
 			writeErr(http.StatusInternalServerError, fmt.Sprintf("Failed to send history request: %v", err))
 			return
 		}
