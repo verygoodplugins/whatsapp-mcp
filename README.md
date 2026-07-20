@@ -490,6 +490,38 @@ Caveats:
 - **Only effective on a fresh pair.** With `whatsapp.db` already present, no new pair handshake fires and the flag is a no-op.
 - **Messages the phone has deleted are not recoverable** — auto-expire, low-storage cleanup, and manual delete all leave no trace for the phone to share.
 
+### Requesting history for a single chat (on-demand)
+
+`--full-history-pair` only applies to a fresh pair, so recovering a gap in one
+chat otherwise means deleting `whatsapp.db` and re-syncing everything. To ask
+the phone for older messages in a single chat *without* re-pairing:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/history \
+  -H "Authorization: Bearer $(cat whatsapp-bridge/store/.bridge-token)" \
+  -H "Content-Type: application/json" \
+  -d '{"chat_jid": "1234567890@s.whatsapp.net", "count": 50}'
+```
+
+The request is anchored on the **oldest message already stored** for that chat,
+so the phone returns messages from before it. Call it repeatedly to page
+further back. Results arrive asynchronously through the normal history-sync
+handler and land in `messages.db` — typically within a few seconds.
+
+| Field | Required | Description |
+| --------- | -------- | ------------------------------------------------------ |
+| `chat_jid` | yes | Chat to backfill (`...@s.whatsapp.net` or `...@g.us`) |
+| `count` | no | Messages to request; default `50`, capped at `500` |
+
+Caveats:
+
+- **The phone decides how much it returns**, exactly as with pair-time sync, so
+  `count` is a request rather than a guarantee.
+- **At least one message for the chat must already be stored**, since it is used
+  as the anchor. Chats with no local messages return `404`; send or receive one
+  message first.
+- Messages the phone has deleted are not recoverable, as above.
+
 ## Call History
 
 The bridge captures incoming WhatsApp voice and video calls live into a
@@ -577,6 +609,7 @@ flowchart LR
         DOWN["/api/download"]
         REACT["/api/react"]
         TYPE["/api/typing"]
+        HIST["/api/history"]
         HEALTH["/api/health"]
     end
 
