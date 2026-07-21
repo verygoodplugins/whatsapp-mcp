@@ -19,10 +19,11 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -57,9 +58,16 @@ func clampHistoryCount(n int) int {
 	}
 }
 
-// anchorTime converts the timestamp column into a time.Time. Depending on the
-// SQLite driver and how the row was written, the value comes back either
-// already typed or as a formatted string, so both are handled.
+// anchorTime converts the stored timestamp column into a time.Time. The type
+// depends on the SQLite driver: cgo go-sqlite3 parses a column declared
+// TIMESTAMP into a time.Time on scan (the production path, handled by the first
+// case), while a pure-Go driver hands back the raw string.
+//
+// The string layouts must cover every format a driver might have *written*. We
+// list them literally rather than importing go-sqlite3's exported
+// SQLiteTimestampFormats, because that identifier lives in a cgo file and
+// disappears under CGO_ENABLED=0 — importing it would break builds without a C
+// compiler.
 func anchorTime(v any) time.Time {
 	switch t := v.(type) {
 	case time.Time:
@@ -68,8 +76,10 @@ func anchorTime(v any) time.Time {
 		return anchorTime(string(t))
 	case string:
 		for _, layout := range []string{
-			"2006-01-02 15:04:05 -0700 MST",
-			"2006-01-02 15:04:05.999999999 -0700 MST",
+			"2006-01-02 15:04:05 -0700 MST",           // Go's time.Time.String() (e.g. modernc default)
+			"2006-01-02 15:04:05.999999999 -0700 MST", // same, with fractional seconds
+			"2006-01-02 15:04:05.999999999-07:00",     // cgo go-sqlite3 write format
+			"2006-01-02T15:04:05.999999999-07:00",     // cgo go-sqlite3 write format, RFC3339-ish T
 			time.RFC3339,
 		} {
 			if parsed, err := time.Parse(layout, t); err == nil {
@@ -80,33 +90,18 @@ func anchorTime(v any) time.Time {
 	return time.Time{}
 }
 
-// historyAnchorInfo builds the MessageInfo that anchors an on-demand history
+// historyAnchorInfo builds the anchor MessageInfo for an on-demand history
 // request. The phone returns messages from *before* this message, so callers
 // pass the oldest message already stored for the chat.
 //
-// Sender matters for group chats, where the anchor's author is a participant
-// rather than the chat itself; for our own messages it is the paired account.
-func historyAnchorInfo(chat types.JID, msgID, sender string, fromMe bool, ts time.Time, own types.JID) types.MessageInfo {
-	senderJID := own
-	if !fromMe {
-		// Default to the chat itself, which is correct for a 1:1 chat.
-		senderJID = chat
-		if sender != "" {
-			if strings.Contains(sender, "@") {
-				if parsed, err := types.ParseJID(sender); err == nil {
-					senderJID = parsed
-				}
-			} else {
-				senderJID = types.JID{User: sender, Server: types.DefaultUserServer}
-			}
-		}
-	}
+// BuildHistorySyncRequest reads only Chat, ID, IsFromMe and Timestamp — the
+// HistorySyncOnDemandRequest wire message carries no field for the anchor's
+// sender or a group flag — so only those four are set here.
+func historyAnchorInfo(chat types.JID, msgID string, fromMe bool, ts time.Time) types.MessageInfo {
 	return types.MessageInfo{
 		MessageSource: types.MessageSource{
 			Chat:     chat,
-			Sender:   senderJID,
 			IsFromMe: fromMe,
-			IsGroup:  chat.Server == types.GroupServer,
 		},
 		ID:        msgID,
 		Timestamp: ts,
@@ -114,21 +109,22 @@ func historyAnchorInfo(chat types.JID, msgID, sender string, fromMe bool, ts tim
 }
 
 // oldestStoredMessage returns the anchor fields for the oldest message the
-// bridge currently holds for a chat.
-func oldestStoredMessage(store *MessageStore, chatJID string) (id, sender string, fromMe bool, ts time.Time, err error) {
+// bridge currently holds for a chat. It returns sql.ErrNoRows when the chat has
+// no stored messages to anchor on.
+func oldestStoredMessage(store *MessageStore, chatJID string) (id string, fromMe bool, ts time.Time, err error) {
 	var rawTS any
 	err = store.db.QueryRow(
-		`SELECT id, sender, is_from_me, timestamp
+		`SELECT id, is_from_me, timestamp
 		   FROM messages
 		  WHERE chat_jid = ?
 		  ORDER BY timestamp ASC
 		  LIMIT 1`,
 		chatJID,
-	).Scan(&id, &sender, &fromMe, &rawTS)
+	).Scan(&id, &fromMe, &rawTS)
 	if err != nil {
-		return "", "", false, time.Time{}, err
+		return "", false, time.Time{}, err
 	}
-	return id, sender, fromMe, anchorTime(rawTS), nil
+	return id, fromMe, anchorTime(rawTS), nil
 }
 
 // registerHistoryEndpoint wires POST /api/history onto an existing mux.
@@ -174,10 +170,14 @@ func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) htt
 			return
 		}
 
-		id, sender, fromMe, ts, err := oldestStoredMessage(messageStore, req.ChatJID)
-		if err != nil {
+		id, fromMe, ts, err := oldestStoredMessage(messageStore, req.ChatJID)
+		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(http.StatusNotFound,
 				"No stored message for this chat to anchor the request; send or receive one message first")
+			return
+		}
+		if err != nil {
+			writeErr(http.StatusInternalServerError, fmt.Sprintf("Failed to look up anchor message: %v", err))
 			return
 		}
 		if ts.IsZero() {
@@ -185,8 +185,7 @@ func registerHistoryEndpoint(mux *http.ServeMux, auth func(http.HandlerFunc) htt
 			return
 		}
 
-		own := client.Store.ID.ToNonAD()
-		info := historyAnchorInfo(chatJID, id, sender, fromMe, ts, own)
+		info := historyAnchorInfo(chatJID, id, fromMe, ts)
 
 		msg := client.BuildHistorySyncRequest(&info, count)
 		if msg == nil {
