@@ -1832,10 +1832,8 @@ func extractDirectPathFromURL(url string) string {
 
 	pathPart := parts[1]
 
-	// Remove query parameters
-	pathPart = strings.SplitN(pathPart, "?", 2)[0]
-
-	// Create proper direct path format
+	// KEEP the query parameters: they carry WhatsApp's auth signature (oh/oe),
+	// and whatsmeow appends its own params with '&', assuming '?' is present.
 	return "/" + pathPart
 }
 
