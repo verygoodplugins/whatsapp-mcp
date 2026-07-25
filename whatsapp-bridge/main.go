@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"math"
@@ -653,6 +654,24 @@ func (store *MessageStore) GetChatEphemeralSettings(jid string) (ChatEphemeralSe
 		return ChatEphemeralSettings{}, err
 	}
 	return settings, nil
+}
+
+// GetMessageIsFromMe resolves the origin of a stored message for a quoted
+// reply. The boolean pointer distinguishes a known false value from a quote
+// that is absent from the local store.
+func (store *MessageStore) GetMessageIsFromMe(id, chatJID string) (*bool, error) {
+	var isFromMe bool
+	err := store.db.QueryRow(
+		"SELECT is_from_me FROM messages WHERE id = ? AND chat_jid = ?",
+		id, chatJID,
+	).Scan(&isFromMe)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &isFromMe, nil
 }
 
 // Store a message in the database
@@ -1391,6 +1410,32 @@ func extractQuotedMessageInfo(msg *waProto.Message) (quotedMessageId string, quo
 	return quotedMessageId, quotedSender, quotedContent
 }
 
+// extractMentionedJIDs returns native WhatsApp mention targets from ContextInfo.
+func extractMentionedJIDs(msg *waProto.Message) []string {
+	if msg == nil {
+		return nil
+	}
+
+	var contextInfo *waProto.ContextInfo
+	if extText := msg.GetExtendedTextMessage(); extText != nil {
+		contextInfo = extText.GetContextInfo()
+	} else if img := msg.GetImageMessage(); img != nil {
+		contextInfo = img.GetContextInfo()
+	} else if vid := msg.GetVideoMessage(); vid != nil {
+		contextInfo = vid.GetContextInfo()
+	} else if doc := msg.GetDocumentMessage(); doc != nil {
+		contextInfo = doc.GetContextInfo()
+	} else if aud := msg.GetAudioMessage(); aud != nil {
+		contextInfo = aud.GetContextInfo()
+	}
+
+	if contextInfo == nil || len(contextInfo.MentionedJID) == 0 {
+		return nil
+	}
+
+	return append([]string(nil), contextInfo.MentionedJID...)
+}
+
 // Extract media info from a message. Filenames embed the message ID so that
 // two messages arriving in the same second do not collide on a single file.
 func extractMediaInfo(msg *waProto.Message, msgTimestamp time.Time, msgID string) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
@@ -1605,6 +1650,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 
 	// Extract quoted message info
 	quotedMessageId, quotedSender, quotedContent := extractQuotedMessageInfo(msg.Message)
+	mentionedJIDs := extractMentionedJIDs(msg.Message)
 
 	// Skip if there's no content and no media
 	if content == "" && mediaType == "" {
@@ -1631,6 +1677,15 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	)
 	if err != nil {
 		logger.Warnf("Failed to store message: %v", err)
+	}
+
+	var quotedIsFromMe *bool
+	if quotedMessageId != "" {
+		var lookupErr error
+		quotedIsFromMe, lookupErr = messageStore.GetMessageIsFromMe(quotedMessageId, chatJID)
+		if lookupErr != nil {
+			logger.Warnf("Failed to resolve quoted message origin: %v", lookupErr)
+		}
 	}
 
 	// For image messages, download media synchronously so we can include the base64
@@ -1688,11 +1743,11 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		if hasImage {
 			SendWebhookWithMedia(
 				sender, content, chatJID, msg.Info.IsFromMe,
-				quotedMessageId, quotedSender, quotedContent,
+				quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs,
 				msg.Info.ID, mediaType, imageMimeType, filename, imageDownloadPath,
 			)
 		} else {
-			SendWebhook(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent)
+			SendWebhook(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs)
 		}
 	}
 

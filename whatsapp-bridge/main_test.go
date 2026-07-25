@@ -2382,6 +2382,39 @@ func TestExtractQuotedMessageInfo_ExtendedText(t *testing.T) {
 	}
 }
 
+func TestExtractMentionedJIDs_ExtendedText(t *testing.T) {
+	msg := &waProto.Message{
+		ExtendedTextMessage: &waProto.ExtendedTextMessage{
+			ContextInfo: &waProto.ContextInfo{
+				MentionedJID: []string{"491742555497@s.whatsapp.net"},
+			},
+		},
+	}
+
+	got := extractMentionedJIDs(msg)
+	if len(got) != 1 || got[0] != "491742555497@s.whatsapp.net" {
+		t.Errorf("mentioned JIDs = %#v", got)
+	}
+}
+
+func TestGetMessageIsFromMe(t *testing.T) {
+	store := newTestMessageStore(t)
+	chatJID := "15551234567@s.whatsapp.net"
+	if err := store.StoreMessage("outbound", chatJID, "15550000000", "[🤖] response", time.Now(), true, "", "", "", nil, nil, nil, 0, ""); err != nil {
+		t.Fatalf("store outbound message: %v", err)
+	}
+
+	isFromMe, err := store.GetMessageIsFromMe("outbound", chatJID)
+	if err != nil || isFromMe == nil || !*isFromMe {
+		t.Fatalf("GetMessageIsFromMe() = %v, %v; want true, nil", isFromMe, err)
+	}
+
+	missing, err := store.GetMessageIsFromMe("missing", chatJID)
+	if err != nil || missing != nil {
+		t.Fatalf("missing lookup = %v, %v; want nil, nil", missing, err)
+	}
+}
+
 // TestExtractQuotedMessageInfo_NoContextInfo verifies graceful handling when
 // the message has no ContextInfo (plain Conversation, ReactionMessage, etc.).
 func TestExtractQuotedMessageInfo_NoContextInfo(t *testing.T) {
