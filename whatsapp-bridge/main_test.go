@@ -2205,6 +2205,50 @@ func TestReactHandler_NoAuth_Returns401(t *testing.T) {
 	}
 }
 
+// TestMarkReadHandler_MissingFields_Returns400 verifies /api/mark-read validation.
+func TestMarkReadHandler_MissingFields_Returns400(t *testing.T) {
+	const token = "supersecrettoken1234567890abcdef"
+	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty body", "{}"},
+		{"missing ids", `{"chat_jid":"15551234567@s.whatsapp.net"}`},
+		{"missing chat", `{"message_id":"3AABCDEF01234567"}`},
+		{"group missing sender", `{"chat_jid":"120363012345678901@g.us","message_id":"3AABCDEF01234567"}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/mark-read", strings.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", "application/json")
+			resp := httptest.NewRecorder()
+			handler.ServeHTTP(resp, req)
+			if resp.Code != http.StatusBadRequest {
+				t.Errorf("body=%q: expected 400, got %d body=%s", tc.body, resp.Code, resp.Body.String())
+			}
+		})
+	}
+}
+
+func TestMarkReadHandler_NoAuth_Returns401(t *testing.T) {
+	const token = "supersecrettoken1234567890abcdef"
+	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/mark-read",
+		strings.NewReader(`{"chat_jid":"15551234567@s.whatsapp.net","message_id":"3AABCDEF01234567"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without auth, got %d", resp.Code)
+	}
+}
+
 func TestHandleMessage_RegularMessageDoesNotMarkDeleted(t *testing.T) {
 	client := newTestClient(&mockLIDStore{})
 	ms := newTestMessageStore(t)

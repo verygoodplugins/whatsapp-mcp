@@ -49,6 +49,9 @@ from whatsapp import (
     send_message as whatsapp_send_message,
 )
 from whatsapp import (
+    mark_as_read as whatsapp_mark_as_read,
+)
+from whatsapp import (
     send_reaction as whatsapp_send_reaction,
 )
 
@@ -358,6 +361,35 @@ def send_reaction(
         A dictionary containing success status and a status message
     """
     success, status_message = whatsapp_send_reaction(recipient, message_id, emoji, from_me, sender_jid)
+    return {"success": success, "message": status_message}
+
+
+@mcp.tool()
+def mark_as_read(
+    chat_jid: str,
+    message_id: str = "",
+    message_ids: list[str] | None = None,
+    sender_jid: str = "",
+) -> dict[str, Any]:
+    """Mark WhatsApp message(s) as read so the sender sees blue ticks / read receipts.
+
+    Prefer this at the start of a turn over reacting 👀 just to show "seen".
+    For group chats, pass sender_jid (who wrote the message). All IDs in one
+    call must be from the same sender.
+
+    Args:
+        chat_jid: The chat JID (e.g. "12025551234@s.whatsapp.net" or a group JID)
+        message_id: Single message ID to mark read
+        message_ids: Optional list of message IDs (same sender only)
+        sender_jid: Required for groups — full JID of the message author.
+                    Optional in DMs (defaults to the chat peer).
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    success, status_message = whatsapp_mark_as_read(
+        chat_jid, message_id, message_ids, sender_jid
+    )
     return {"success": success, "message": status_message}
 
 

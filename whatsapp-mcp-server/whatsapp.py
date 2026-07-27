@@ -1153,6 +1153,68 @@ def send_reaction(
         return False, f"Unexpected error: {str(e)}"
 
 
+def mark_as_read(
+    chat_jid: str,
+    message_id: str = "",
+    message_ids: list[str] | None = None,
+    sender_jid: str = "",
+) -> tuple[bool, str]:
+    """Mark one or more WhatsApp messages as read (blue ticks / read receipt).
+
+    Args:
+        chat_jid: The chat JID (DM or group).
+        message_id: Single message ID to mark read.
+        message_ids: Optional list of message IDs (same sender only).
+        sender_jid: Required for group chats — JID of who sent the message(s).
+                    For DMs, defaults to chat_jid on the bridge.
+
+    Returns:
+        Tuple of (success, status_message).
+    """
+    try:
+        if not chat_jid:
+            return False, "chat_jid must be provided"
+
+        ids: list[str] = []
+        if message_ids:
+            ids.extend([mid for mid in message_ids if mid])
+        if message_id:
+            ids.append(message_id)
+        # Deduplicate
+        seen: set[str] = set()
+        unique: list[str] = []
+        for mid in ids:
+            if mid not in seen:
+                seen.add(mid)
+                unique.append(mid)
+        if not unique:
+            return False, "message_id or message_ids must be provided"
+
+        url = f"{WHATSAPP_API_BASE_URL}/mark-read"
+        payload: dict[str, Any] = {
+            "chat_jid": chat_jid,
+            "message_ids": unique,
+        }
+        if sender_jid:
+            payload["sender_jid"] = sender_jid
+
+        response = requests.post(url, json=payload, headers=_bridge_headers())
+
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("success"):
+                return True, result.get("message", "Marked as read")
+            return False, result.get("message", "Unknown error")
+        return False, f"Error: HTTP {response.status_code} - {response.text}"
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
 def download_media(message_id: str, chat_jid: str) -> str | None:
     """Download media from a message and return the local file path.
 

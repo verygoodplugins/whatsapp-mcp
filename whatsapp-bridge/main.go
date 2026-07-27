@@ -933,6 +933,16 @@ type ReactRequest struct {
 	Emoji     *string `json:"emoji"`      // reaction emoji; empty string removes the reaction
 }
 
+// MarkReadRequest is the request body for the /api/mark-read endpoint.
+// Marks inbound messages as read (blue ticks for the other party when receipts are enabled).
+// All message_ids must be from the same sender (whatsmeow MarkRead constraint).
+type MarkReadRequest struct {
+	ChatJID    string   `json:"chat_jid"`              // DM or group JID
+	MessageID  string   `json:"message_id,omitempty"`  // single id convenience
+	MessageIDs []string `json:"message_ids,omitempty"` // batch (same sender only)
+	SenderJID  string   `json:"sender_jid,omitempty"`  // required for groups; defaults to chat_jid in DMs
+}
+
 // classifyMediaPath maps a file extension to (whatsmeow upload type, MIME
 // type, persist-side category). Single source of truth for the upload path
 // (which needs the whatsmeow.MediaType + MIME) and the SQLite persist path
@@ -2223,6 +2233,111 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 				"message": fmt.Sprintf("Typing indicator set to %v", req.IsTyping),
 			})
 		}
+	}))
+
+	// Handler for marking messages as read (read receipts / blue ticks)
+	mux.HandleFunc("/api/mark-read", auth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req MarkReadRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.ChatJID == "" {
+			http.Error(w, "chat_jid is required", http.StatusBadRequest)
+			return
+		}
+
+		ids := make([]string, 0, len(req.MessageIDs)+1)
+		ids = append(ids, req.MessageIDs...)
+		if req.MessageID != "" {
+			ids = append(ids, req.MessageID)
+		}
+		// Deduplicate while preserving order
+		seen := make(map[string]struct{}, len(ids))
+		unique := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			unique = append(unique, id)
+		}
+		if len(unique) == 0 {
+			http.Error(w, "message_id or message_ids is required", http.StatusBadRequest)
+			return
+		}
+
+		var chatJID types.JID
+		var err error
+		if strings.Contains(req.ChatJID, "@") {
+			chatJID, err = types.ParseJID(req.ChatJID)
+			if err != nil || chatJID.User == "" {
+				http.Error(w, fmt.Sprintf("Invalid chat_jid: %v", err), http.StatusBadRequest)
+				return
+			}
+		} else {
+			chatJID = types.JID{User: req.ChatJID, Server: "s.whatsapp.net"}
+		}
+
+		var senderJID types.JID
+		switch {
+		case req.SenderJID != "":
+			if strings.Contains(req.SenderJID, "@") {
+				senderJID, err = types.ParseJID(req.SenderJID)
+			} else {
+				senderJID = types.JID{User: req.SenderJID, Server: "s.whatsapp.net"}
+			}
+			if err != nil || senderJID.User == "" {
+				http.Error(w, fmt.Sprintf("Invalid sender_jid: %v", err), http.StatusBadRequest)
+				return
+			}
+		case chatJID.Server == types.GroupServer:
+			http.Error(w, "sender_jid is required for group chats", http.StatusBadRequest)
+			return
+		default:
+			// DMs: messages from the peer — chat JID is the sender
+			senderJID = chatJID
+		}
+
+		if !client.IsConnected() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "WhatsApp client is not connected. Please wait for reconnection.",
+			})
+			return
+		}
+
+		msgIDs := make([]types.MessageID, len(unique))
+		for i, id := range unique {
+			msgIDs[i] = types.MessageID(id)
+		}
+
+		fmt.Printf("→ /api/mark-read chat=%q count=%d sender=%q\n", chatJID, len(msgIDs), senderJID)
+		err = client.MarkRead(context.Background(), msgIDs, time.Now(), chatJID, senderJID)
+		w.Header().Set("Content-Type", "application/json")
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Failed to mark read: %v", err),
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": fmt.Sprintf("Marked %d message(s) as read", len(msgIDs)),
+			"count":   len(msgIDs),
+		})
 	}))
 
 	return mux
