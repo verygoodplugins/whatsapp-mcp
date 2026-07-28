@@ -882,6 +882,23 @@ func extractTextContent(msg *waProto.Message) string {
 		return doc.GetCaption()
 	}
 
+	// Contact shares have no conversation text; summarise name + TEL for storage/search.
+	if c := msg.GetContactMessage(); c != nil {
+		return formatContactMessage(c)
+	}
+	if arr := msg.GetContactsArrayMessage(); arr != nil {
+		parts := make([]string, 0, len(arr.GetContacts())+1)
+		if n := strings.TrimSpace(arr.GetDisplayName()); n != "" {
+			parts = append(parts, n)
+		}
+		for _, c := range arr.GetContacts() {
+			if s := formatContactMessage(c); s != "" {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+
 	// WhatsApp Business templates arrive hydrated — body lives in
 	// HydratedTemplate.HydratedContentText. Without this branch every
 	// template-sent message (e.g. WABA Connect Hrms_* notifications)
@@ -1492,7 +1509,50 @@ func extractMediaInfo(msg *waProto.Message, msgTimestamp time.Time, msgID string
 			stk.GetURL(), stk.GetMediaKey(), stk.GetFileSHA256(), stk.GetFileEncSHA256(), stk.GetFileLength()
 	}
 
+	// Contact shares have no downloadable media URL; set mediaType so empty-caption
+	// contacts are still stored and eligible for webhook forwarding.
+	if msg.GetContactMessage() != nil {
+		return "contact", "contact_" + suffix + ".vcf", "", nil, nil, nil, 0
+	}
+	if msg.GetContactsArrayMessage() != nil {
+		return "contact", "contacts_" + suffix + ".vcf", "", nil, nil, nil, 0
+	}
+
 	return "", "", "", nil, nil, nil, 0
+}
+
+// formatContactMessage summarises a contact share as display name plus TEL lines.
+func formatContactMessage(c *waProto.ContactMessage) string {
+	if c == nil {
+		return ""
+	}
+	name := strings.TrimSpace(c.GetDisplayName())
+	vcard := c.GetVcard()
+	var tels []string
+	for _, line := range strings.Split(vcard, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(strings.ToUpper(line), "TEL") {
+			continue
+		}
+		if i := strings.Index(line, ":"); i >= 0 {
+			if tel := strings.TrimSpace(line[i+1:]); tel != "" {
+				tels = append(tels, tel)
+			}
+		}
+	}
+	switch {
+	case name != "" && len(tels) > 0:
+		return fmt.Sprintf("Contact: %s (%s)", name, strings.Join(tels, ", "))
+	case name != "":
+		return "Contact: " + name
+	case len(tels) > 0:
+		return "Contact: (" + strings.Join(tels, ", ") + ")"
+	default:
+		if strings.TrimSpace(vcard) != "" {
+			return "Contact: (vCard)"
+		}
+		return ""
+	}
 }
 
 // resolveLIDChat resolves a LID-based chat JID to its phone-based equivalent
@@ -1733,18 +1793,24 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 
 	// Send webhook for incoming messages.
 	// Forward self-messages when FORWARD_SELF=true.
-	// Always forward image messages (even without a text caption) so the AI vision
-	// pipeline can analyse the image content.
+	// Always forward image and contact messages even without a text caption.
 	shouldForward := forwardSelfMessages || !msg.Info.IsFromMe
 	hasText := content != ""
 	hasImage := mediaType == "image"
+	hasContact := mediaType == "contact"
 
-	if shouldForward && (hasText || hasImage) {
+	if shouldForward && (hasText || hasImage || hasContact) {
 		if hasImage {
 			SendWebhookWithMedia(
 				sender, content, chatJID, msg.Info.IsFromMe,
 				quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs,
 				msg.Info.ID, mediaType, imageMimeType, filename, imageDownloadPath,
+			)
+		} else if hasContact {
+			SendWebhookWithMedia(
+				sender, content, chatJID, msg.Info.IsFromMe,
+				quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs,
+				msg.Info.ID, mediaType, "text/vcard", filename, "",
 			)
 		} else {
 			SendWebhook(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs)

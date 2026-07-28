@@ -1208,6 +1208,26 @@ func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 			want: "",
 		},
 		{
+			name: "ContactMessage with name and TEL",
+			msg: &waProto.Message{
+				ContactMessage: &waProto.ContactMessage{
+					DisplayName: proto.String("Alex Keyter"),
+					Vcard:       proto.String("BEGIN:VCARD\nVERSION:3.0\nFN:Alex Keyter\nTEL;TYPE=CELL:+44 7958 023533\nEND:VCARD\n"),
+				},
+			},
+			want: "Contact: Alex Keyter (+44 7958 023533)",
+		},
+		{
+			name: "ContactMessage with name only",
+			msg: &waProto.Message{
+				ContactMessage: &waProto.ContactMessage{
+					DisplayName: proto.String("No Number"),
+					Vcard:       proto.String("BEGIN:VCARD\nFN:No Number\nEND:VCARD\n"),
+				},
+			},
+			want: "Contact: No Number",
+		},
+		{
 			name: "Nil message returns empty",
 			msg:  nil,
 			want: "",
@@ -1278,6 +1298,30 @@ func TestExtractMediaInfo_NoMediaReturnsEmpty(t *testing.T) {
 			gotType, gotFile, gotURL, len(gotKey), gotLen)
 	}
 }
+
+func TestExtractMediaInfo_Contact(t *testing.T) {
+	ts := time.Unix(1710000000, 0).UTC()
+	msgID := "TEST_CONTACT_ID"
+	msg := &waProto.Message{
+		ContactMessage: &waProto.ContactMessage{
+			DisplayName: proto.String("Alex Keyter"),
+			Vcard:       proto.String("BEGIN:VCARD\nTEL:+447958023533\nEND:VCARD\n"),
+		},
+	}
+	gotType, gotFile, gotURL, gotKey, _, _, gotLen := extractMediaInfo(msg, ts, msgID)
+	if gotType != "contact" {
+		t.Errorf("mediaType = %q, want contact", gotType)
+	}
+	wantFile := "contact_" + ts.Format("20060102_150405") + "_" + msgID + ".vcf"
+	if gotFile != wantFile {
+		t.Errorf("filename = %q, want %q", gotFile, wantFile)
+	}
+	if gotURL != "" || gotKey != nil || gotLen != 0 {
+		t.Errorf("contact should have empty download metadata: url=%q keyLen=%d len=%d",
+			gotURL, len(gotKey), gotLen)
+	}
+}
+
 
 func TestMigrateLegacyLIDChatsToPhoneJIDs_AggregatesByPhoneJIDDeterministically(t *testing.T) {
 	ms := newTestMessageStore(t)
@@ -1354,6 +1398,27 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_AggregatesByPhoneJIDDeterministically(
 // buildImageMessage constructs an events.Message that carries an ImageMessage
 // with no download metadata (URL/media-key are empty), so handleMessage will
 // classify it as an image but skip the synchronous download attempt.
+
+func buildContactMessage(chat, sender types.JID, isFromMe bool, name, vcard string) *events.Message {
+	return &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     chat,
+				Sender:   sender,
+				IsFromMe: isFromMe,
+			},
+			ID:        "test-contact-001",
+			Timestamp: time.Now(),
+		},
+		Message: &waProto.Message{
+			ContactMessage: &waProto.ContactMessage{
+				DisplayName: proto.String(name),
+				Vcard:       proto.String(vcard),
+			},
+		},
+	}
+}
+
 func buildImageMessage(chat, sender types.JID, isFromMe bool, caption string) *events.Message {
 	img := &waProto.ImageMessage{}
 	if caption != "" {
@@ -1484,6 +1549,42 @@ func TestHandleMessage_ImageWithCaption_WebhookForwarded(t *testing.T) {
 
 // queryCallResult returns the (result, duration_sec, reason) for a call row,
 // or empties if no row exists.
+
+// TestHandleMessage_Contact_WebhookForwarded verifies contact/vCard shares are
+// stored and webhooked with a text summary and mediaType=contact.
+func TestHandleMessage_Contact_WebhookForwarded(t *testing.T) {
+	srv, webhookCh := captureWebhook(t)
+	t.Setenv("WEBHOOK_URL", srv.URL)
+
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	vcard := "BEGIN:VCARD\nVERSION:3.0\nFN:Alex Keyter\nTEL;TYPE=CELL:+44 7958 023533\nEND:VCARD\n"
+	msg := buildContactMessage(phonePN, phonePN, false, "Alex Keyter", vcard)
+	handleMessage(client, ms, msg, logger)
+
+	if count := queryMessageCount(ms, phonePN.String()); count != 1 {
+		t.Errorf("expected 1 message stored, got %d", count)
+	}
+
+	select {
+	case payload := <-webhookCh:
+		if payload.MediaType != "contact" {
+			t.Errorf("expected mediaType=contact, got %q", payload.MediaType)
+		}
+		if payload.MessageID != "test-contact-001" {
+			t.Errorf("expected messageId=test-contact-001, got %q", payload.MessageID)
+		}
+		want := "Contact: Alex Keyter (+44 7958 023533)"
+		if payload.Content != want {
+			t.Errorf("expected content %q, got %q", want, payload.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for webhook call")
+	}
+}
+
 func queryCallResult(ms *MessageStore, callID, chatJID string) (result string, duration sql.NullInt64, reason sql.NullString, found bool) {
 	err := ms.db.QueryRow(
 		"SELECT result, duration_sec, reason FROM calls WHERE call_id = ? AND chat_jid = ?",
