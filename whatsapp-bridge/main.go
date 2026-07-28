@@ -1689,10 +1689,12 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	}
 
 	// For image messages, download media synchronously so we can include the base64
-	// payload in the webhook. Other media types (video, audio, document) are still
-	// downloaded asynchronously since they are not passed to the AI vision pipeline.
+	// payload in the webhook. Audio is also synced so captionless voice notes can be
+	// webhooked the same way. Other media types (video, document) stay async.
 	var imageDownloadPath string
 	var imageMimeType string
+	var audioDownloadPath string
+	var audioMimeType string
 	if mediaType == "image" && url != "" && len(mediaKey) > 0 {
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
 		success, _, _, dlPath, dlErr := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
@@ -1718,8 +1720,21 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 				_, _, _, _, _ = downloadMedia(client, messageStore, msg.Info.ID, chatJID)
 			}()
 		}
-	} else if mediaType != "" && mediaType != "image" && url != "" && len(mediaKey) > 0 {
-		// Non-image media: async download for caching only (not sent to vision pipeline)
+	} else if mediaType == "audio" && url != "" && len(mediaKey) > 0 {
+		logger.Infof("Downloading audio media for message %s (synchronous)", msg.Info.ID)
+		success, _, _, dlPath, dlErr := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+		if success && dlErr == nil {
+			audioDownloadPath = dlPath
+			audioMimeType = "audio/ogg; codecs=opus"
+			logger.Infof("✅ Audio downloaded: %s", dlPath)
+		} else {
+			logger.Warnf("❌ Audio download failed: %v", dlErr)
+			go func() {
+				_, _, _, _, _ = downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+			}()
+		}
+	} else if mediaType != "" && mediaType != "image" && mediaType != "audio" && url != "" && len(mediaKey) > 0 {
+		// Non-image/non-audio media: async download for caching only
 		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
 		go func() {
 			success, _, _, downloadPath, err := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
@@ -1733,18 +1748,24 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 
 	// Send webhook for incoming messages.
 	// Forward self-messages when FORWARD_SELF=true.
-	// Always forward image messages (even without a text caption) so the AI vision
-	// pipeline can analyse the image content.
+	// Always forward image and audio messages even without a text caption.
 	shouldForward := forwardSelfMessages || !msg.Info.IsFromMe
 	hasText := content != ""
 	hasImage := mediaType == "image"
+	hasAudio := mediaType == "audio"
 
-	if shouldForward && (hasText || hasImage) {
+	if shouldForward && (hasText || hasImage || hasAudio) {
 		if hasImage {
 			SendWebhookWithMedia(
 				sender, content, chatJID, msg.Info.IsFromMe,
 				quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs,
 				msg.Info.ID, mediaType, imageMimeType, filename, imageDownloadPath,
+			)
+		} else if hasAudio {
+			SendWebhookWithMedia(
+				sender, content, chatJID, msg.Info.IsFromMe,
+				quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs,
+				msg.Info.ID, mediaType, audioMimeType, filename, audioDownloadPath,
 			)
 		} else {
 			SendWebhook(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs)

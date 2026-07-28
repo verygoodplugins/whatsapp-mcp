@@ -1417,6 +1417,55 @@ func captureRawWebhook(t *testing.T) (*httptest.Server, <-chan map[string]any) {
 // TestHandleMessage_ImageOnly_WebhookForwarded verifies that an image message
 // with no text caption is forwarded to the webhook endpoint (not silently
 // dropped), and that the webhook payload contains the expected media fields.
+func buildAudioMessage(chat, sender types.JID, isFromMe bool) *events.Message {
+	return &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     chat,
+				Sender:   sender,
+				IsFromMe: isFromMe,
+			},
+			ID:        "test-aud-001",
+			Timestamp: time.Now(),
+		},
+		// No URL/mediaKey: download is skipped; webhook should still fire.
+		Message: &waProto.Message{AudioMessage: &waProto.AudioMessage{}},
+	}
+}
+
+func TestHandleMessage_AudioOnly_WebhookForwarded(t *testing.T) {
+	srv, webhookCh := captureWebhook(t)
+	t.Setenv("WEBHOOK_URL", srv.URL)
+
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	msg := buildAudioMessage(phonePN, phonePN, false)
+	handleMessage(client, ms, msg, logger)
+
+	if count := queryMessageCount(ms, phonePN.String()); count != 1 {
+		t.Errorf("expected 1 message stored, got %d", count)
+	}
+
+	select {
+	case payload := <-webhookCh:
+		if payload.MediaType != "audio" {
+			t.Errorf("expected mediaType=audio, got %q", payload.MediaType)
+		}
+		if payload.MessageID != "test-aud-001" {
+			t.Errorf("expected messageId=test-aud-001, got %q", payload.MessageID)
+		}
+		if payload.Content != "" {
+			t.Errorf("expected empty content for audio-only message, got %q", payload.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for webhook call")
+	}
+}
+
+// TestHandleMessage_Contact_WebhookForwarded verifies contact/vCard shares are
+// stored and webhooked with a text summary and mediaType=contact.
 func TestHandleMessage_ImageOnly_WebhookForwarded(t *testing.T) {
 	srv, webhookCh := captureWebhook(t)
 	t.Setenv("WEBHOOK_URL", srv.URL)
