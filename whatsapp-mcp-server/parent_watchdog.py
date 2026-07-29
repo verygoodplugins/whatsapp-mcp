@@ -16,8 +16,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from typing import Callable
-
+from collections.abc import Callable
 
 DEFAULT_PARENT_WATCHDOG_S = 30.0
 MIN_PARENT_WATCHDOG_S = 0.1

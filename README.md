@@ -340,6 +340,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MCP_TRANSPORT` | `stdio`                                | MCP transport to serve clients: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST`    | `127.0.0.1`                              | Bind address for the `http`/`sse` transports |
 | `WHATSAPP_MCP_PORT`    | `8000`                                   | Port for the `http`/`sse` transports |
+| `WHATSAPP_PARENT_WATCHDOG_S` | `30`                              | Stdio parent-liveness poll interval (seconds); exits on parent reparent only |
 
 ### MCP transport (stdio vs http/sse)
 

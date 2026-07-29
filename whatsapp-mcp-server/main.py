@@ -1,12 +1,12 @@
 import os
 import signal
-from parent_watchdog import install_stdio_parent_watchdog
 import sys
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from mcp_config import resolve_host, resolve_port, resolve_transport
+from parent_watchdog import install_stdio_parent_watchdog
 from whatsapp import (
     download_media as whatsapp_download_media,
 )
