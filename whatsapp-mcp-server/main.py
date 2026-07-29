@@ -443,6 +443,6 @@ if __name__ == "__main__":
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
 
-    if transport == 'stdio':
-        install_stdio_parent_watchdog('WHATSAPP_PARENT_WATCHDOG_S', parent_pid=parent_pid)
+    if transport == "stdio":
+        install_stdio_parent_watchdog("WHATSAPP_PARENT_WATCHDOG_S", parent_pid=parent_pid)
     mcp.run(transport=transport)
