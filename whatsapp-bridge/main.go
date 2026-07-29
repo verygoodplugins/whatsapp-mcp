@@ -1657,8 +1657,10 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	// Extract text content
 	content := extractTextContent(msg.Message)
 
-	// Extract media info - pass message timestamp + ID for unique filenames
-	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message, msg.Info.Timestamp, msg.Info.ID)
+	// Extract media info - pass message timestamp + ID for unique filenames.
+	// Must be the same (retry-corrected) timestamp we store below: downloadMedia
+	// rebuilds the on-disk filename from the stored timestamp.
+	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message, msgTimestamp, msg.Info.ID)
 
 	// Extract quoted message info
 	quotedMessageId, quotedSender, quotedContent := extractQuotedMessageInfo(msg.Message)
