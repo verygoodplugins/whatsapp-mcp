@@ -1,5 +1,6 @@
 import os
 import signal
+from parent_watchdog import install_stdio_parent_watchdog
 import sys
 from typing import Any
 
@@ -440,4 +441,6 @@ if __name__ == "__main__":
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
 
+    if transport == 'stdio':
+        install_stdio_parent_watchdog('WHATSAPP_PARENT_WATCHDOG_S')
     mcp.run(transport=transport)
