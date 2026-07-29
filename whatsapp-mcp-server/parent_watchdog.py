@@ -4,6 +4,11 @@ When an intermediate wrapper keeps stdin open after the client dies, the
 Python MCP stdio loop never sees EOF and the process leaks forever (swap
 thrash). This watchdog exits once os.getppid() changes from the original
 parent (POSIX reparenting).
+
+Soft stdin EOF is intentional: do NOT hard-exit on EOF alone. One-shot
+pipe clients must be able to finish in-flight handlers. Hard exit is
+reserved for parent-watchdog reparent (and OS signals installed by the
+host process).
 """
 
 from __future__ import annotations
@@ -53,11 +58,16 @@ def start_parent_watchdog(
     return thread
 
 
-def install_stdio_parent_watchdog(env_name: str) -> None:
-    parent_pid = os.getppid()
+def install_stdio_parent_watchdog(
+    env_name: str,
+    *,
+    parent_pid: int | None = None,
+) -> None:
+    # Prefer a pid captured before any await in main — getppid() is dynamic.
+    pinned = os.getppid() if parent_pid is None else parent_pid
     interval = parse_watchdog_interval_s(os.environ.get(env_name))
 
     def _exit() -> None:
         os._exit(0)
 
-    start_parent_watchdog(parent_pid, interval, _exit)
+    start_parent_watchdog(pinned, interval, _exit)

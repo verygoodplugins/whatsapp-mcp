@@ -421,6 +421,8 @@ def shutdown_handler(signum, frame):
 
 
 if __name__ == "__main__":
+    # Capture before any await — os.getppid() is dynamic.
+    parent_pid = os.getppid()
     # Register signal handlers for clean shutdown
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
@@ -442,5 +444,5 @@ if __name__ == "__main__":
         raise SystemExit(str(exc)) from None
 
     if transport == 'stdio':
-        install_stdio_parent_watchdog('WHATSAPP_PARENT_WATCHDOG_S')
+        install_stdio_parent_watchdog('WHATSAPP_PARENT_WATCHDOG_S', parent_pid=parent_pid)
     mcp.run(transport=transport)
