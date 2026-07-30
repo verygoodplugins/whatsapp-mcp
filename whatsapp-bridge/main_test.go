@@ -127,6 +127,9 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 	if err != nil {
 		t.Fatalf("failed to create tables: %v", err)
 	}
+	if err := ensureMCPAccessSchema(db); err != nil {
+		t.Fatalf("failed to create MCP access-control table: %v", err)
+	}
 	t.Cleanup(func() { _ = db.Close() })
 	return &MessageStore{db: db}
 }
@@ -1050,6 +1053,18 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_MigratesAndIsIdempotent(t *testing.T) 
 	if err != nil {
 		t.Fatalf("failed to seed message store: %v", err)
 	}
+	if err := ensureMCPAccessSchema(ms.db); err != nil {
+		t.Fatalf("failed to create MCP access schema: %v", err)
+	}
+	if _, err := ms.db.Exec(`
+		INSERT INTO mcp_chat_permissions (
+			chat_jid, read_new_since_unix, read_history_through_unix, can_send, updated_at_unix
+		) VALUES
+			(?, NULL, 10, 0, 10),
+			(?, 20, NULL, 1, 20);
+	`, phoneJID, lidJID); err != nil {
+		t.Fatalf("failed to seed MCP permissions: %v", err)
+	}
 
 	if err := ms.MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath, logger); err != nil {
 		t.Fatalf("migration failed: %v", err)
@@ -1080,6 +1095,40 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_MigratesAndIsIdempotent(t *testing.T) 
 	}
 	if phoneTime != "2026-03-01T10:00:00Z" {
 		t.Fatalf("expected phone chat last_message_time to be the latest (from LID chat), got %q", phoneTime)
+	}
+
+	var (
+		readNewSince       sql.NullInt64
+		readHistoryThrough sql.NullInt64
+		canSend            bool
+		updatedAt          int64
+	)
+	if err := ms.db.QueryRow(`
+		SELECT read_new_since_unix, read_history_through_unix, can_send, updated_at_unix
+		FROM mcp_chat_permissions
+		WHERE chat_jid = ?
+	`, phoneJID).Scan(&readNewSince, &readHistoryThrough, &canSend, &updatedAt); err != nil {
+		t.Fatalf("failed to read migrated MCP permission: %v", err)
+	}
+	if !readNewSince.Valid || readNewSince.Int64 != 20 ||
+		readHistoryThrough.Valid || !canSend || updatedAt != 20 {
+		t.Fatalf(
+			"newest MCP permission did not win migration: read_new=%v history=%v can_send=%v updated=%d",
+			readNewSince,
+			readHistoryThrough,
+			canSend,
+			updatedAt,
+		)
+	}
+	var lidPermissionCount int
+	if err := ms.db.QueryRow(
+		"SELECT COUNT(*) FROM mcp_chat_permissions WHERE chat_jid = ?",
+		lidJID,
+	).Scan(&lidPermissionCount); err != nil {
+		t.Fatalf("failed to count legacy LID permission: %v", err)
+	}
+	if lidPermissionCount != 0 {
+		t.Fatalf("expected migrated LID permission row to be removed")
 	}
 
 	if err := ms.MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath, logger); err != nil {
@@ -1426,6 +1475,7 @@ func TestHandleMessage_ImageOnly_WebhookForwarded(t *testing.T) {
 	logger := testLogger()
 
 	msg := buildImageMessage(phonePN, phonePN, false, "") // no caption
+	grantWebhookReadNew(t, ms, phonePN.String(), msg.Info.Timestamp)
 
 	handleMessage(client, ms, msg, logger)
 
@@ -1463,6 +1513,7 @@ func TestHandleMessage_ImageWithCaption_WebhookForwarded(t *testing.T) {
 	logger := testLogger()
 
 	msg := buildImageMessage(phonePN, phonePN, false, "look at this!")
+	grantWebhookReadNew(t, ms, phonePN.String(), msg.Info.Timestamp)
 
 	handleMessage(client, ms, msg, logger)
 
@@ -1976,6 +2027,7 @@ func TestHandleMessage_InboundReaction_WebhookForwarded(t *testing.T) {
 	emoji := "👍"
 
 	msg := buildReactionMessage(phonePN, phonePN, false, targetID, emoji)
+	grantWebhookReadNew(t, ms, chatJID, msg.Info.Timestamp)
 	handleMessage(client, ms, msg, logger)
 
 	mediaType, filename, found := queryMessageMediaTypeAndFilename(ms, chatJID, msg.Info.ID)
@@ -2029,6 +2081,7 @@ func TestHandleMessage_EmptyEmojiReaction_WebhookForwarded(t *testing.T) {
 	targetID := "3AABCDEF01234570"
 
 	msg := buildReactionMessage(phonePN, phonePN, false, targetID, "")
+	grantWebhookReadNew(t, ms, phonePN.String(), msg.Info.Timestamp)
 	handleMessage(client, ms, msg, logger)
 
 	select {

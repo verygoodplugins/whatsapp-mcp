@@ -7,6 +7,9 @@ from mcp.server.fastmcp import FastMCP
 
 from mcp_config import resolve_host, resolve_port, resolve_transport
 from whatsapp import (
+    access_control_enabled as whatsapp_access_control_enabled,
+)
+from whatsapp import (
     download_media as whatsapp_download_media,
 )
 from whatsapp import (
@@ -55,6 +58,17 @@ from whatsapp import (
 # Initialize FastMCP server. Env-var handling is deferred to the __main__ block
 # so importing this module never parses env vars or exits the process.
 mcp = FastMCP("whatsapp")
+
+_MAX_MESSAGES = 500
+_MAX_CHATS = 200
+_MAX_CONTEXT_MESSAGES = 50
+
+
+def _bounded_non_negative(value: int, name: str, maximum: int | None = None) -> int:
+    """Validate a count/offset and optionally cap its upper bound."""
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative")
+    return min(value, maximum) if maximum is not None else value
 
 
 @mcp.tool()
@@ -142,7 +156,7 @@ def get_contact(
     if chat and chat.get("name"):
         display_name = chat["name"]
         resolved = display_name not in (jid, jid_user)
-    else:
+    elif not whatsapp_access_control_enabled():
         # Fallback: best-effort sender-name resolution (may use fuzzy LIKE lookup).
         display_name = whatsapp_get_sender_name(jid)
         resolved = display_name not in (jid, jid_user, identifier)
@@ -186,12 +200,14 @@ def list_messages(
         limit: Max messages to return (default 50, max 500)
         page: Page number for pagination (default 0)
         include_context: Include surrounding messages for context (default True)
-        context_before: Messages to include before each match (default 1)
-        context_after: Messages to include after each match (default 1)
+        context_before: Messages before each match (default 1, max 50)
+        context_after: Messages after each match (default 1, max 50)
         sort_by: "newest" (default, most recent first) or "oldest" (chronological)
     """
-    # Cap limit at 500 to prevent excessive queries
-    limit = min(limit, 500)
+    limit = _bounded_non_negative(limit, "limit", _MAX_MESSAGES)
+    page = _bounded_non_negative(page, "page")
+    context_before = _bounded_non_negative(context_before, "context_before", _MAX_CONTEXT_MESSAGES)
+    context_after = _bounded_non_negative(context_after, "context_after", _MAX_CONTEXT_MESSAGES)
     messages = whatsapp_list_messages(
         after=after,
         before=before,
@@ -225,8 +241,8 @@ def list_chats(
         include_last_message: Include the last message in each chat (default True)
         sort_by: "last_active" (default, most recent first) or "name" (alphabetical)
     """
-    # Cap limit at 200 to prevent excessive queries
-    limit = min(limit, 200)
+    limit = _bounded_non_negative(limit, "limit", _MAX_CHATS)
+    page = _bounded_non_negative(page, "page")
     chats = whatsapp_list_chats(
         query=query, limit=limit, page=page, include_last_message=include_last_message, sort_by=sort_by
     )
@@ -262,9 +278,11 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
 
     Args:
         jid: The contact's JID to search for
-        limit: Maximum number of chats to return (default 20)
+        limit: Maximum number of chats to return (default 20, max 200)
         page: Page number for pagination (default 0)
     """
+    limit = _bounded_non_negative(limit, "limit", _MAX_CHATS)
+    page = _bounded_non_negative(page, "page")
     chats = whatsapp_get_contact_chats(jid, limit, page)
     return chats
 
@@ -284,15 +302,26 @@ def get_last_interaction(jid: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def get_message_context(message_id: str, before: int = 5, after: int = 5) -> dict[str, Any]:
+def get_message_context(
+    message_id: str,
+    before: int = 5,
+    after: int = 5,
+    chat_jid: str | None = None,
+) -> dict[str, Any]:
     """Get context around a specific WhatsApp message.
 
     Args:
         message_id: The ID of the message to get context for
-        before: Number of messages to include before the target message (default 5)
-        after: Number of messages to include after the target message (default 5)
+        before: Messages before the target (default 5, max 50)
+        after: Messages after the target (default 5, max 50)
+        chat_jid: Chat JID to disambiguate message IDs that occur in multiple chats
     """
-    context = whatsapp_get_message_context(message_id, before, after)
+    before = _bounded_non_negative(before, "before", _MAX_CONTEXT_MESSAGES)
+    after = _bounded_non_negative(after, "after", _MAX_CONTEXT_MESSAGES)
+    if chat_jid is None:
+        context = whatsapp_get_message_context(message_id, before, after)
+    else:
+        context = whatsapp_get_message_context(message_id, before, after, chat_jid=chat_jid)
     return {
         "message": msg_to_dict(context.message),
         "before": [msg_to_dict(message) for message in context.before],
@@ -309,6 +338,9 @@ def send_message(
     quoted_content: str = "",
 ) -> dict[str, Any]:
     """Send a WhatsApp message to a person or group. For group chats use the JID.
+
+    A phone number with no existing chat is allowed only when the Bridge
+    administrator enabled starting new individual conversations.
 
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,
@@ -365,6 +397,9 @@ def send_reaction(
 def send_file(recipient: str, media_path: str) -> dict[str, Any]:
     """Send a file such as a picture, raw audio, video or document via WhatsApp to the specified recipient. For group messages use the JID.
 
+    A phone number with no existing chat is allowed only when the Bridge
+    administrator enabled starting new individual conversations.
+
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
@@ -382,6 +417,9 @@ def send_file(recipient: str, media_path: str) -> dict[str, Any]:
 @mcp.tool()
 def send_audio_message(recipient: str, media_path: str) -> dict[str, Any]:
     """Send any audio file as a WhatsApp audio message to the specified recipient. For group messages use the JID. If it errors due to ffmpeg not being installed, use send_file instead.
+
+    A phone number with no existing chat is allowed only when the Bridge
+    administrator enabled starting new individual conversations.
 
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,

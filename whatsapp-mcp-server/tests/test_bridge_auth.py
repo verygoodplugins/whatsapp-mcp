@@ -5,6 +5,15 @@ import pytest
 import whatsapp
 
 
+@pytest.fixture(autouse=True)
+def isolated_legacy_messages_db(monkeypatch, tmp_path):
+    """Keep transport tests independent from a developer's live bridge store."""
+    messages_db = tmp_path / "messages.db"
+    monkeypatch.setenv("WHATSAPP_DB_PATH", str(messages_db))
+    monkeypatch.setenv("WHATSAPP_MCP_LEGACY_ALLOW_ALL", "true")
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(messages_db))
+
+
 class DummyResponse:
     def __init__(self, status_code=200, payload=None, text="OK"):
         self.status_code = status_code

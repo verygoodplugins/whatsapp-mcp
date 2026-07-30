@@ -23,6 +23,62 @@ WHATSMEOW_DB_PATH = os.getenv(
 WHATSAPP_API_BASE_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:8080/api")
 
 _BRIDGE_TOKEN_PATH = os.path.join(os.path.dirname(WHATSMEOW_DB_PATH), ".bridge-token")
+_PERMISSIONS_TABLE = "mcp_chat_permissions"
+_ACCESS_SETTINGS_TABLE = "mcp_access_settings"
+_LEGACY_ALLOW_ALL_ENV = "WHATSAPP_MCP_LEGACY_ALLOW_ALL"
+
+
+def _legacy_allow_all_enabled() -> bool:
+    """Return whether the operator explicitly enabled pre-ACL behavior."""
+    return os.getenv(_LEGACY_ALLOW_ALL_ENV, "").strip().lower() == "true"
+
+
+def _permissions_enabled(conn: sqlite3.Connection) -> bool:
+    """Return whether per-chat access control must be enforced.
+
+    Missing or malformed ACL state fails closed. Operators temporarily running
+    an older bridge may explicitly opt into its historical allow-all behavior
+    with WHATSAPP_MCP_LEGACY_ALLOW_ALL=true.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (_PERMISSIONS_TABLE,),
+    ).fetchone()
+    return row is not None or not _legacy_allow_all_enabled()
+
+
+def access_control_enabled() -> bool:
+    """Best-effort access-control state for MCP wrapper behavior.
+
+    Database errors are treated as enabled so callers fail closed instead of
+    falling back to unrestricted contact metadata.
+    """
+    try:
+        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        try:
+            return _permissions_enabled(conn)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return True
+
+
+def _message_read_clause(message_alias: str, access_alias: str) -> str:
+    return f"""(
+        ({access_alias}.read_new_since_unix IS NOT NULL
+            AND unixepoch({message_alias}.timestamp) >= {access_alias}.read_new_since_unix)
+        OR
+        ({access_alias}.read_history_through_unix IS NOT NULL
+            AND unixepoch({message_alias}.timestamp) <= {access_alias}.read_history_through_unix)
+    )"""
+
+
+def _chat_visible_clause(access_alias: str) -> str:
+    return (
+        f"({access_alias}.can_send = 1 "
+        f"OR {access_alias}.read_new_since_unix IS NOT NULL "
+        f"OR {access_alias}.read_history_through_unix IS NOT NULL)"
+    )
 
 
 def _read_bridge_token() -> str | None:
@@ -211,6 +267,148 @@ def _resolve_lid_to_phone(lid_or_jid: str) -> str | None:
             conn.close()
 
 
+def _chat_jid_candidates(value: str) -> list[str]:
+    """Return exact, identity-equivalent chat JIDs in canonical order."""
+    value = value.strip()
+    if not value:
+        return []
+
+    if "@" in value:
+        user, server = value.split("@", 1)
+        # Device-qualified user JIDs are persisted as their non-device form.
+        user = user.split(":", 1)[0]
+        exact = f"{user}@{server}"
+        if server not in ("s.whatsapp.net", "lid"):
+            return [exact]
+        lookup_kind = "pn" if server == "s.whatsapp.net" else "lid"
+        bare = user
+    else:
+        exact = f"{value}@s.whatsapp.net"
+        lookup_kind = "pn"
+        bare = value
+
+    pn: str | None = bare if lookup_kind == "pn" else None
+    lid: str | None = bare if lookup_kind == "lid" else None
+    if os.path.isfile(WHATSMEOW_DB_PATH):
+        try:
+            conn = sqlite3.connect(WHATSMEOW_DB_PATH)
+            try:
+                if lookup_kind == "pn":
+                    row = conn.execute("SELECT lid FROM whatsmeow_lid_map WHERE pn = ? LIMIT 1", (bare,)).fetchone()
+                    if row:
+                        lid = row[0]
+                    elif "@" not in value:
+                        # A bare numeric identifier can also be a known LID.
+                        row = conn.execute(
+                            "SELECT pn FROM whatsmeow_lid_map WHERE lid = ? LIMIT 1",
+                            (bare,),
+                        ).fetchone()
+                        if row:
+                            lid, pn = bare, row[0]
+                else:
+                    row = conn.execute("SELECT pn FROM whatsmeow_lid_map WHERE lid = ? LIMIT 1", (bare,)).fetchone()
+                    if row:
+                        pn = row[0]
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            # Never invent a PN/LID equivalence when the authoritative map
+            # cannot be read. Exact matching remains safe.
+            pass
+
+    candidates: list[str] = []
+    if pn:
+        candidates.append(f"{pn}@s.whatsapp.net")
+    if lid:
+        candidates.append(f"{lid}@lid")
+    if exact not in candidates:
+        candidates.append(exact)
+    return candidates
+
+
+def _resolve_chat_jid(conn: sqlite3.Connection, value: str) -> str | None:
+    """Resolve an input identifier to one exact JID present in chats."""
+    for candidate in _chat_jid_candidates(value):
+        row = conn.execute("SELECT jid FROM chats WHERE jid = ? LIMIT 1", (candidate,)).fetchone()
+        if row:
+            return row[0]
+    return None
+
+
+def _new_direct_recipient_jid(recipient: str) -> str | None:
+    """Return a normalized phone JID eligible to start a new direct chat."""
+    value = recipient.strip()
+    if "@" in value:
+        user, server = value.split("@", 1)
+        if server != "s.whatsapp.net":
+            return None
+    else:
+        user = value
+    if not 7 <= len(user) <= 15 or any(character < "0" or character > "9" for character in user):
+        return None
+    return f"{user}@s.whatsapp.net"
+
+
+def _authorize_chat_send(recipient: str, *, allow_new_conversation: bool = False) -> tuple[bool, str]:
+    """Authorize an outbound operation and return its canonical recipient."""
+    try:
+        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        try:
+            if not _permissions_enabled(conn):
+                return True, recipient
+            chat_jid = _resolve_chat_jid(conn, recipient)
+            if not chat_jid:
+                new_chat_jid = _new_direct_recipient_jid(recipient)
+                if allow_new_conversation and new_chat_jid:
+                    row = conn.execute(
+                        f"""
+                        SELECT allow_start_new_conversations
+                        FROM {_ACCESS_SETTINGS_TABLE}
+                        WHERE singleton_id = 1
+                        """
+                    ).fetchone()
+                    if row and row[0]:
+                        return True, new_chat_jid
+                return False, recipient
+            row = conn.execute(
+                f"SELECT can_send FROM {_PERMISSIONS_TABLE} WHERE chat_jid = ?",
+                (chat_jid,),
+            ).fetchone()
+            return bool(row and row[0]), chat_jid
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False, recipient
+
+
+def _authorize_message_read(message_id: str, chat_jid: str) -> tuple[bool, str]:
+    """Authorize access to one concrete message and return canonical chat JID."""
+    try:
+        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        try:
+            if not _permissions_enabled(conn):
+                return True, chat_jid
+            canonical_jid = _resolve_chat_jid(conn, chat_jid)
+            if not canonical_jid:
+                return False, chat_jid
+            row = conn.execute(
+                f"""
+                SELECT 1
+                FROM messages m
+                JOIN {_PERMISSIONS_TABLE} access ON access.chat_jid = m.chat_jid
+                WHERE m.id = ? AND m.chat_jid = ?
+                    AND {_message_read_clause("m", "access")}
+                LIMIT 1
+                """,
+                (message_id, canonical_jid),
+            ).fetchone()
+            return row is not None, canonical_jid
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False, chat_jid
+
+
 def _resolve_name_from_whatsmeow(jid: str) -> str | None:
     """Look up a contact name from whatsmeow's contact store (whatsapp.db).
 
@@ -276,25 +474,14 @@ def get_sender_name(sender_jid: str) -> str:
 
         result = cursor.fetchone()
 
-        # If no result, try looking for the number within JIDs
+        # If no result, try exact PN/LID identity aliases. Fuzzy substring
+        # matching can confuse different contacts and bypass chat visibility.
         if not result:
-            # Extract the phone number part if it's a JID
-            if "@" in sender_jid:
-                phone_part = sender_jid.split("@")[0]
-            else:
-                phone_part = sender_jid
-
-            cursor.execute(
-                """
-                SELECT name
-                FROM chats
-                WHERE jid LIKE ?
-                LIMIT 1
-            """,
-                (f"%{phone_part}%",),
-            )
-
-            result = cursor.fetchone()
+            for candidate in _chat_jid_candidates(sender_jid):
+                cursor.execute("SELECT name FROM chats WHERE jid = ? LIMIT 1", (candidate,))
+                result = cursor.fetchone()
+                if result:
+                    break
 
         if result and result[0] and not result[0].replace("+", "").isdigit():
             return result[0]
@@ -386,13 +573,16 @@ def list_messages(
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
+        permissions_enabled = _permissions_enabled(conn)
 
         # Build base query
         query_parts = [
             "SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename FROM messages"
         ]
         query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
-        where_clauses = []
+        if permissions_enabled:
+            query_parts.append(f"JOIN {_PERMISSIONS_TABLE} access ON access.chat_jid = messages.chat_jid")
+        where_clauses = [_message_read_clause("messages", "access")] if permissions_enabled else []
         params = []
 
         # Add filters
@@ -421,6 +611,10 @@ def list_messages(
             params.extend(aliases)
 
         if chat_jid:
+            if permissions_enabled:
+                chat_jid = _resolve_chat_jid(conn, chat_jid)
+                if not chat_jid:
+                    return []
             where_clauses.append("messages.chat_jid = ?")
             params.append(chat_jid)
 
@@ -464,17 +658,25 @@ def list_messages(
             seen_ids = set()
             messages_with_context = []
             for msg in result:
-                context = get_message_context(msg.id, context_before, context_after)
+                context = get_message_context(
+                    msg.id,
+                    context_before,
+                    context_after,
+                    chat_jid=msg.chat_jid,
+                )
                 for ctx_msg in context.before:
-                    if ctx_msg.id not in seen_ids:
-                        seen_ids.add(ctx_msg.id)
+                    message_key = (ctx_msg.chat_jid, ctx_msg.id)
+                    if message_key not in seen_ids:
+                        seen_ids.add(message_key)
                         messages_with_context.append(ctx_msg)
-                if context.message.id not in seen_ids:
-                    seen_ids.add(context.message.id)
+                message_key = (context.message.chat_jid, context.message.id)
+                if message_key not in seen_ids:
+                    seen_ids.add(message_key)
                     messages_with_context.append(context.message)
                 for ctx_msg in context.after:
-                    if ctx_msg.id not in seen_ids:
-                        seen_ids.add(ctx_msg.id)
+                    message_key = (ctx_msg.chat_jid, ctx_msg.id)
+                    if message_key not in seen_ids:
+                        seen_ids.add(message_key)
                         messages_with_context.append(ctx_msg)
 
             return [msg_to_dict(msg) for msg in messages_with_context]
@@ -490,26 +692,49 @@ def list_messages(
             conn.close()
 
 
-def get_message_context(message_id: str, before: int = 5, after: int = 5) -> MessageContext:
+def get_message_context(
+    message_id: str,
+    before: int = 5,
+    after: int = 5,
+    chat_jid: str | None = None,
+) -> MessageContext:
     """Get context around a specific message."""
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
+        permissions_enabled = _permissions_enabled(conn)
 
         # Get the target message first
-        cursor.execute(
-            """
+        target_query = """
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type, messages.quoted_message_id, messages.filename
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.id = ?
-        """,
-            (message_id,),
-        )
-        msg_data = cursor.fetchone()
+        """
+        if permissions_enabled:
+            target_query += f" JOIN {_PERMISSIONS_TABLE} access ON access.chat_jid = messages.chat_jid"
 
-        if not msg_data:
-            raise ValueError(f"Message with ID {message_id} not found")
+        target_where = ["messages.id = ?"]
+        target_params: list[Any] = [message_id]
+        if chat_jid:
+            if permissions_enabled:
+                chat_jid = _resolve_chat_jid(conn, chat_jid)
+                if not chat_jid:
+                    raise ValueError("Message not found or not readable")
+            target_where.append("messages.chat_jid = ?")
+            target_params.append(chat_jid)
+        if permissions_enabled:
+            target_where.append(_message_read_clause("messages", "access"))
+
+        target_query += " WHERE " + " AND ".join(target_where)
+        target_query += " LIMIT 2"
+        cursor.execute(target_query, tuple(target_params))
+        target_rows = cursor.fetchall()
+
+        if not target_rows:
+            raise ValueError("Message not found or not readable")
+        if len(target_rows) > 1:
+            raise ValueError("Message ID is ambiguous; provide chat_jid")
+        msg_data = target_rows[0]
 
         target_message = Message(
             timestamp=datetime.fromisoformat(msg_data[0]),
@@ -525,15 +750,24 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> Mes
         )
 
         # Get messages before
-        cursor.execute(
-            """
+        before_query = """
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
+        """
+        if permissions_enabled:
+            before_query += f" JOIN {_PERMISSIONS_TABLE} access ON access.chat_jid = messages.chat_jid"
+        before_query += """
             WHERE messages.chat_jid = ? AND messages.timestamp < ?
+        """
+        if permissions_enabled:
+            before_query += f" AND {_message_read_clause('messages', 'access')}"
+        before_query += """
             ORDER BY messages.timestamp DESC
             LIMIT ?
-        """,
+        """
+        cursor.execute(
+            before_query,
             (msg_data[7], msg_data[0], before),
         )
 
@@ -555,15 +789,24 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> Mes
             )
 
         # Get messages after
-        cursor.execute(
-            """
+        after_query = """
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
+        """
+        if permissions_enabled:
+            after_query += f" JOIN {_PERMISSIONS_TABLE} access ON access.chat_jid = messages.chat_jid"
+        after_query += """
             WHERE messages.chat_jid = ? AND messages.timestamp > ?
+        """
+        if permissions_enabled:
+            after_query += f" AND {_message_read_clause('messages', 'access')}"
+        after_query += """
             ORDER BY messages.timestamp ASC
             LIMIT ?
-        """,
+        """
+        cursor.execute(
+            after_query,
             (msg_data[7], msg_data[0], after),
         )
 
@@ -609,39 +852,69 @@ def list_chats(
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
+        permissions_enabled = _permissions_enabled(conn)
 
         # Build base query. The last-message columns are referenced by tuple
         # index downstream, so we keep the result shape constant and emit
         # static NULLs when the messages table is not joined — otherwise the
         # SELECT references messages.* with no FROM/JOIN and SQLite errors
         # out with "no such column: messages.content".
-        if include_last_message:
-            last_message_select = (
-                "messages.content as last_message, "
-                "messages.sender as last_sender, "
-                "messages.is_from_me as last_is_from_me"
-            )
+        if permissions_enabled:
+            if include_last_message:
+                last_message_select = (
+                    "allowed_last.content as last_message, "
+                    "allowed_last.sender as last_sender, "
+                    "allowed_last.is_from_me as last_is_from_me"
+                )
+            else:
+                last_message_select = "NULL as last_message, NULL as last_sender, NULL as last_is_from_me"
+            query_parts = [
+                f"""
+                SELECT
+                    chats.jid,
+                    chats.name,
+                    allowed_last.timestamp,
+                    {last_message_select}
+                FROM chats
+                JOIN {_PERMISSIONS_TABLE} access ON access.chat_jid = chats.jid
+                LEFT JOIN messages allowed_last ON allowed_last.rowid = (
+                    SELECT candidate.rowid
+                    FROM messages candidate
+                    WHERE candidate.chat_jid = chats.jid
+                        AND {_message_read_clause("candidate", "access")}
+                    ORDER BY candidate.timestamp DESC, candidate.rowid DESC
+                    LIMIT 1
+                )
+                """
+            ]
+            where_clauses = [_chat_visible_clause("access")]
         else:
-            last_message_select = "NULL as last_message, NULL as last_sender, NULL as last_is_from_me"
+            if include_last_message:
+                last_message_select = (
+                    "messages.content as last_message, "
+                    "messages.sender as last_sender, "
+                    "messages.is_from_me as last_is_from_me"
+                )
+            else:
+                last_message_select = "NULL as last_message, NULL as last_sender, NULL as last_is_from_me"
 
-        query_parts = [
-            f"""
-            SELECT
-                chats.jid,
-                chats.name,
-                chats.last_message_time,
-                {last_message_select}
-            FROM chats
-        """
-        ]
+            query_parts = [
+                f"""
+                SELECT
+                    chats.jid,
+                    chats.name,
+                    chats.last_message_time,
+                    {last_message_select}
+                FROM chats
+                """
+            ]
 
-        if include_last_message:
-            query_parts.append("""
-                LEFT JOIN messages ON chats.jid = messages.chat_jid
-                AND chats.last_message_time = messages.timestamp
-            """)
-
-        where_clauses = []
+            if include_last_message:
+                query_parts.append("""
+                    LEFT JOIN messages ON chats.jid = messages.chat_jid
+                    AND chats.last_message_time = messages.timestamp
+                """)
+            where_clauses = []
         params = []
 
         if query:
@@ -655,7 +928,12 @@ def list_chats(
             query_parts.append("WHERE " + " AND ".join(where_clauses))
 
         # Add sorting
-        order_by = "chats.last_message_time DESC" if sort_by == "last_active" else "chats.name"
+        if sort_by == "last_active":
+            order_by = (
+                "allowed_last.timestamp DESC, chats.name" if permissions_enabled else "chats.last_message_time DESC"
+            )
+        else:
+            order_by = "chats.name"
         query_parts.append(f"ORDER BY {order_by}")
 
         # Add pagination
@@ -699,23 +977,42 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     # JIDs are all ASCII so LIKE is safe; names use instr() because SQLite's
     # LOWER() only folds case for ASCII and would drop Unicode matches.
     jid_pattern = "%" + query + "%"
+    permissions_enabled = False
+    allowed_contact_jids: set[str] = set()
 
     # 1) Search messages.db chats table (existing behavior)
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
-        cursor.execute(
-            """
+        permissions_enabled = _permissions_enabled(conn)
+        messages_query = """
             SELECT DISTINCT jid, name
             FROM chats
+        """
+        params: list[Any] = []
+        if permissions_enabled:
+            messages_query += f" JOIN {_PERMISSIONS_TABLE} access ON access.chat_jid = chats.jid"
+        messages_query += """
             WHERE
                 (instr(LOWER(name), LOWER(?)) > 0 OR instr(name, ?) > 0 OR jid LIKE ?)
                 AND jid NOT LIKE '%@g.us'
-            ORDER BY name, jid
-            LIMIT 50
-        """,
-            (query, query, jid_pattern),
-        )
+        """
+        params.extend([query, query, jid_pattern])
+        if permissions_enabled:
+            messages_query += f" AND {_chat_visible_clause('access')}"
+            allowed_rows = conn.execute(
+                f"""
+                SELECT chats.jid
+                FROM chats
+                JOIN {_PERMISSIONS_TABLE} access ON access.chat_jid = chats.jid
+                WHERE chats.jid NOT LIKE '%@g.us'
+                    AND {_chat_visible_clause("access")}
+                """
+            ).fetchall()
+            for (allowed_jid,) in allowed_rows:
+                allowed_contact_jids.update(_chat_jid_candidates(allowed_jid))
+        messages_query += " ORDER BY name, jid LIMIT 50"
+        cursor.execute(messages_query, tuple(params))
         for jid, name in cursor.fetchall():
             if jid not in seen_jids:
                 seen_jids.add(jid)
@@ -723,6 +1020,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
                 result.append(contact_to_dict(contact))
     except sqlite3.Error as e:
         print(f"Database error (messages.db): {e}")
+        return []
     finally:
         if "conn" in locals():
             conn.close()
@@ -732,8 +1030,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
         try:
             conn2 = sqlite3.connect(WHATSMEOW_DB_PATH)
             cursor2 = conn2.cursor()
-            cursor2.execute(
-                """
+            whatsmeow_query = """
                 SELECT their_jid, full_name, push_name, first_name, business_name
                 FROM whatsmeow_contacts
                 WHERE
@@ -742,16 +1039,23 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
                     OR instr(LOWER(first_name), LOWER(?)) > 0 OR instr(first_name, ?) > 0
                     OR instr(LOWER(business_name), LOWER(?)) > 0 OR instr(business_name, ?) > 0
                     OR their_jid LIKE ?
-                LIMIT 50
-            """,
+            """
+            if not permissions_enabled:
+                whatsmeow_query += " LIMIT 50"
+            cursor2.execute(
+                whatsmeow_query,
                 (query, query, query, query, query, query, query, query, jid_pattern),
             )
             for their_jid, full_name, push_name, first_name, business_name in cursor2.fetchall():
+                if permissions_enabled and not (set(_chat_jid_candidates(their_jid)) & allowed_contact_jids):
+                    continue
                 if their_jid not in seen_jids:
                     seen_jids.add(their_jid)
                     name = full_name or push_name or first_name or business_name or ""
                     contact = Contact(phone_number=their_jid.split("@")[0], name=name, jid=their_jid)
                     result.append(contact_to_dict(contact))
+                    if permissions_enabled and len(result) >= 50:
+                        break
         except sqlite3.Error as e:
             print(f"Database error (whatsapp.db): {e}")
         finally:
@@ -775,29 +1079,67 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
 
         aliases = _sender_aliases(jid)
         placeholders = ",".join("?" * len(aliases))
-        cursor.execute(
-            f"""
-            SELECT DISTINCT
-                c.jid,
-                c.name,
-                c.last_message_time,
-                last_msg.content as last_message,
-                last_msg.sender as last_sender,
-                last_msg.is_from_me as last_is_from_me
-            FROM chats c
-            LEFT JOIN messages last_msg ON c.jid = last_msg.chat_jid
-                AND c.last_message_time = last_msg.timestamp
-            WHERE EXISTS (
-                SELECT 1
-                FROM messages contact_msg
-                WHERE contact_msg.chat_jid = c.jid
-                    AND contact_msg.sender IN ({placeholders})
-            ) OR c.jid = ?
-            ORDER BY c.last_message_time DESC
-            LIMIT ? OFFSET ?
-        """,
-            (*aliases, jid, limit, page * limit),
-        )
+        if _permissions_enabled(conn):
+            canonical_jid = _resolve_chat_jid(conn, jid)
+            cursor.execute(
+                f"""
+                SELECT DISTINCT
+                    c.jid,
+                    c.name,
+                    allowed_last.timestamp,
+                    allowed_last.content as last_message,
+                    allowed_last.sender as last_sender,
+                    allowed_last.is_from_me as last_is_from_me
+                FROM chats c
+                JOIN {_PERMISSIONS_TABLE} access ON access.chat_jid = c.jid
+                LEFT JOIN messages allowed_last ON allowed_last.rowid = (
+                    SELECT candidate.rowid
+                    FROM messages candidate
+                    WHERE candidate.chat_jid = c.jid
+                        AND {_message_read_clause("candidate", "access")}
+                    ORDER BY candidate.timestamp DESC, candidate.rowid DESC
+                    LIMIT 1
+                )
+                WHERE {_chat_visible_clause("access")}
+                    AND (
+                        EXISTS (
+                            SELECT 1
+                            FROM messages contact_msg
+                            WHERE contact_msg.chat_jid = c.jid
+                                AND contact_msg.sender IN ({placeholders})
+                                AND {_message_read_clause("contact_msg", "access")}
+                        )
+                        OR c.jid = ?
+                    )
+                ORDER BY allowed_last.timestamp DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*aliases, canonical_jid or "", limit, page * limit),
+            )
+        else:
+            cursor.execute(
+                f"""
+                SELECT DISTINCT
+                    c.jid,
+                    c.name,
+                    c.last_message_time,
+                    last_msg.content as last_message,
+                    last_msg.sender as last_sender,
+                    last_msg.is_from_me as last_is_from_me
+                FROM chats c
+                LEFT JOIN messages last_msg ON c.jid = last_msg.chat_jid
+                    AND c.last_message_time = last_msg.timestamp
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM messages contact_msg
+                    WHERE contact_msg.chat_jid = c.jid
+                        AND contact_msg.sender IN ({placeholders})
+                ) OR c.jid = ?
+                ORDER BY c.last_message_time DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*aliases, jid, limit, page * limit),
+            )
 
         chats = cursor.fetchall()
 
@@ -838,8 +1180,9 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
 
         aliases = _sender_aliases(jid)
         placeholders = ",".join("?" * len(aliases))
-        cursor.execute(
-            f"""
+        permissions_enabled = _permissions_enabled(conn)
+        canonical_jid = _resolve_chat_jid(conn, jid) if permissions_enabled else jid
+        interaction_query = """
             SELECT
                 m.timestamp,
                 m.sender,
@@ -851,11 +1194,19 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
                 m.media_type
             FROM messages m
             JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.sender IN ({placeholders}) OR c.jid = ?
+        """
+        if permissions_enabled:
+            interaction_query += f" JOIN {_PERMISSIONS_TABLE} access ON access.chat_jid = m.chat_jid"
+        interaction_query += f" WHERE (m.sender IN ({placeholders}) OR c.jid = ?)"
+        if permissions_enabled:
+            interaction_query += f" AND {_message_read_clause('m', 'access')}"
+        interaction_query += """
             ORDER BY m.timestamp DESC
             LIMIT 1
-        """,
-            (*aliases, jid),
+        """
+        cursor.execute(
+            interaction_query,
+            (*aliases, canonical_jid or ""),
         )
 
         msg_data = cursor.fetchone()
@@ -893,31 +1244,63 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
+        permissions_enabled = _permissions_enabled(conn)
 
         # See list_chats: keep result tuple shape stable across the
         # include_last_message branch by emitting static NULLs when we
         # don't JOIN the messages table.
-        if include_last_message:
-            last_message_select = "m.content as last_message, m.sender as last_sender, m.is_from_me as last_is_from_me"
+        if permissions_enabled:
+            chat_jid = _resolve_chat_jid(conn, chat_jid)
+            if not chat_jid:
+                return None
+            if include_last_message:
+                last_message_select = (
+                    "m.content as last_message, m.sender as last_sender, m.is_from_me as last_is_from_me"
+                )
+            else:
+                last_message_select = "NULL as last_message, NULL as last_sender, NULL as last_is_from_me"
+            query = f"""
+                SELECT
+                    c.jid,
+                    c.name,
+                    m.timestamp,
+                    {last_message_select}
+                FROM chats c
+                JOIN {_PERMISSIONS_TABLE} access ON access.chat_jid = c.jid
+                LEFT JOIN messages m ON m.rowid = (
+                    SELECT candidate.rowid
+                    FROM messages candidate
+                    WHERE candidate.chat_jid = c.jid
+                        AND {_message_read_clause("candidate", "access")}
+                    ORDER BY candidate.timestamp DESC, candidate.rowid DESC
+                    LIMIT 1
+                )
+                WHERE c.jid = ? AND {_chat_visible_clause("access")}
+            """
         else:
-            last_message_select = "NULL as last_message, NULL as last_sender, NULL as last_is_from_me"
+            if include_last_message:
+                last_message_select = (
+                    "m.content as last_message, m.sender as last_sender, m.is_from_me as last_is_from_me"
+                )
+            else:
+                last_message_select = "NULL as last_message, NULL as last_sender, NULL as last_is_from_me"
 
-        query = f"""
-            SELECT
-                c.jid,
-                c.name,
-                c.last_message_time,
-                {last_message_select}
-            FROM chats c
-        """
-
-        if include_last_message:
-            query += """
-                LEFT JOIN messages m ON c.jid = m.chat_jid
-                AND c.last_message_time = m.timestamp
+            query = f"""
+                SELECT
+                    c.jid,
+                    c.name,
+                    c.last_message_time,
+                    {last_message_select}
+                FROM chats c
             """
 
-        query += " WHERE c.jid = ?"
+            if include_last_message:
+                query += """
+                    LEFT JOIN messages m ON c.jid = m.chat_jid
+                    AND c.last_message_time = m.timestamp
+                """
+
+            query += " WHERE c.jid = ?"
 
         cursor.execute(query, (chat_jid,))
         chat_data = cursor.fetchone()
@@ -948,6 +1331,12 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
+
+        if _permissions_enabled(conn):
+            chat_jid = _resolve_chat_jid(conn, sender_phone_number)
+            if not chat_jid or chat_jid.endswith("@g.us"):
+                return None
+            return get_chat(chat_jid)
 
         cursor.execute(
             """
@@ -1001,6 +1390,13 @@ def send_message(
         # Validate input
         if not recipient:
             return False, "Recipient must be provided"
+        allowed, canonical_recipient = _authorize_chat_send(
+            recipient,
+            allow_new_conversation=not quoted_message_id,
+        )
+        if not allowed:
+            return False, "Sending is not allowed for this chat"
+        recipient = canonical_recipient
 
         url = f"{WHATSAPP_API_BASE_URL}/send"
         payload: dict[str, Any] = {
@@ -1034,6 +1430,13 @@ def send_file(recipient: str, media_path: str) -> tuple[bool, str]:
         # Validate input
         if not recipient:
             return False, "Recipient must be provided"
+        allowed, canonical_recipient = _authorize_chat_send(
+            recipient,
+            allow_new_conversation=True,
+        )
+        if not allowed:
+            return False, "Sending is not allowed for this chat"
+        recipient = canonical_recipient
 
         if not media_path:
             return False, "Media path must be provided"
@@ -1066,6 +1469,13 @@ def send_audio_message(recipient: str, media_path: str) -> tuple[bool, str]:
         # Validate input
         if not recipient:
             return False, "Recipient must be provided"
+        allowed, canonical_recipient = _authorize_chat_send(
+            recipient,
+            allow_new_conversation=True,
+        )
+        if not allowed:
+            return False, "Sending is not allowed for this chat"
+        recipient = canonical_recipient
 
         if not media_path:
             return False, "Media path must be provided"
@@ -1124,6 +1534,10 @@ def send_reaction(
             return False, "Recipient must be provided"
         if not message_id:
             return False, "Message ID must be provided"
+        allowed, canonical_recipient = _authorize_chat_send(recipient)
+        if not allowed:
+            return False, "Sending is not allowed for this chat"
+        recipient = canonical_recipient
 
         url = f"{WHATSAPP_API_BASE_URL}/react"
         payload: dict[str, Any] = {
@@ -1163,6 +1577,12 @@ def download_media(message_id: str, chat_jid: str) -> str | None:
         The local file path if download was successful, None otherwise
     """
     try:
+        allowed, canonical_chat_jid = _authorize_message_read(message_id, chat_jid)
+        if not allowed:
+            print("Download denied by chat access policy")
+            return None
+        chat_jid = canonical_chat_jid
+
         url = f"{WHATSAPP_API_BASE_URL}/download"
         payload = {"message_id": message_id, "chat_jid": chat_jid}
 

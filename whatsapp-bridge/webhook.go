@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"go.mau.fi/whatsmeow/types"
 )
 
 // maxMediaBase64Bytes is the maximum file size that will be base64-encoded and
@@ -73,8 +75,58 @@ type WebhookPayload struct {
 	ReactionRemoved     *bool   `json:"reactionRemoved,omitempty"`
 }
 
-// sendWebhookPayload marshals and POSTs a WebhookPayload to the configured webhook URL.
-func sendWebhookPayload(payload WebhookPayload) {
+// sendWebhookPayload authorizes, builds, marshals and POSTs a WebhookPayload
+// to the configured webhook URL.
+//
+// Authorization lives at this lowest-level egress point so every webhook
+// event type fails closed. The builder is evaluated only after access is
+// granted, which also avoids reading and base64-encoding media from blocked
+// chats.
+func sendWebhookPayload(
+	messageStore *MessageStore,
+	eventTimestamp time.Time,
+	chatJID string,
+	buildPayload func() WebhookPayload,
+) {
+	if messageStore == nil || messageStore.db == nil {
+		fmt.Printf("⚠ Webhook suppressed for %s: MCP access store unavailable\n", chatJID)
+		return
+	}
+	if eventTimestamp.IsZero() {
+		fmt.Printf("⚠ Webhook suppressed for %s: event timestamp unavailable\n", chatJID)
+		return
+	}
+	if buildPayload == nil {
+		fmt.Printf("⚠ Webhook suppressed for %s: payload builder unavailable\n", chatJID)
+		return
+	}
+
+	parsedChatJID, err := types.ParseJID(chatJID)
+	if err != nil || parsedChatJID.ToNonAD().String() != chatJID {
+		fmt.Printf("⚠ Webhook suppressed: non-canonical chat JID %q\n", chatJID)
+		return
+	}
+
+	allowed, err := messageStore.CanMCPReadTimestamp(chatJID, eventTimestamp)
+	if err != nil {
+		fmt.Printf("⚠ Webhook suppressed for %s: failed to check MCP read access: %v\n", chatJID, err)
+		return
+	}
+	if !allowed {
+		fmt.Printf("🔒 Webhook suppressed for %s: MCP read access denied\n", chatJID)
+		return
+	}
+
+	payload := buildPayload()
+	if payload.ChatJID != chatJID {
+		fmt.Printf(
+			"⚠ Webhook suppressed: authorized chat JID %q does not match payload chat JID %q\n",
+			chatJID,
+			payload.ChatJID,
+		)
+		return
+	}
+
 	webhookURL := os.Getenv("WEBHOOK_URL")
 	explicitlyConfigured := webhookURL != ""
 	if !explicitlyConfigured {
@@ -119,17 +171,27 @@ func sendWebhookPayload(payload WebhookPayload) {
 }
 
 // SendWebhook sends a text-only message to the webhook endpoint.
-func SendWebhook(sender, content, chatJID string, isFromMe bool, quotedMessageId, quotedSender, quotedContent string, quotedIsFromMe *bool, mentionedJIDs []string) {
-	sendWebhookPayload(WebhookPayload{
-		Sender:          sender,
-		Content:         content,
-		ChatJID:         chatJID,
-		IsFromMe:        isFromMe,
-		QuotedMessageId: quotedMessageId,
-		QuotedSender:    quotedSender,
-		QuotedContent:   quotedContent,
-		QuotedIsFromMe:  quotedIsFromMe,
-		MentionedJIDs:   mentionedJIDs,
+func SendWebhook(
+	messageStore *MessageStore,
+	eventTimestamp time.Time,
+	sender, content, chatJID string,
+	isFromMe bool,
+	quotedMessageId, quotedSender, quotedContent string,
+	quotedIsFromMe *bool,
+	mentionedJIDs []string,
+) {
+	sendWebhookPayload(messageStore, eventTimestamp, chatJID, func() WebhookPayload {
+		return WebhookPayload{
+			Sender:          sender,
+			Content:         content,
+			ChatJID:         chatJID,
+			IsFromMe:        isFromMe,
+			QuotedMessageId: quotedMessageId,
+			QuotedSender:    quotedSender,
+			QuotedContent:   quotedContent,
+			QuotedIsFromMe:  quotedIsFromMe,
+			MentionedJIDs:   mentionedJIDs,
+		}
 	})
 }
 
@@ -137,58 +199,70 @@ func SendWebhook(sender, content, chatJID string, isFromMe bool, quotedMessageId
 // image data read from localPath. If localPath is empty or unreadable the webhook is
 // still sent – just without the MediaBase64 field so the text caption is not lost.
 func SendWebhookWithMedia(
+	messageStore *MessageStore,
+	eventTimestamp time.Time,
 	sender, content, chatJID string,
 	isFromMe bool,
 	quotedMessageId, quotedSender, quotedContent string,
 	quotedIsFromMe *bool, mentionedJIDs []string,
 	messageID, mediaType, mimeType, mediaFilename, localPath string,
 ) {
-	var mediaBase64 string
-	if localPath != "" {
-		info, statErr := os.Stat(localPath)
-		if statErr != nil {
-			fmt.Printf("⚠ Could not stat media file for base64 encoding: %v\n", statErr)
-		} else if info.Size() > maxMediaBase64Bytes {
-			fmt.Printf("⚠ Media file too large for base64 encoding (%d bytes), skipping MediaBase64\n", info.Size())
-		} else if data, err := os.ReadFile(localPath); err == nil {
-			mediaBase64 = base64.StdEncoding.EncodeToString(data)
-		} else {
-			fmt.Printf("⚠ Could not read media file for base64 encoding: %v\n", err)
+	sendWebhookPayload(messageStore, eventTimestamp, chatJID, func() WebhookPayload {
+		var mediaBase64 string
+		if localPath != "" {
+			info, statErr := os.Stat(localPath)
+			if statErr != nil {
+				fmt.Printf("⚠ Could not stat media file for base64 encoding: %v\n", statErr)
+			} else if info.Size() > maxMediaBase64Bytes {
+				fmt.Printf("⚠ Media file too large for base64 encoding (%d bytes), skipping MediaBase64\n", info.Size())
+			} else if data, err := os.ReadFile(localPath); err == nil {
+				mediaBase64 = base64.StdEncoding.EncodeToString(data)
+			} else {
+				fmt.Printf("⚠ Could not read media file for base64 encoding: %v\n", err)
+			}
 		}
-	}
 
-	sendWebhookPayload(WebhookPayload{
-		Sender:          sender,
-		Content:         content,
-		ChatJID:         chatJID,
-		IsFromMe:        isFromMe,
-		QuotedMessageId: quotedMessageId,
-		QuotedSender:    quotedSender,
-		QuotedContent:   quotedContent,
-		QuotedIsFromMe:  quotedIsFromMe,
-		MentionedJIDs:   mentionedJIDs,
-		MessageID:       messageID,
-		MediaType:       mediaType,
-		MimeType:        mimeType,
-		MediaFilename:   mediaFilename,
-		MediaBase64:     mediaBase64,
+		return WebhookPayload{
+			Sender:          sender,
+			Content:         content,
+			ChatJID:         chatJID,
+			IsFromMe:        isFromMe,
+			QuotedMessageId: quotedMessageId,
+			QuotedSender:    quotedSender,
+			QuotedContent:   quotedContent,
+			QuotedIsFromMe:  quotedIsFromMe,
+			MentionedJIDs:   mentionedJIDs,
+			MessageID:       messageID,
+			MediaType:       mediaType,
+			MimeType:        mimeType,
+			MediaFilename:   mediaFilename,
+			MediaBase64:     mediaBase64,
+		}
 	})
 }
 
 // SendReactionWebhook sends a typed reaction event to the webhook endpoint.
-func SendReactionWebhook(sender, chatJID string, isFromMe bool, messageID, reactionToMessageID, emoji string) {
+func SendReactionWebhook(
+	messageStore *MessageStore,
+	eventTimestamp time.Time,
+	sender, chatJID string,
+	isFromMe bool,
+	messageID, reactionToMessageID, emoji string,
+) {
 	removed := emoji == ""
-	sendWebhookPayload(WebhookPayload{
-		EventType:           "reaction",
-		Sender:              sender,
-		Content:             emoji,
-		ChatJID:             chatJID,
-		IsFromMe:            isFromMe,
-		MessageID:           messageID,
-		MediaType:           "reaction",
-		ReactionToMessageID: reactionToMessageID,
-		ReactionEmoji:       &emoji,
-		ReactionRemoved:     &removed,
+	sendWebhookPayload(messageStore, eventTimestamp, chatJID, func() WebhookPayload {
+		return WebhookPayload{
+			EventType:           "reaction",
+			Sender:              sender,
+			Content:             emoji,
+			ChatJID:             chatJID,
+			IsFromMe:            isFromMe,
+			MessageID:           messageID,
+			MediaType:           "reaction",
+			ReactionToMessageID: reactionToMessageID,
+			ReactionEmoji:       &emoji,
+			ReactionRemoved:     &removed,
+		}
 	})
 }
 

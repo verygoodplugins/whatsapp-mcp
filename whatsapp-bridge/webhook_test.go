@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 )
 
 // setWebhookAuthToken sets the package-level outbound webhook token for the
@@ -27,6 +28,31 @@ func setDefaultWebhookURL(t *testing.T, url string) {
 	prev := defaultWebhookURL
 	defaultWebhookURL = url
 	t.Cleanup(func() { defaultWebhookURL = prev })
+}
+
+func allowWebhookReadNew(t *testing.T, chatJID string, eventTimestamp time.Time) *MessageStore {
+	t.Helper()
+
+	messageStore := newMCPAccessTestStore(t)
+	grantWebhookReadNew(t, messageStore, chatJID, eventTimestamp)
+	return messageStore
+}
+
+func grantWebhookReadNew(t *testing.T, messageStore *MessageStore, chatJID string, eventTimestamp time.Time) {
+	t.Helper()
+
+	if err := messageStore.StoreChat(chatJID, "Webhook test chat", eventTimestamp); err != nil {
+		t.Fatalf("seed webhook chat: %v", err)
+	}
+	if err := messageStore.UpdateMCPChatPermissions(
+		[]MCPChatPermissionUpdate{{
+			ChatJID: chatJID,
+			ReadNew: true,
+		}},
+		eventTimestamp.Add(-time.Second),
+	); err != nil {
+		t.Fatalf("grant webhook read access: %v", err)
+	}
 }
 
 // TestSendWebhookAttachesBridgeTokenHeader verifies that outbound webhook POSTs
@@ -50,7 +76,9 @@ func TestSendWebhookAttachesBridgeTokenHeader(t *testing.T) {
 	t.Setenv("WEBHOOK_URL", srv.URL)
 	setWebhookAuthToken(t, token)
 
-	SendWebhook("123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false, "", "", "", nil, nil)
+	eventTimestamp := time.Now()
+	messageStore := allowWebhookReadNew(t, "123@s.whatsapp.net", eventTimestamp)
+	SendWebhook(messageStore, eventTimestamp, "123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false, "", "", "", nil, nil)
 
 	if gotToken != token {
 		t.Fatalf("X-Bridge-Token header = %q, want %q", gotToken, token)
@@ -76,7 +104,9 @@ func TestSendWebhookOmitsBridgeTokenHeaderWhenNoToken(t *testing.T) {
 	t.Setenv("WEBHOOK_URL", srv.URL)
 	setWebhookAuthToken(t, "")
 
-	SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
+	eventTimestamp := time.Now()
+	messageStore := allowWebhookReadNew(t, "123@s.whatsapp.net", eventTimestamp)
+	SendWebhook(messageStore, eventTimestamp, "123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
 
 	if !received {
 		t.Fatal("webhook was not delivered")
@@ -115,7 +145,9 @@ func TestSendWebhookPreservesURLBasicAuth(t *testing.T) {
 	t.Setenv("WEBHOOK_URL", u.String())
 	setWebhookAuthToken(t, token)
 
-	SendWebhook("123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false, "", "", "", nil, nil)
+	eventTimestamp := time.Now()
+	messageStore := allowWebhookReadNew(t, "123@s.whatsapp.net", eventTimestamp)
+	SendWebhook(messageStore, eventTimestamp, "123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false, "", "", "", nil, nil)
 
 	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
 	if gotAuth != wantAuth {
@@ -150,7 +182,9 @@ func TestSendWebhookOmitsBridgeTokenOnImplicitDefaultURL(t *testing.T) {
 	setDefaultWebhookURL(t, srv.URL)
 	setWebhookAuthToken(t, token)
 
-	SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
+	eventTimestamp := time.Now()
+	messageStore := allowWebhookReadNew(t, "123@s.whatsapp.net", eventTimestamp)
+	SendWebhook(messageStore, eventTimestamp, "123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
 
 	if !received {
 		t.Fatal("webhook was not delivered to the default URL")
@@ -188,7 +222,9 @@ func TestSendWebhookDoesNotFollowRedirects(t *testing.T) {
 	t.Setenv("WEBHOOK_URL", redirector.URL)
 	setWebhookAuthToken(t, token)
 
-	SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
+	eventTimestamp := time.Now()
+	messageStore := allowWebhookReadNew(t, "123@s.whatsapp.net", eventTimestamp)
+	SendWebhook(messageStore, eventTimestamp, "123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
 	if !redirectHit {
 		t.Fatal("expected the configured webhook URL to be hit")
 	}
@@ -211,7 +247,11 @@ func TestSendWebhookSerializesNativeMentionAndQuotedOrigin(t *testing.T) {
 	t.Setenv("WEBHOOK_URL", srv.URL)
 	quotedIsFromMe := true
 	quotedOrigin := &quotedIsFromMe
+	eventTimestamp := time.Now()
+	messageStore := allowWebhookReadNew(t, "123@s.whatsapp.net", eventTimestamp)
 	SendWebhook(
+		messageStore,
+		eventTimestamp,
 		"123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false,
 		"quoted-id", "456@s.whatsapp.net", "[🤖] prior response",
 		quotedOrigin, []string{"491742555497@s.whatsapp.net"},
