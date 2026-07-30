@@ -47,6 +47,11 @@ var forwardSelfMessages = getEnvBool("FORWARD_SELF", true)
 var fullHistoryPairFlag = flag.Bool("full-history-pair", false,
 	"Request full history at pair time (only effective when re-pairing; no-op for existing sessions)")
 
+// An empty value preserves WHATSAPP_BRIDGE_PORT (or the default 8080).
+// A CLI value takes precedence so one-off launches do not need env changes.
+var bridgePortFlag = flag.String("port", "",
+	"REST API port (1-65535; overrides WHATSAPP_BRIDGE_PORT)")
+
 const whatsmeowDBPath = "store/whatsapp.db"
 
 // getEnvBool reads a boolean env var with a default.
@@ -64,6 +69,27 @@ func getEnvBool(key string, def bool) bool {
 	default:
 		return def
 	}
+}
+
+func resolveBridgePort(cliValue, envValue string) (int, error) {
+	value := ""
+	source := ""
+	if cliValue != "" {
+		value = strings.TrimSpace(cliValue)
+		source = "--port"
+	} else if envValue != "" {
+		value = strings.TrimSpace(envValue)
+		source = "WHATSAPP_BRIDGE_PORT"
+	}
+	if source == "" {
+		return 8080, nil
+	}
+
+	port, err := strconv.Atoi(value)
+	if err != nil || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("%s=%q, must be 1-65535", source, value)
+	}
+	return port, nil
 }
 
 // Message represents a chat message for our client
@@ -2402,14 +2428,10 @@ func main() {
 	// WhatsApp connection, so it's safe to do this early alongside the token
 	// load below — and failing fast here means we don't run a QR-pairing
 	// flow only to error out on an invalid port afterwards.
-	port := 8080
-	if p := os.Getenv("WHATSAPP_BRIDGE_PORT"); p != "" {
-		v, err := strconv.Atoi(p)
-		if err != nil || v < 1 || v > 65535 {
-			logger.Errorf("Invalid WHATSAPP_BRIDGE_PORT=%q, must be 1-65535", p)
-			return
-		}
-		port = v
+	port, err := resolveBridgePort(*bridgePortFlag, os.Getenv("WHATSAPP_BRIDGE_PORT"))
+	if err != nil {
+		logger.Errorf("Invalid bridge port: %v", err)
+		return
 	}
 
 	// Load (or generate on first run) the bearer token used to authenticate

@@ -68,6 +68,52 @@ func newTestClientWithSelf(lidStore store.LIDStore, selfPhone types.JID) *whatsm
 	return c
 }
 
+func TestResolveBridgePort(t *testing.T) {
+	tests := []struct {
+		name    string
+		cli     string
+		env     string
+		want    int
+		wantErr bool
+	}{
+		{name: "default", want: 8080},
+		{name: "environment", env: "9090", want: 9090},
+		{name: "trim environment", env: " 9091 ", want: 9091},
+		{name: "CLI", cli: "7070", want: 7070},
+		{name: "CLI overrides environment", cli: "7071", env: "9090", want: 7071},
+		{name: "valid CLI overrides invalid environment", cli: "7072", env: "invalid", want: 7072},
+		{name: "invalid CLI does not fall back", cli: "invalid", env: "9090", wantErr: true},
+		{name: "empty CLI value", cli: " ", env: "9090", wantErr: true},
+		{name: "zero", cli: "0", wantErr: true},
+		{name: "too high", env: "65536", wantErr: true},
+		{name: "negative", env: "-1", wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := resolveBridgePort(test.cli, test.env)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("resolveBridgePort(%q, %q) = %d, want error", test.cli, test.env, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveBridgePort(%q, %q) error: %v", test.cli, test.env, err)
+			}
+			if got != test.want {
+				t.Fatalf(
+					"resolveBridgePort(%q, %q) = %d, want %d",
+					test.cli,
+					test.env,
+					got,
+					test.want,
+				)
+			}
+		})
+	}
+}
+
 // querySender returns the sender column for the first message stored under a
 // chat JID, or empty string if none.
 func querySender(ms *MessageStore, chatJID string) string {
