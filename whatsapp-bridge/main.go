@@ -167,6 +167,13 @@ func NewMessageStore() (*MessageStore, error) {
 		}
 		return nil, err
 	}
+	if err := ensureMCPAccessSchema(db); err != nil {
+		_ = db.Close()
+		if waDB != nil {
+			_ = waDB.Close()
+		}
+		return nil, fmt.Errorf("failed to initialize MCP access control: %w", err)
+	}
 
 	return &MessageStore{db: db, waDB: waDB}, nil
 }
@@ -249,6 +256,9 @@ func ensureColumn(db *sql.DB, tableName, columnName, columnSpec string) error {
 // legacy @lid chat JIDs into phone-based @s.whatsapp.net chat JIDs using the
 // whatsmeow LID map in whatsapp.db.
 func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath string, logger waLog.Logger) error {
+	if err := ensureMCPAccessSchema(store.db); err != nil {
+		return fmt.Errorf("failed to ensure MCP access schema before LID chat migration: %w", err)
+	}
 	if _, err := os.Stat(whatsappDBPath); err != nil {
 		if os.IsNotExist(err) {
 			logger.Infof("Skipping LID chat migration: %s not found", whatsappDBPath)
@@ -406,6 +416,85 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 		return fmt.Errorf("failed to merge destination chat metadata: %w", err)
 	}
 
+	// Permissions follow the canonical phone chat. If both a phone row and one
+	// or more legacy LID rows exist, the most recently edited policy wins.
+	// Combining flags would be unsafe because it could resurrect a permission
+	// the operator explicitly revoked on the newer row.
+	if _, err := tx.Exec(`
+		CREATE TEMP TABLE tmp_mcp_permission_migration AS
+		WITH permission_candidates AS (
+			SELECT
+				m.phone_jid,
+				p.chat_jid AS source_chat_jid,
+				p.read_new_since_unix,
+				p.read_history_through_unix,
+				p.can_send,
+				p.updated_at_unix,
+				p.revision
+			FROM tmp_lid_to_phone m
+			JOIN mcp_chat_permissions p
+				ON p.chat_jid = m.lid_jid OR p.chat_jid = m.phone_jid
+		),
+		ranked_permissions AS (
+			SELECT
+				permission_candidates.*,
+				ROW_NUMBER() OVER (
+					PARTITION BY phone_jid
+					ORDER BY
+						updated_at_unix DESC,
+						CASE WHEN source_chat_jid = phone_jid THEN 0 ELSE 1 END,
+						source_chat_jid
+				) AS preference_rank
+			FROM permission_candidates
+		)
+		SELECT
+			phone_jid,
+			read_new_since_unix,
+			read_history_through_unix,
+			can_send,
+			updated_at_unix,
+			revision
+		FROM ranked_permissions
+		WHERE preference_rank = 1;
+	`); err != nil {
+		return fmt.Errorf("failed to prepare MCP permission LID migration: %w", err)
+	}
+
+	if _, err := tx.Exec(`
+		INSERT INTO mcp_chat_permissions (
+			chat_jid,
+			read_new_since_unix,
+			read_history_through_unix,
+			can_send,
+			updated_at_unix,
+			revision
+		)
+		SELECT
+			phone_jid,
+			read_new_since_unix,
+			read_history_through_unix,
+			can_send,
+			updated_at_unix,
+			revision
+		FROM tmp_mcp_permission_migration
+		WHERE 1
+		ON CONFLICT(chat_jid) DO UPDATE SET
+			read_new_since_unix = excluded.read_new_since_unix,
+			read_history_through_unix = excluded.read_history_through_unix,
+			can_send = excluded.can_send,
+			updated_at_unix = excluded.updated_at_unix,
+			revision = excluded.revision;
+	`); err != nil {
+		return fmt.Errorf("failed to migrate MCP permissions to phone chats: %w", err)
+	}
+
+	if _, err := tx.Exec(`
+		DELETE FROM mcp_chat_permissions
+		WHERE chat_jid IN (SELECT lid_jid FROM tmp_lid_to_phone);
+	`); err != nil {
+		return fmt.Errorf("failed to remove migrated LID MCP permissions: %w", err)
+	}
+
 	insertResult, err := tx.Exec(`
 		INSERT OR IGNORE INTO messages (
 			id, chat_jid, sender, content, timestamp, is_from_me,
@@ -460,6 +549,9 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 	}
 	if _, err := tx.Exec("DROP TABLE IF EXISTS tmp_lid_chat_candidates;"); err != nil {
 		return fmt.Errorf("failed to clean temporary chat candidate table: %w", err)
+	}
+	if _, err := tx.Exec("DROP TABLE IF EXISTS tmp_mcp_permission_migration;"); err != nil {
+		return fmt.Errorf("failed to clean temporary MCP permission migration table: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -1636,7 +1728,16 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 				logger.Warnf("Failed to store reaction: %v", err)
 			}
 			if forwardSelfMessages || !msg.Info.IsFromMe {
-				SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji)
+				SendReactionWebhook(
+					messageStore,
+					msg.Info.Timestamp,
+					sender,
+					chatJID,
+					msg.Info.IsFromMe,
+					msg.Info.ID,
+					reactedToID,
+					emoji,
+				)
 			}
 		}
 		return
@@ -1742,12 +1843,25 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	if shouldForward && (hasText || hasImage) {
 		if hasImage {
 			SendWebhookWithMedia(
+				messageStore, msg.Info.Timestamp,
 				sender, content, chatJID, msg.Info.IsFromMe,
 				quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs,
 				msg.Info.ID, mediaType, imageMimeType, filename, imageDownloadPath,
 			)
 		} else {
-			SendWebhook(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs)
+			SendWebhook(
+				messageStore,
+				msg.Info.Timestamp,
+				sender,
+				content,
+				chatJID,
+				msg.Info.IsFromMe,
+				quotedMessageId,
+				quotedSender,
+				quotedContent,
+				quotedIsFromMe,
+				mentionedJIDs,
+			)
 		}
 	}
 
@@ -1998,7 +2112,14 @@ func extractDirectPathFromURL(url string) string {
 // Outbound media: req.MediaPath in /api/send is validated against
 // allowedMediaRoots before sendWhatsAppMessage ever sees it. See
 // media_path.go.
-func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []string) *http.ServeMux {
+func newRESTMux(
+	client *whatsmeow.Client,
+	messageStore *MessageStore,
+	port int,
+	token string,
+	allowedMediaRoots []string,
+	adminTokens ...string,
+) *http.ServeMux {
 	allowedHosts := buildAllowedHosts(port)
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return withAuth(token, allowedHosts, h)
@@ -2048,6 +2169,29 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			return
 		}
 
+		_, canonicalChatJID, startsNewConversation, accessErr := requireMCPSendAccess(
+			client,
+			messageStore,
+			req.Recipient,
+			req.QuotedMessageID == "",
+		)
+		if accessErr != nil {
+			if errors.Is(accessErr, ErrInvalidMCPChatID) {
+				writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+					"success": false,
+					"message": accessErr.Error(),
+				})
+			} else if errors.Is(accessErr, ErrMCPAccessDenied) {
+				writeMCPAccessDenied(w)
+			} else {
+				writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+					"success": false,
+					"message": "Could not verify MCP send permission",
+				})
+			}
+			return
+		}
+
 		// Validate and canonicalize media_path against the configured roots
 		// before reading. This prevents the bridge from being used as a
 		// generic file-read primitive (e.g. media_path=/Users/x/.ssh/id_rsa).
@@ -2073,6 +2217,19 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 
 		// Send the message
 		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, resolvedMediaPath, req.QuotedMessageID, req.QuotedSenderJID, req.QuotedContent)
+		if success && startsNewConversation {
+			if grantErr := messageStore.GrantMCPNewConversationFullAccess(
+				canonicalChatJID,
+				time.Now().UTC(),
+			); grantErr != nil {
+				fmt.Printf(
+					"Warning: message sent but failed to persist full MCP access for %s: %v\n",
+					canonicalChatJID,
+					grantErr,
+				)
+				message = "Message sent, but the new conversation could not be saved with full access; review the local bridge admin panel before sending again"
+			}
+		}
 		fmt.Printf("← /api/send success=%v status=%q\n", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -2100,9 +2257,9 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			http.Error(w, "recipient, message_id, and emoji are required", http.StatusBadRequest)
 			return
 		}
-		chatJID, err := types.ParseJID(req.Recipient)
+		chatJID, canonicalChatJID, err := parseMCPAccessChatJID(client, req.Recipient)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("Invalid recipient JID: %v", err), http.StatusBadRequest)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		var senderJID types.JID
@@ -2129,6 +2286,17 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			}
 			senderJID = chatJID
 		}
+		canSend, accessErr := messageStore.CanMCPSend(canonicalChatJID)
+		if accessErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "Could not verify MCP send permission",
+			})
+			return
+		}
+		if !canSend {
+			writeMCPAccessDenied(w)
+			return
+		}
 		msg := client.BuildReaction(chatJID, senderJID, req.MessageID, *req.Emoji)
 		w.Header().Set("Content-Type", "application/json")
 		if _, err := client.SendMessage(context.Background(), chatJID, msg); err != nil {
@@ -2147,17 +2315,6 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			return
 		}
 
-		// Check if connected
-		if !client.IsConnected() {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(DownloadMediaResponse{
-				Success: false,
-				Message: "WhatsApp client is not connected. Please wait for reconnection.",
-			})
-			return
-		}
-
 		// Parse the request body
 		var req DownloadMediaRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -2171,11 +2328,40 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			return
 		}
 
+		_, canonicalChatJID, parseErr := parseMCPAccessChatJID(client, req.ChatJID)
+		if parseErr != nil {
+			http.Error(w, parseErr.Error(), http.StatusBadRequest)
+			return
+		}
+		canRead, accessErr := messageStore.CanMCPReadMessage(req.MessageID, canonicalChatJID)
+		if accessErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+				"success": false,
+				"message": "Could not verify MCP read permission",
+			})
+			return
+		}
+		if !canRead {
+			writeJSON(w, http.StatusForbidden, map[string]interface{}{
+				"success": false,
+				"message": "MCP access denied; review this conversation in the local bridge admin panel",
+			})
+			return
+		}
+
+		if !client.IsConnected() {
+			writeJSON(w, http.StatusServiceUnavailable, DownloadMediaResponse{
+				Success: false,
+				Message: "WhatsApp client is not connected. Please wait for reconnection.",
+			})
+			return
+		}
+
 		// Log download request for debugging
-		fmt.Printf("📥 Download request: message_id=%s chat_jid=%s\n", req.MessageID, req.ChatJID)
+		fmt.Printf("📥 Download request: message_id=%s chat_jid=%s\n", req.MessageID, canonicalChatJID)
 
 		// Download the media
-		success, mediaType, filename, path, err := downloadMedia(client, messageStore, req.MessageID, req.ChatJID)
+		success, mediaType, filename, path, err := downloadMedia(client, messageStore, req.MessageID, canonicalChatJID)
 
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -2228,27 +2414,27 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			return
 		}
 
-		// Create JID for recipient
-		var recipientJID types.JID
-		var err error
-
-		// Check if recipient is a JID
-		if strings.Contains(req.Recipient, "@") {
-			recipientJID, err = types.ParseJID(req.Recipient)
-			if err != nil {
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		recipientJID, _, _, err := requireMCPSendAccess(
+			client,
+			messageStore,
+			req.Recipient,
+			false,
+		)
+		if err != nil {
+			if errors.Is(err, ErrInvalidMCPChatID) {
+				writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 					"success": false,
-					"message": fmt.Sprintf("Error parsing JID: %v", err),
+					"message": err.Error(),
 				})
-				return
+			} else if errors.Is(err, ErrMCPAccessDenied) {
+				writeMCPAccessDenied(w)
+			} else {
+				writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+					"success": false,
+					"message": "Could not verify MCP send permission",
+				})
 			}
-		} else {
-			// Create JID from phone number
-			recipientJID = types.JID{
-				User:   req.Recipient,
-				Server: "s.whatsapp.net",
-			}
+			return
 		}
 
 		// Determine the chat presence state
@@ -2280,11 +2466,22 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 		}
 	}))
 
+	if len(adminTokens) > 0 && adminTokens[0] != "" {
+		registerAdminUI(mux, client, messageStore, port, adminTokens[0])
+	}
+
 	return mux
 }
 
-func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []string) {
-	handler := newRESTMux(client, messageStore, port, token, allowedMediaRoots)
+func startRESTServer(
+	client *whatsmeow.Client,
+	messageStore *MessageStore,
+	port int,
+	token string,
+	adminToken string,
+	allowedMediaRoots []string,
+) {
+	handler := newRESTMux(client, messageStore, port, token, allowedMediaRoots, adminToken)
 
 	// Start the server with proper timeouts. Bind to loopback so the bridge is
 	// not reachable from the LAN; MCP clients talk to it over localhost.
@@ -2437,6 +2634,20 @@ func main() {
 	if fresh {
 		printTokenBanner(bridgeToken, port)
 	}
+
+	adminToken, adminFresh, adminTokenErr := loadOrCreateAdminToken()
+	if adminTokenErr != nil {
+		logger.Errorf("Failed to initialize admin token: %v", adminTokenErr)
+		return
+	}
+	if tokenSeparationErr := validateAdminTokenSeparation(bridgeToken, adminToken); tokenSeparationErr != nil {
+		logger.Errorf("Invalid admin token configuration: %v", tokenSeparationErr)
+		return
+	}
+	if adminFresh {
+		printAdminBanner(port)
+	}
+	logger.Infof("MCP access admin panel: http://127.0.0.1:%d/admin/", port)
 
 	// Channel to signal reconnection needs
 	reconnectChan := make(chan bool, 1)
@@ -2660,7 +2871,7 @@ connectionSuccess:
 	}
 	logger.Infof("Allowed media roots: %v", allowedMediaRoots)
 
-	startRESTServer(client, messageStore, port, bridgeToken, allowedMediaRoots)
+	startRESTServer(client, messageStore, port, bridgeToken, adminToken, allowedMediaRoots)
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)

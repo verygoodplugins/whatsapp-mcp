@@ -69,6 +69,9 @@ def messages_db(tmp_path, monkeypatch):
     db_path = tmp_path / "messages.db"
     _make_messages_db(str(db_path))
     monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(db_path))
+    # This module exercises the pre-ACL SQL branches deliberately. Production
+    # now requires this explicit opt-in when the permissions table is absent.
+    monkeypatch.setenv("WHATSAPP_MCP_LEGACY_ALLOW_ALL", "true")
     return db_path
 
 

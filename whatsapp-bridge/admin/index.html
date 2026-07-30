@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Acesso do MCP · WhatsApp Bridge</title>
+    <link rel="stylesheet" href="/admin/app.css" />
+    <script type="module" src="/admin/app.js"></script>
+  </head>
+  <body>
+    <main>
+      <section id="login-view" class="login-shell" aria-labelledby="login-title">
+        <div class="login-card">
+          <div class="login-toolbar">
+            <label class="sr-only" for="login-language" data-i18n="language.label"
+              >Idioma do painel</label
+            >
+            <select
+              id="login-language"
+              class="language-select"
+              data-i18n-aria-label="language.label"
+              aria-label="Idioma do painel"
+            >
+              <option value="pt-BR">Português (BR)</option>
+              <option value="en">English</option>
+            </select>
+          </div>
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" role="img">
+              <path d="M8.2 25.8 9.7 21A11.2 11.2 0 1 1 14 26.7a11 11 0 0 1-5.8-.9Z" />
+              <path d="M12.1 10.6c.3-.7.6-.7 1.1-.7h.5c.2 0 .5.1.6.5l1 2.4c.1.3.1.6-.1.9l-.8 1c-.2.2-.2.4-.1.7.7 1.4 1.8 2.5 3.2 3.2.3.2.5.1.7-.1l1-1.2c.2-.3.5-.3.8-.2l2.3 1.1c.3.2.5.3.5.6 0 .4-.2 1.8-1.2 2.6-.8.7-1.9 1-3.1.7-1.7-.4-3.5-1.2-5.4-2.9-1.6-1.5-2.8-3.3-3.2-5-.4-1.5.1-2.8.5-3.4.4-.5 1-.8 1.7-.8Z" />
+            </svg>
+          </div>
+          <p class="eyebrow">WhatsApp Bridge</p>
+          <h1 id="login-title" data-i18n="login.title">Controle quem o MCP pode acessar</h1>
+          <p class="lead" data-i18n="login.lead">
+            Entre com o token administrativo local para escolher as permissões de cada conversa.
+          </p>
+
+          <form id="login-form">
+            <label for="admin-token" data-i18n="login.tokenLabel">Token administrativo</label>
+            <div class="password-field">
+              <input
+                id="admin-token"
+                name="token"
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                required
+                data-i18n-placeholder="login.tokenPlaceholder"
+                placeholder="Cole o conteúdo de store/.admin-token"
+              />
+              <button
+                id="toggle-token"
+                class="icon-button"
+                type="button"
+                data-i18n-aria-label="login.showToken"
+                aria-label="Mostrar token"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" />
+                  <circle cx="12" cy="12" r="2.7" />
+                </svg>
+              </button>
+            </div>
+            <p class="field-help">
+              <span data-i18n="login.helpBefore"
+                >Este token é diferente do token usado pelo MCP. Ele é criado na primeira inicialização
+                e salvo em</span
+              >
+              <code>whatsapp-bridge/store/.admin-token</code>.
+            </p>
+            <p id="login-error" class="form-error" role="alert" hidden></p>
+            <button id="login-button" class="primary-button full-width" type="submit">
+              <span data-i18n="login.submit">Entrar com segurança</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m9 18 6-6-6-6M15 12H3M21 4v16" />
+              </svg>
+            </button>
+          </form>
+
+          <div class="privacy-note">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3 5 6v5c0 4.8 2.8 8.4 7 10 4.2-1.6 7-5.2 7-10V6l-7-3Z" />
+              <path d="m9.4 12 1.7 1.7 3.7-4" />
+            </svg>
+            <span data-i18n="login.localOnly"
+              >O painel funciona somente nesta máquina, em localhost.</span
+            >
+          </div>
+        </div>
+      </section>
+
+      <section id="app-view" class="app-shell" hidden>
+        <header class="topbar">
+          <a class="brand" href="/admin/" aria-label="WhatsApp Bridge">
+            <span class="brand-mark small" aria-hidden="true">
+              <svg viewBox="0 0 32 32">
+                <path d="M8.2 25.8 9.7 21A11.2 11.2 0 1 1 14 26.7a11 11 0 0 1-5.8-.9Z" />
+                <path d="M12.1 10.6c.3-.7.6-.7 1.1-.7h.5c.2 0 .5.1.6.5l1 2.4c.1.3.1.6-.1.9l-.8 1c-.2.2-.2.4-.1.7.7 1.4 1.8 2.5 3.2 3.2.3.2.5.1.7-.1l1-1.2c.2-.3.5-.3.8-.2l2.3 1.1c.3.2.5.3.5.6 0 .4-.2 1.8-1.2 2.6-.8.7-1.9 1-3.1.7-1.7-.4-3.5-1.2-5.4-2.9-1.6-1.5-2.8-3.3-3.2-5-.4-1.5.1-2.8.5-3.4.4-.5 1-.8 1.7-.8Z" />
+              </svg>
+            </span>
+            <span>
+              <strong>WhatsApp Bridge</strong>
+              <small data-i18n="brand.subtitle">Controle de acesso do MCP</small>
+            </span>
+          </a>
+          <div class="topbar-actions">
+            <label class="sr-only" for="app-language" data-i18n="language.label"
+              >Idioma do painel</label
+            >
+            <select
+              id="app-language"
+              class="language-select"
+              data-i18n-aria-label="language.label"
+              aria-label="Idioma do painel"
+            >
+              <option value="pt-BR">Português (BR)</option>
+              <option value="en">English</option>
+            </select>
+            <span
+              id="connection-status"
+              class="connection-pill"
+              data-i18n-aria-label="top.checking"
+              aria-label="Verificando bridge"
+            >
+              <span class="status-dot"></span>
+              <span data-i18n="top.checking">Verificando bridge</span>
+            </span>
+            <button
+              id="refresh-button"
+              class="secondary-button compact"
+              type="button"
+              data-i18n-aria-label="top.refresh"
+              aria-label="Atualizar"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 6v5h-5M4 18v-5h5" />
+                <path d="M18.5 9A7 7 0 0 0 6.1 6.1L4 8m2 7a7 7 0 0 0 11.9 2.9L20 16" />
+              </svg>
+              <span data-i18n="top.refresh">Atualizar</span>
+            </button>
+            <button id="logout-button" class="text-button" type="button" data-i18n="top.logout">
+              Sair
+            </button>
+          </div>
+        </header>
+
+        <div class="content">
+          <section class="hero" aria-labelledby="page-title">
+            <div>
+              <p class="eyebrow" data-i18n="hero.eyebrow">Privacidade por conversa</p>
+              <h1 id="page-title" data-i18n="hero.title">Acesso do modelo</h1>
+              <p data-i18n="hero.description">
+                Escolha exatamente o que o Codex pode fazer em cada conversa. O bridge continua
+                sincronizando tudo localmente; este painel controla MCP e webhooks, não ferramentas
+                com acesso direto aos arquivos.
+              </p>
+            </div>
+            <div class="default-policy">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="5" y="10" width="14" height="11" rx="2" />
+                <path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3" />
+              </svg>
+              <div>
+                <strong data-i18n="hero.defaultTitle">Bloqueio por padrão</strong>
+                <span data-i18n="hero.defaultCopy"
+                  >Novos destinos são bloqueados sem permissão global.</span
+                >
+              </div>
+            </div>
+          </section>
+
+          <section id="disconnected-banner" class="notice warning" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3 2.5 20h19L12 3Z" />
+              <path d="M12 9v5M12 17.5h.01" />
+            </svg>
+            <div>
+              <strong data-i18n="connection.bannerTitle">Bridge desconectado do WhatsApp</strong>
+              <span data-i18n="connection.bannerCopy"
+                >Você ainda pode ajustar permissões. Envios só funcionarão após a reconexão.</span
+              >
+            </div>
+          </section>
+
+          <section class="global-access-card" aria-labelledby="new-conversations-title">
+            <span class="global-access-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4v8Z" />
+                <path d="M12 7v6M9 10h6" />
+              </svg>
+            </span>
+            <div class="global-access-copy">
+              <div>
+                <p class="eyebrow" data-i18n="global.eyebrow">Permissão global</p>
+                <h2 id="new-conversations-title" data-i18n="global.title">
+                  Iniciar novas conversas individuais
+                </h2>
+              </div>
+              <p data-i18n="global.description">
+                Permite que o modelo envie a primeira mensagem para um número que ainda não aparece
+                no Bridge. Após o envio, a conversa recebe automaticamente acesso total: novas
+                mensagens, histórico e envio.
+              </p>
+            </div>
+            <label class="global-access-control" for="allow-start-new-conversations">
+              <span id="new-conversations-status" data-i18n="global.disabled">Desativado</span>
+              <span class="switch">
+                <input
+                  id="allow-start-new-conversations"
+                  type="checkbox"
+                  data-i18n-aria-label="global.aria"
+                  aria-label="Permitir iniciar novas conversas individuais"
+                />
+                <span class="switch-track" aria-hidden="true"></span>
+              </span>
+            </label>
+          </section>
+
+          <section
+            class="summary-grid"
+            data-i18n-aria-label="summary.aria"
+            aria-label="Resumo de acesso"
+          >
+            <article>
+              <span class="summary-icon green">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M3 12s3.4-6 9-6 9 6 9 6-3.4 6-9 6-9-6-9-6Z" />
+                  <circle cx="12" cy="12" r="2.7" />
+                </svg>
+              </span>
+              <div>
+                <strong id="read-count">0</strong><span data-i18n="summary.read">com leitura</span>
+              </div>
+            </article>
+            <article>
+              <span class="summary-icon blue">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 19V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14l-4-2-4 2-4-2-4 2Z" />
+                  <path d="M8 8h8M8 12h5" />
+                </svg>
+              </span>
+              <div>
+                <strong id="history-count">0</strong
+                ><span data-i18n="summary.history">com histórico</span>
+              </div>
+            </article>
+            <article>
+              <span class="summary-icon violet">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m22 2-7 20-4-9-9-4 20-7Z" />
+                  <path d="M22 2 11 13" />
+                </svg>
+              </span>
+              <div>
+                <strong id="send-count">0</strong><span data-i18n="summary.send">com envio</span>
+              </div>
+            </article>
+            <article>
+              <span class="summary-icon neutral">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+                  <circle cx="9" cy="7" r="4" />
+                  <path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
+                </svg>
+              </span>
+              <div>
+                <strong id="total-count">0</strong
+                ><span data-i18n="summary.total">conversas</span>
+              </div>
+            </article>
+          </section>
+
+          <section class="access-panel" aria-labelledby="conversation-heading">
+            <div class="panel-heading">
+              <div>
+                <h2 id="conversation-heading" data-i18n="panel.title">Conversas</h2>
+                <p id="result-count" data-i18n="panel.loadingCount">Carregando conversas…</p>
+              </div>
+              <div class="search-field">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="11" cy="11" r="7" />
+                  <path d="m20 20-4-4" />
+                </svg>
+                <label class="sr-only" for="search-input" data-i18n="panel.searchLabel"
+                  >Buscar conversa</label
+                >
+                <input
+                  id="search-input"
+                  type="search"
+                  data-i18n-placeholder="panel.searchPlaceholder"
+                  placeholder="Buscar por nome ou número"
+                />
+              </div>
+            </div>
+
+            <div class="filter-row">
+              <div
+                class="filter-tabs"
+                role="group"
+                data-i18n-aria-label="filters.aria"
+                aria-label="Filtrar conversas"
+              >
+                <button
+                  class="filter-tab active"
+                  data-filter="all"
+                  data-i18n="filters.all"
+                  type="button"
+                >
+                  Todas
+                </button>
+                <button
+                  class="filter-tab"
+                  data-filter="allowed"
+                  data-i18n="filters.allowed"
+                  type="button"
+                >
+                  Com acesso
+                </button>
+                <button
+                  class="filter-tab"
+                  data-filter="blocked"
+                  data-i18n="filters.blocked"
+                  type="button"
+                >
+                  Bloqueadas
+                </button>
+                <button
+                  class="filter-tab"
+                  data-filter="people"
+                  data-i18n="filters.people"
+                  type="button"
+                >
+                  Pessoas
+                </button>
+                <button
+                  class="filter-tab"
+                  data-filter="groups"
+                  data-i18n="filters.groups"
+                  type="button"
+                >
+                  Grupos
+                </button>
+              </div>
+              <div class="bulk-actions">
+                <label class="select-visible">
+                  <input id="select-visible" type="checkbox" />
+                  <span data-i18n="bulk.selectVisible">Selecionar visíveis</span>
+                </label>
+                <label class="sr-only" for="bulk-preset" data-i18n="bulk.label"
+                  >Aplicar às selecionadas</label
+                >
+                <select id="bulk-preset" disabled>
+                  <option value="" data-i18n="bulk.placeholder">Aplicar às selecionadas…</option>
+                  <option value="block" data-i18n="bulk.block">Bloquear tudo</option>
+                  <option value="new" data-i18n="bulk.new">Ler apenas novas</option>
+                  <option value="read" data-i18n="bulk.read">Permitir leitura completa</option>
+                  <option value="all" data-i18n="bulk.all">Dar acesso total</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="permission-legend">
+              <span class="legend-conversation" data-i18n="legend.conversation">Conversa</span>
+              <span
+                ><strong data-i18n="legend.readNew">Ler novas</strong>
+                <span data-i18n="legend.readNewCopy">Mensagens após a ativação</span></span
+              >
+              <span
+                ><strong data-i18n="legend.history">Histórico</strong>
+                <span data-i18n="legend.historyCopy">Mensagens anteriores à ativação</span></span
+              >
+              <span
+                ><strong data-i18n="legend.send">Enviar</strong>
+                <span data-i18n="legend.sendCopy"
+                  >Textos, mídias, reações e digitação</span
+                ></span
+              >
+            </div>
+
+            <div id="loading-state" class="loading-state" aria-live="polite">
+              <span class="spinner"></span>
+              <span data-i18n="loading.chats">Carregando conversas com segurança…</span>
+            </div>
+
+            <div id="empty-state" class="empty-state" hidden>
+              <span class="empty-icon">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4v8Z" />
+                  <path d="M8 9h8M8 13h5" />
+                </svg>
+              </span>
+              <h3 data-i18n="empty.title">Nenhuma conversa encontrada</h3>
+              <p id="empty-copy" data-i18n="empty.sync">
+                Mantenha o bridge conectado para concluir a sincronização.
+              </p>
+              <button
+                id="clear-search"
+                class="secondary-button"
+                data-i18n="empty.clear"
+                type="button"
+              >
+                Limpar filtros
+              </button>
+            </div>
+
+            <div id="conversation-list" class="conversation-list" role="list"></div>
+          </section>
+        </div>
+
+        <div id="save-bar" class="save-bar" hidden>
+          <div>
+            <span class="pending-dot"></span>
+            <strong id="pending-count">0 conversas alteradas</strong>
+            <span data-i18n="save.review">Revise e salve para aplicar.</span>
+          </div>
+          <div>
+            <button
+              id="discard-button"
+              class="secondary-button"
+              data-i18n="save.discard"
+              type="button"
+            >
+              Descartar
+            </button>
+            <button id="save-button" class="primary-button" type="button">
+              <span data-i18n="save.button">Salvar alterações</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="confirm-dialog">
+      <form method="dialog">
+        <span class="dialog-icon">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3 5 6v5c0 4.8 2.8 8.4 7 10 4.2-1.6 7-5.2 7-10V6l-7-3Z" />
+            <path d="M12 8v4M12 15.5h.01" />
+          </svg>
+        </span>
+        <h2 data-i18n="dialog.expandTitle">Ampliar acesso do modelo?</h2>
+        <p id="confirm-copy"></p>
+        <div class="dialog-actions">
+          <button value="cancel" class="secondary-button" data-i18n="dialog.back">
+            Voltar e revisar
+          </button>
+          <button
+            id="confirm-save"
+            value="confirm"
+            class="primary-button"
+            data-i18n="dialog.confirm"
+          >
+            Confirmar e salvar
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="new-conversation-dialog">
+      <form method="dialog">
+        <span class="dialog-icon">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3 5 6v5c0 4.8 2.8 8.4 7 10 4.2-1.6 7-5.2 7-10V6l-7-3Z" />
+            <path d="M12 8v4M12 15.5h.01" />
+          </svg>
+        </span>
+        <h2 data-i18n="dialog.newTitle">Permitir novos destinatários?</h2>
+        <p data-i18n="dialog.newCopy">
+          O modelo poderá iniciar conversas individuais com qualquer número válido informado a ele,
+          mesmo que esse número ainda não esteja na lista. Após o primeiro envio, essa conversa
+          receberá acesso total. Grupos desconhecidos continuam bloqueados.
+        </p>
+        <div class="dialog-actions">
+          <button value="cancel" class="secondary-button" data-i18n="dialog.keepDisabled">
+            Manter desativado
+          </button>
+          <button value="confirm" class="primary-button" data-i18n="dialog.allowNew">
+            Permitir novas conversas
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <div id="live-region" class="sr-only" aria-live="polite"></div>
+  </body>
+</html>
