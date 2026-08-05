@@ -463,7 +463,21 @@ message DBs, media, and `.bridge-token`. Logs are left in
 
 | Flag                  | Default | Description                                                                                                                                                                                                                                                       |
 | --------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--port`              | `WHATSAPP_BRIDGE_PORT` or `8080` | REST API port. The command-line value takes precedence over the environment variable. Valid range: `1-65535`. |
 | `--full-history-pair` | `false` | Request full history at pair time. Only takes effect on a fresh pair (no existing `whatsapp.db`); no-op for already-paired sessions. The phone ultimately decides the actual history window sent — see [Requesting full history](#requesting-full-history) below. |
+
+For a one-off launch on another port:
+
+```bash
+cd whatsapp-bridge
+go run . --port 9090
+```
+
+Point the MCP server at the same port:
+
+```bash
+WHATSAPP_API_URL=http://localhost:9090/api uv run main.py
+```
 
 ### Requesting full history
 
