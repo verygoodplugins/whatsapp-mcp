@@ -2457,3 +2457,32 @@ func TestNewMessageStoreCreatesMessagesChatJIDIndex(t *testing.T) {
 		t.Fatalf("expected idx_messages_chat_jid to exist, found %d", count)
 	}
 }
+
+func TestResolveDeviceName(t *testing.T) {
+	cases := []struct {
+		name string
+		set  bool
+		env  string
+		want string
+	}{
+		{name: "unset keeps default", set: false, want: ""},
+		{name: "empty keeps default", set: true, env: "", want: ""},
+		{name: "whitespace only keeps default", set: true, env: "   ", want: ""},
+		{name: "plain value", set: true, env: "Agent Works", want: "Agent Works"},
+		{name: "surrounding whitespace trimmed", set: true, env: "  My Assistant  ", want: "My Assistant"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("WHATSAPP_DEVICE_NAME", tc.env)
+			} else {
+				// t.Setenv restores on cleanup; unset explicitly for this case.
+				_ = os.Unsetenv("WHATSAPP_DEVICE_NAME")
+			}
+			if got := resolveDeviceName(); got != tc.want {
+				t.Fatalf("resolveDeviceName() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
