@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2](https://github.com/verygoodplugins/whatsapp-mcp/compare/v0.4.1...v0.4.2) (2026-08-05)
+
+
+### Bug Fixes
+
+* **bridge:** authenticate outbound webhook POSTs ([e5f1a9a](https://github.com/verygoodplugins/whatsapp-mcp/commit/e5f1a9aef5c78198ad27d52d40d4513d3b7e0e2f))
+* **bridge:** bump whatsmeow for client compatibility ([#182](https://github.com/verygoodplugins/whatsapp-mcp/issues/182)) ([5470342](https://github.com/verygoodplugins/whatsapp-mcp/commit/54703427c5ab25510661cd1bef6f91c49c04f4c5))
+* **bridge:** forward native WhatsApp activation metadata ([#173](https://github.com/verygoodplugins/whatsapp-mcp/issues/173)) ([afd2c7a](https://github.com/verygoodplugins/whatsapp-mcp/commit/afd2c7a0a0eba52d7837d02fb7293c662918dde6))
+* **bridge:** preserve original timestamp on retry-redelivered messages ([#149](https://github.com/verygoodplugins/whatsapp-mcp/issues/149)) ([bb55a54](https://github.com/verygoodplugins/whatsapp-mcp/commit/bb55a54e36619f4df3cab3fd433cb151b7483d0d))
+* exit orphaned stdio MCP servers on parent death ([#177](https://github.com/verygoodplugins/whatsapp-mcp/issues/177)) ([8cc0ecd](https://github.com/verygoodplugins/whatsapp-mcp/commit/8cc0ecd14a949f2c48482086e25a233955390e82))
+
 ## [0.4.1](https://github.com/verygoodplugins/whatsapp-mcp/compare/v0.4.0...v0.4.1) (2026-06-26)
 
 
