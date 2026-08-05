@@ -48,6 +48,12 @@ var forwardSelfMessages = getEnvBool("FORWARD_SELF", true)
 var fullHistoryPairFlag = flag.Bool("full-history-pair", false,
 	"Request full history at pair time (only effective when re-pairing; no-op for existing sessions)")
 
+// CLI flag: pair via a typed linking code instead of scanning a QR code.
+// Useful when the terminal/host can't display a QR image. Phone number must
+// include country code, digits only (e.g. 15551234567).
+var pairPhoneFlag = flag.String("pair-phone", "",
+	"Phone number (country code + digits, no +) to pair via linking code instead of QR")
+
 const whatsmeowDBPath = "store/whatsapp.db"
 
 // getEnvBool reads a boolean env var with a default.
@@ -2263,6 +2269,78 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 		})
 	}))
 
+	// Handler for getting group participants
+	mux.HandleFunc("/api/group-info", auth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		groupJID := r.URL.Query().Get("jid")
+		if groupJID == "" && r.Method == http.MethodPost {
+			var req struct {
+				JID string `json:"jid"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+				groupJID = req.JID
+			}
+		}
+		if groupJID == "" {
+			http.Error(w, "jid parameter is required", http.StatusBadRequest)
+			return
+		}
+
+		jid, err := types.ParseJID(groupJID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Invalid JID: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		groupInfo, err := client.GetGroupInfo(context.Background(), jid)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"ok":    false,
+				"error": fmt.Sprintf("Failed to get group info: %v", err),
+			})
+			return
+		}
+
+		type participantJSON struct {
+			JID         string `json:"jid"`
+			PhoneNumber string `json:"phone_number,omitempty"`
+			LID         string `json:"lid,omitempty"`
+			IsAdmin     bool   `json:"is_admin"`
+			DisplayName string `json:"display_name,omitempty"`
+		}
+
+		participants := make([]participantJSON, 0, len(groupInfo.Participants))
+		for _, p := range groupInfo.Participants {
+			pj := participantJSON{
+				JID:         p.JID.String(),
+				IsAdmin:     p.IsAdmin || p.IsSuperAdmin,
+				DisplayName: p.DisplayName,
+			}
+			if !p.PhoneNumber.IsEmpty() {
+				pj.PhoneNumber = p.PhoneNumber.User
+			}
+			if !p.LID.IsEmpty() {
+				pj.LID = p.LID.User
+			}
+			participants = append(participants, pj)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":           true,
+			"jid":          groupInfo.JID.String(),
+			"name":         groupInfo.Name,
+			"topic":        groupInfo.Topic,
+			"participants": participants,
+		})
+	}))
+
 	// Handler for sending typing indicator
 	mux.HandleFunc("/api/typing", auth(func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
@@ -2500,9 +2578,20 @@ func main() {
 	// Channel to signal reconnection needs
 	reconnectChan := make(chan bool, 1)
 
+	// Create channel to track connection success. Declared before the event
+	// handler below so both the QR flow and the phone-linking-code flow can
+	// signal success through the same PairSuccess/QR "success" events.
+	connected := make(chan bool, 1)
+
 	// Setup event handling for messages and history sync
 	client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
+		case *events.PairSuccess:
+			logger.Infof("✓ Paired successfully (linking code flow)")
+			select {
+			case connected <- true:
+			default:
+			}
 		case *events.Message:
 			// Process regular messages
 			handleMessage(client, messageStore, v, logger)
@@ -2616,9 +2705,6 @@ func main() {
 		}
 	})
 
-	// Create channel to track connection success
-	connected := make(chan bool, 1)
-
 	// Add connection retry logic
 	maxRetries := 3
 	var connErr error
@@ -2632,42 +2718,76 @@ func main() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
 
-			qrChan, connErr := client.GetQRChannel(ctx)
-			if connErr != nil {
-				logger.Errorf("Failed to get QR channel: %v", connErr)
-				if attempt == maxRetries {
-					return
-				}
-				time.Sleep(5 * time.Second)
-				continue
-			}
-
-			connErr = client.Connect()
-			if connErr != nil {
-				logger.Errorf("Failed to connect (attempt %d): %v", attempt, connErr)
-				if attempt == maxRetries {
-					return
-				}
-				time.Sleep(5 * time.Second)
-				continue
-			}
-
-			// Print QR code for pairing with phone
-			qrCodeShown := false
-			for evt := range qrChan {
-				if evt.Event == "code" {
-					if !qrCodeShown {
-						fmt.Println("\nScan this QR code with your WhatsApp app:")
-						qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-						fmt.Println("\nWaiting for QR code scan...")
-						qrCodeShown = true
+			if *pairPhoneFlag != "" {
+				// Linking-code flow: connect first (no QR channel), then request
+				// a short typed code tied to the phone number.
+				connErr = client.Connect()
+				if connErr != nil {
+					logger.Errorf("Failed to connect (attempt %d): %v", attempt, connErr)
+					if attempt == maxRetries {
+						return
 					}
-				} else if evt.Event == "success" {
-					connected <- true
-					break
-				} else if evt.Event == "timeout" {
-					logger.Warnf("QR code timed out")
-					break
+					time.Sleep(5 * time.Second)
+					continue
+				}
+
+				// The server validates clientDisplayName against a fixed set of
+				// "Browser (OS)" strings and returns 400 bad-request for anything
+				// else. A short pause after Connect gives the handshake time to
+				// settle before we request the code (see PairPhone's doc comment).
+				time.Sleep(2 * time.Second)
+				code, pairErr := client.PairPhone(ctx, *pairPhoneFlag, true, whatsmeow.PairClientChrome, "Chrome (Linux)")
+				if pairErr != nil {
+					logger.Errorf("Failed to request pairing code: %v", pairErr)
+					if attempt == maxRetries {
+						return
+					}
+					time.Sleep(5 * time.Second)
+					continue
+				}
+				fmt.Println("\n════════════════════════════════════════════════════════════════════")
+				fmt.Printf("  LINKING CODE: %s\n", code)
+				fmt.Println("  In WhatsApp: Settings > Linked Devices > Link a Device >")
+				fmt.Println("  \"Link with phone number instead\" > enter this code")
+				fmt.Println("════════════════════════════════════════════════════════════════════")
+			} else {
+				qrChan, connErr := client.GetQRChannel(ctx)
+				if connErr != nil {
+					logger.Errorf("Failed to get QR channel: %v", connErr)
+					if attempt == maxRetries {
+						return
+					}
+					time.Sleep(5 * time.Second)
+					continue
+				}
+
+				connErr = client.Connect()
+				if connErr != nil {
+					logger.Errorf("Failed to connect (attempt %d): %v", attempt, connErr)
+					if attempt == maxRetries {
+						return
+					}
+					time.Sleep(5 * time.Second)
+					continue
+				}
+
+				// Print QR code for pairing with phone
+				qrCodeShown := false
+				for evt := range qrChan {
+					if evt.Event == "code" {
+						if !qrCodeShown {
+							fmt.Println("\nScan this QR code with your WhatsApp app:")
+							qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+							fmt.Println("\nWaiting for QR code scan...")
+							qrCodeShown = true
+						}
+					} else if evt.Event == "success" {
+						connected <- true
+						break
+					} else if evt.Event == "timeout" {
+						logger.Warnf("QR code timed out")
+						break
+					}
 				}
 			}
 

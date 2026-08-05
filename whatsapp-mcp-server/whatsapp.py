@@ -132,9 +132,14 @@ def msg_to_dict(message: Message, include_sender_name: bool = True) -> dict[str,
 
 def chat_to_dict(chat: "Chat") -> dict[str, Any]:
     """Convert a Chat dataclass to a dictionary for JSON serialization."""
+    name = chat.name
+    if name and not chat.is_group and name.replace("+", "").isdigit():
+        resolved = _resolve_name_from_whatsmeow(chat.jid)
+        if resolved:
+            name = resolved
     return {
         "jid": chat.jid,
-        "name": chat.name,
+        "name": name,
         "is_group": chat.is_group,
         "last_message_time": chat.last_message_time.isoformat() if chat.last_message_time else None,
         "last_message": chat.last_message,
@@ -884,6 +889,55 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
             conn.close()
 
 
+def get_group_participants(group_jid: str) -> list[dict[str, Any]] | None:
+    """Fetch group participants from the WhatsApp bridge API.
+
+    Returns:
+        List of participant dicts with jid, phone_number, lid, name, is_admin,
+        or None if the request fails.
+    """
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/group-info"
+        response = requests.get(url, params={"jid": group_jid}, headers=_bridge_headers())
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        if not data.get("ok"):
+            return None
+
+        participants = []
+        for p in data.get("participants", []):
+            phone = p.get("phone_number", "")
+            lid = p.get("lid", "")
+            name = _resolve_participant_name(phone, lid)
+            participants.append({
+                "jid": p.get("jid", ""),
+                "phone_number": phone,
+                "lid": lid,
+                "name": name,
+                "is_admin": p.get("is_admin", False),
+            })
+        return participants
+    except (requests.RequestException, json.JSONDecodeError):
+        return None
+
+
+def _resolve_participant_name(phone: str, lid: str) -> str | None:
+    """Try to resolve a display name for a group participant."""
+    if phone:
+        name = _resolve_name_from_whatsmeow(phone + "@s.whatsapp.net")
+        if name:
+            return name
+    if lid:
+        name = _resolve_name_from_whatsmeow(lid + "@lid")
+        if name:
+            return name
+        name = _resolve_name_from_whatsmeow(lid)
+        if name:
+            return name
+    return None
+
+
 def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any] | None:
     """Get chat metadata by JID.
 
@@ -933,7 +987,14 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
             last_sender=chat_data[4],
             last_is_from_me=chat_data[5],
         )
-        return chat_to_dict(chat)
+        result = chat_to_dict(chat)
+
+        if chat.is_group:
+            participants = get_group_participants(chat_jid)
+            if participants is not None:
+                result["participants"] = participants
+
+        return result
 
     except sqlite3.Error as e:
         print(f"Database error: {e}")
