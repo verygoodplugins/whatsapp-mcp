@@ -87,6 +87,7 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 			jid TEXT PRIMARY KEY,
 			name TEXT,
 			last_message_time TIMESTAMP,
+			last_read_time TIMESTAMP,
 			ephemeral_expiration INTEGER NOT NULL DEFAULT 0,
 			ephemeral_setting_timestamp INTEGER NOT NULL DEFAULT 0
 		);
@@ -344,6 +345,69 @@ func TestUpdateChatEphemeralSettings_IgnoresOlderTimestamp(t *testing.T) {
 	}
 }
 
+// TestMarkChatRead_AdvancesButNeverRegresses locks the monotonic merge: a
+// read marker is set when absent, advances on a newer read, and is never
+// moved backwards by an older read (out-of-order receipts / history-sync
+// backfill must not un-read a chat).
+func TestMarkChatRead_AdvancesButNeverRegresses(t *testing.T) {
+	ms := newTestMessageStore(t)
+	chatJID := "15551234567@s.whatsapp.net"
+	early := time.Unix(1710000000, 0)
+	late := time.Unix(1710009999, 0)
+
+	// sets when absent (INSERT path, no prior chat row)
+	if err := ms.MarkChatRead(chatJID, early); err != nil {
+		t.Fatalf("initial mark: %v", err)
+	}
+	got1, ok := queryChatLastReadTime(ms, chatJID)
+	if !ok || got1 == "" {
+		t.Fatalf("expected last_read_time to be set, got %q ok=%v", got1, ok)
+	}
+
+	// advances on a newer read
+	if err := ms.MarkChatRead(chatJID, late); err != nil {
+		t.Fatalf("advance mark: %v", err)
+	}
+	got2, _ := queryChatLastReadTime(ms, chatJID)
+	if got2 == got1 {
+		t.Fatalf("expected last_read_time to advance from %q, still %q", got1, got2)
+	}
+
+	// does NOT regress on an older read
+	if err := ms.MarkChatRead(chatJID, early); err != nil {
+		t.Fatalf("regress mark: %v", err)
+	}
+	got3, _ := queryChatLastReadTime(ms, chatJID)
+	if got3 != got2 {
+		t.Fatalf("expected no regress from %q, got %q", got2, got3)
+	}
+}
+
+// TestIsSelfReadReceipt covers the classification used by the Receipt handler:
+// a read is "ours" when it's a DM read-self, or a group read whose participant
+// is us (IsFromMe) — but never another user reading our outgoing message.
+func TestIsSelfReadReceipt(t *testing.T) {
+	cases := []struct {
+		name   string
+		typ    types.ReceiptType
+		fromMe bool
+		want   bool
+	}{
+		{"dm read-self", types.ReceiptTypeReadSelf, false, true},
+		{"group read by us", types.ReceiptTypeRead, true, true},
+		{"other user read our message", types.ReceiptTypeRead, false, false},
+		{"delivered", types.ReceiptTypeDelivered, false, false},
+		{"sender", types.ReceiptTypeSender, false, false},
+	}
+	for _, c := range cases {
+		r := &events.Receipt{Type: c.typ}
+		r.IsFromMe = c.fromMe
+		if got := isSelfReadReceipt(r); got != c.want {
+			t.Errorf("%s: isSelfReadReceipt=%v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 // TestExtractChatEphemeralFromMessage covers every concrete sub-message type
 // that carries ContextInfo. Each regular message in an ephemeral chat stamps
 // ContextInfo.Expiration / EphemeralSettingTimestamp; the bridge backfills
@@ -520,6 +584,14 @@ func queryChat(ms *MessageStore, jid string) (name string, found bool) {
 func queryChatLastMessageTime(ms *MessageStore, jid string) (lastMessageTime string, found bool) {
 	err := ms.db.QueryRow("SELECT last_message_time FROM chats WHERE jid = ?", jid).Scan(&lastMessageTime)
 	return lastMessageTime, err == nil
+}
+
+// queryChatLastReadTime returns the last_read_time for a chat JID as stored
+// text (NULL becomes the empty string), plus whether the row exists.
+func queryChatLastReadTime(ms *MessageStore, jid string) (lastReadTime string, found bool) {
+	var lr sql.NullString
+	err := ms.db.QueryRow("SELECT last_read_time FROM chats WHERE jid = ?", jid).Scan(&lr)
+	return lr.String, err == nil
 }
 
 // queryMessageCount returns the number of messages stored under a chat JID.

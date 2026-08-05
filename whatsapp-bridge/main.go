@@ -198,6 +198,9 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "chats", "ephemeral_setting_timestamp", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("failed to ensure chats.ephemeral_setting_timestamp column: %w", err)
 	}
+	if err := ensureColumn(db, "chats", "last_read_time", "TIMESTAMP"); err != nil {
+		return fmt.Errorf("failed to ensure chats.last_read_time column: %w", err)
+	}
 	if err := ensureColumn(db, "messages", "deleted_at", "TIMESTAMP"); err != nil {
 		return fmt.Errorf("failed to ensure messages.deleted_at column: %w", err)
 	}
@@ -641,6 +644,27 @@ func (store *MessageStore) UpdateChatEphemeralSettings(jid string, expiration ui
 			ephemeral_setting_timestamp = excluded.ephemeral_setting_timestamp
 		WHERE excluded.ephemeral_setting_timestamp >= chats.ephemeral_setting_timestamp`,
 		jid, expiration, settingTimestamp,
+	)
+	return err
+}
+
+// MarkChatRead records that we read the chat up to readAt. The marker merges
+// monotonically — out-of-order receipts and history-sync backfill can never
+// move it backwards and un-read a chat. Like UpdateChatEphemeralSettings it
+// inserts only its own column, leaving name/last_message_time NULL so a receipt
+// arriving before any StoreChat call doesn't fabricate placeholder metadata.
+func (store *MessageStore) MarkChatRead(jid string, readAt time.Time) error {
+	_, err := store.db.Exec(
+		`INSERT INTO chats (jid, last_read_time)
+		VALUES (?, ?)
+		ON CONFLICT(jid) DO UPDATE SET
+			last_read_time = CASE
+				WHEN chats.last_read_time IS NULL THEN excluded.last_read_time
+				WHEN excluded.last_read_time IS NULL THEN chats.last_read_time
+				WHEN excluded.last_read_time > chats.last_read_time THEN excluded.last_read_time
+				ELSE chats.last_read_time
+			END`,
+		jid, readAt,
 	)
 	return err
 }
@@ -1529,6 +1553,15 @@ func resolveLIDChat(client *whatsmeow.Client, chat, senderAlt, recipientAlt type
 
 	fmt.Printf("Warning: could not resolve LID chat %s to phone JID\n", chat)
 	return chat
+}
+
+// isSelfReadReceipt reports whether a receipt means WE read the chat (on this
+// or another device), as opposed to another user reading our outgoing message.
+// A DM self-read arrives as read-self; a group self-read arrives as a plain
+// read whose participant is us (IsFromMe). See types.ReceiptType docs.
+func isSelfReadReceipt(receipt *events.Receipt) bool {
+	return receipt.Type == types.ReceiptTypeReadSelf ||
+		(receipt.Type == types.ReceiptTypeRead && receipt.IsFromMe)
 }
 
 // resolveUserJID resolves a single user JID (sender or participant) to its
@@ -2517,6 +2550,16 @@ func main() {
 			// Process history sync events
 			handleHistorySync(client, messageStore, v, logger)
 
+		case *events.Receipt:
+			// Persist read state so consumers can distinguish genuine unread
+			// from "latest message is inbound". Only our own reads count.
+			if isSelfReadReceipt(v) {
+				chatJID := resolveLIDChat(client, v.Chat, v.SenderAlt, v.RecipientAlt, v.IsFromMe).String()
+				if err := messageStore.MarkChatRead(chatJID, v.Timestamp); err != nil {
+					logger.Warnf("Failed to mark chat %s read: %v", chatJID, err)
+				}
+			}
+
 		case *events.GroupInfo:
 			if v.Ephemeral != nil {
 				expiration := uint32(0)
@@ -3010,6 +3053,15 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 			timestamp := time.Unix(int64(ts), 0)
 
 			_ = messageStore.StoreChat(chatJID, name, timestamp)
+			// Backfill read state: a conversation WhatsApp reports as fully
+			// read (no unread count, not manually flagged) is read up to its
+			// last message. Conversations with genuine unread are left
+			// unmarked so they correctly stay "awaiting".
+			if conversation.GetUnreadCount() == 0 && !conversation.GetMarkedAsUnread() {
+				if err := messageStore.MarkChatRead(chatJID, timestamp); err != nil {
+					logger.Warnf("Failed to backfill read state for %s: %v", chatJID, err)
+				}
+			}
 			if err := messageStore.UpdateChatEphemeralSettings(
 				chatJID,
 				conversation.GetEphemeralExpiration(),
