@@ -1010,6 +1010,55 @@ func TestHandleHistorySync_LIDParticipant_ResolvedViaStore(t *testing.T) {
 	}
 }
 
+// TestHandleHistorySync_GroupSenderFromTopLevelParticipant pins the sender
+// source for history-synced group messages: modern history syncs carry the
+// sender in the top-level WebMessageInfo.participant field while
+// Key.Participant is empty. The sender column must hold that participant,
+// not the group JID fallback.
+func TestHandleHistorySync_GroupSenderFromTopLevelParticipant(t *testing.T) {
+	groupJID := types.JID{User: "120363000000000001", Server: types.GroupServer}
+	participant := types.JID{User: "31612345678", Server: types.DefaultUserServer}
+
+	client := newTestClientWithSelf(&mockLIDStore{}, selfPhone)
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	historySync := &events.HistorySync{
+		Data: &waProto.HistorySync{
+			SyncType: waProto.HistorySync_RECENT.Enum(),
+			Conversations: []*waProto.Conversation{
+				{
+					ID:   proto.String(groupJID.String()),
+					Name: proto.String("Test Group"),
+					Messages: []*waProto.HistorySyncMsg{
+						{
+							Message: &waProto.WebMessageInfo{
+								Key: &waCommon.MessageKey{
+									ID:     proto.String("hist-group-001"),
+									FromMe: proto.Bool(false),
+								},
+								Participant:      proto.String(participant.String()),
+								MessageTimestamp: proto.Uint64(uint64(time.Now().Unix())),
+								Message: &waProto.Message{
+									Conversation: proto.String("group history payload"),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	handleHistorySync(client, ms, historySync, logger)
+
+	got := querySender(ms, groupJID.String())
+	if got != participant.User {
+		t.Errorf("history-sync group sender = %q, want participant %q (group JID fallback was %q)",
+			got, participant.User, groupJID.User)
+	}
+}
+
 func TestMigrateLegacyLIDChatsToPhoneJIDs_MigratesAndIsIdempotent(t *testing.T) {
 	ms := newTestMessageStore(t)
 	logger := testLogger()
