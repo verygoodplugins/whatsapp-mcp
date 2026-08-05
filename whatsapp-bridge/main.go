@@ -2064,6 +2064,9 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 	}
 	mux := http.NewServeMux()
 
+	// On-demand history sync endpoint (see history_ondemand.go)
+	registerHistoryEndpoint(mux, auth, client, messageStore)
+
 	// Health check endpoint
 	mux.HandleFunc("/api/health", auth(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
