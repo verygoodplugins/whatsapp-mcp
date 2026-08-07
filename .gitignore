@@ -1,8 +1,11 @@
 # Databases
 *.db
 
-# Logs
-*.log
+# Logs. The trailing * is load-bearing: logrotate writes names like
+# `bridge.log-20260803-113854.gz`, which `*.log` does not match. bridge.log
+# contains plaintext message history, so a rotated copy must never become
+# committable in a repo with a public remote.
+*.log*
 
 # Config
 claude_desktop_config.json
