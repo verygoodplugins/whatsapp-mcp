@@ -1041,10 +1041,11 @@ wheels = [
 
 [[package]]
 name = "whatsapp-mcp-server"
-version = "0.4.1"
+version = "0.4.2"
 source = { virtual = "." }
 dependencies = [
     { name = "anyio" },
+    { name = "cryptography" },
     { name = "httpx" },
     { name = "mcp", extra = ["cli"] },
     { name = "requests" },
@@ -1060,6 +1061,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = "<4.14" },
+    { name = "cryptography", specifier = ">=48.0.1,<49" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.27.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },
