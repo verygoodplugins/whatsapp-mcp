@@ -1098,6 +1098,18 @@ type ReactRequest struct {
 	Emoji     *string `json:"emoji"`      // reaction emoji; empty string removes the reaction
 }
 
+// DeleteMessageRequest represents the request body for the /api/delete endpoint.
+// `chat_jid` identifies the chat the message lives in (e.g. "123456789@s.whatsapp.net");
+// `message_id` is whatsmeow's message ID (same value returned by send_message). When
+// `for_everyone` is true, the message is revoked for both sides ("Delete for everyone"
+// in the UI) — only valid for messages this client originally sent. When false, the
+// message is just hidden locally (no protocol revoke).
+type DeleteMessageRequest struct {
+	ChatJID     string `json:"chat_jid"`
+	MessageID   string `json:"message_id"`
+	ForEveryone bool   `json:"for_everyone"`
+}
+
 // classifyMediaPath maps a file extension to (whatsmeow upload type, MIME
 // type, persist-side category). Single source of truth for the upload path
 // (which needs the whatsmeow.MediaType + MIME) and the SQLite persist path
@@ -2581,6 +2593,84 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			Filename: filename,
 			Path:     path,
 		})
+	}))
+
+	// Handler for deleting/revoking a previously-sent message. Wraps whatsmeow's
+	// BuildRevoke + SendMessage flow. When for_everyone=true, sends a REVOKE
+	// protocol message that removes the original on both sides; when false, only
+	// hides the local sqlite row (the message stays visible to the other party).
+	// Both modes update our local messages table so subsequent list_messages
+	// calls don't return the deleted row.
+	mux.HandleFunc("/api/delete", auth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req DeleteMessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		if req.ChatJID == "" || req.MessageID == "" {
+			http.Error(w, "chat_jid and message_id are required", http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		respond := func(success bool, message string, status int) {
+			if !success {
+				w.WriteHeader(status)
+			}
+			_ = json.NewEncoder(w).Encode(SendMessageResponse{Success: success, Message: message})
+		}
+
+		chatJID, err := types.ParseJID(req.ChatJID)
+		if err != nil {
+			respond(false, fmt.Sprintf("invalid chat_jid: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		if req.ForEveryone {
+			if !client.IsConnected() {
+				respond(false, "WhatsApp client is not connected", http.StatusServiceUnavailable)
+				return
+			}
+			if client.Store == nil || client.Store.ID == nil {
+				respond(false, "client not logged in (no Store.ID)", http.StatusServiceUnavailable)
+				return
+			}
+			// BuildRevoke(chat, sender=EmptyJID, id) revokes our own message —
+			// the whatsmeow docs explicitly recommend EmptyJID for self-authored
+			// revocations.
+			revokeMsg := client.BuildRevoke(chatJID, types.EmptyJID, req.MessageID)
+			if _, err := client.SendMessage(context.Background(), chatJID, revokeMsg); err != nil {
+				respond(false, fmt.Sprintf("revoke send failed: %v", err), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		// Delete from our local store regardless of for_everyone. The chat row
+		// is intentionally left in place — we don't drop entire conversations
+		// when a single message is removed.
+		if _, err := messageStore.db.Exec(
+			"DELETE FROM messages WHERE id = ? AND chat_jid = ?",
+			req.MessageID, chatJID.String(),
+		); err != nil {
+			// The revoke (if requested) already succeeded; a local-store delete
+			// failure is reported but not treated as a hard error since the
+			// remote side has already been updated.
+			respond(true, fmt.Sprintf("revoked remotely but local delete failed: %v", err), http.StatusOK)
+			return
+		}
+
+		if req.ForEveryone {
+			respond(true, "Message revoked for everyone and removed locally", http.StatusOK)
+		} else {
+			respond(true, "Message removed locally (remote unchanged)", http.StatusOK)
+		}
 	}))
 
 	// Handler for sending typing indicator

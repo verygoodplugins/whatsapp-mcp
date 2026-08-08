@@ -1080,6 +1080,42 @@ def send_message(
         return False, f"Unexpected error: {str(e)}"
 
 
+def delete_message(chat_jid: str, message_id: str, for_everyone: bool = True) -> tuple[bool, str]:
+    """Delete a WhatsApp message via the bridge's /api/delete endpoint.
+
+    for_everyone=True (default) revokes the message for both sides via whatsmeow's
+    BuildRevoke flow — equivalent to the "Delete for everyone" button in the WhatsApp
+    UI; only valid for messages this account originally sent. Recipients see the
+    "This message was deleted" placeholder. for_everyone=False only drops the row
+    from the local sqlite store (the message stays visible on the other side).
+    """
+    try:
+        if not chat_jid or not message_id:
+            return False, "chat_jid and message_id are required"
+
+        url = f"{WHATSAPP_API_BASE_URL}/delete"
+        payload = {
+            "chat_jid": chat_jid,
+            "message_id": message_id,
+            "for_everyone": bool(for_everyone),
+        }
+
+        response = requests.post(url, json=payload, headers=_bridge_headers())
+
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "Unknown response")
+        else:
+            return False, f"Error: HTTP {response.status_code} - {response.text}"
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
 def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool, str]:
     """Send a media file (image, video, document) with an optional caption.
 
