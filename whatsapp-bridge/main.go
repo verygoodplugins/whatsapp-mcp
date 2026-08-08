@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"math"
@@ -17,6 +18,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -660,6 +662,24 @@ func (store *MessageStore) GetChatEphemeralSettings(jid string) (ChatEphemeralSe
 		return ChatEphemeralSettings{}, err
 	}
 	return settings, nil
+}
+
+// GetMessageIsFromMe resolves the origin of a stored message for a quoted
+// reply. The boolean pointer distinguishes a known false value from a quote
+// that is absent from the local store.
+func (store *MessageStore) GetMessageIsFromMe(id, chatJID string) (*bool, error) {
+	var isFromMe bool
+	err := store.db.QueryRow(
+		"SELECT is_from_me FROM messages WHERE id = ? AND chat_jid = ?",
+		id, chatJID,
+	).Scan(&isFromMe)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &isFromMe, nil
 }
 
 // Store a message in the database
@@ -1398,6 +1418,32 @@ func extractQuotedMessageInfo(msg *waProto.Message) (quotedMessageId string, quo
 	return quotedMessageId, quotedSender, quotedContent
 }
 
+// extractMentionedJIDs returns native WhatsApp mention targets from ContextInfo.
+func extractMentionedJIDs(msg *waProto.Message) []string {
+	if msg == nil {
+		return nil
+	}
+
+	var contextInfo *waProto.ContextInfo
+	if extText := msg.GetExtendedTextMessage(); extText != nil {
+		contextInfo = extText.GetContextInfo()
+	} else if img := msg.GetImageMessage(); img != nil {
+		contextInfo = img.GetContextInfo()
+	} else if vid := msg.GetVideoMessage(); vid != nil {
+		contextInfo = vid.GetContextInfo()
+	} else if doc := msg.GetDocumentMessage(); doc != nil {
+		contextInfo = doc.GetContextInfo()
+	} else if aud := msg.GetAudioMessage(); aud != nil {
+		contextInfo = aud.GetContextInfo()
+	}
+
+	if contextInfo == nil || len(contextInfo.MentionedJID) == 0 {
+		return nil
+	}
+
+	return append([]string(nil), contextInfo.MentionedJID...)
+}
+
 // Extract media info from a message. Filenames embed the message ID so that
 // two messages arriving in the same second do not collide on a single file.
 func extractMediaInfo(msg *waProto.Message, msgTimestamp time.Time, msgID string) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
@@ -1532,6 +1578,52 @@ func senderAltForMessage(client *whatsmeow.Client, info types.MessageInfo) types
 }
 
 // Handle regular incoming messages with media support
+// origMsgTime remembers the true send-time of messages that first arrived
+// undecryptable (e.g. after an offline gap, when our session lacked the sender
+// key). WhatsApp re-sends such messages after a retry receipt, but the re-sent
+// copy carries a fresh `t` (the resend time) rather than the original send time.
+// The first (undecryptable) delivery *does* carry the original `t`, so we cache
+// it here and reuse it when the decrypted retry finally lands — otherwise those
+// messages get stored with reconnect-time and corrupt recency ordering.
+var (
+	origMsgTimeMu sync.Mutex
+	origMsgTime   = make(map[string]time.Time)
+)
+
+// rememberOriginalTimestamp records the earliest timestamp seen for a message ID.
+// A resend's `t` is always >= the original, so the earliest is the true one.
+func rememberOriginalTimestamp(id string, ts time.Time) {
+	if id == "" || ts.IsZero() {
+		return
+	}
+	origMsgTimeMu.Lock()
+	defer origMsgTimeMu.Unlock()
+	if existing, ok := origMsgTime[id]; !ok || ts.Before(existing) {
+		origMsgTime[id] = ts
+	}
+	// Soft cap so a burst of never-retried undecryptable messages can't grow this
+	// map unbounded. Entries are normally consumed on successful decrypt.
+	if len(origMsgTime) > 5000 {
+		for k := range origMsgTime {
+			delete(origMsgTime, k)
+			if len(origMsgTime) <= 4000 {
+				break
+			}
+		}
+	}
+}
+
+// takeOriginalTimestamp returns and removes the cached original timestamp for id.
+func takeOriginalTimestamp(id string) (time.Time, bool) {
+	origMsgTimeMu.Lock()
+	defer origMsgTimeMu.Unlock()
+	ts, ok := origMsgTime[id]
+	if ok {
+		delete(origMsgTime, id)
+	}
+	return ts, ok
+}
+
 func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
 	// Resolve LID-based chats to phone-based JIDs so that incoming
 	// and outgoing messages land in the same chat entry.
@@ -1557,8 +1649,18 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}
 	}
 
+	// Recover the true send-time if this message first arrived undecryptable and is
+	// now landing via a retry-resend (whose stanza `t` is the resend time, not the
+	// original). See origMsgTime / rememberOriginalTimestamp.
+	msgTimestamp := msg.Info.Timestamp
+	if orig, ok := takeOriginalTimestamp(msg.Info.ID); ok && orig.Before(msgTimestamp) {
+		logger.Infof("Using original pre-retry timestamp for %s: %s (resend `t` was %s)",
+			msg.Info.ID, orig.Format(time.RFC3339), msgTimestamp.Format(time.RFC3339))
+		msgTimestamp = orig
+	}
+
 	// Update chat in database with the message timestamp (keeps last message time updated)
-	err := messageStore.StoreChat(chatJID, name, msg.Info.Timestamp)
+	err := messageStore.StoreChat(chatJID, name, msgTimestamp)
 	if err != nil {
 		logger.Warnf("Failed to store chat: %v", err)
 	}
@@ -1592,7 +1694,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			emoji := reaction.GetText()
 			if err := messageStore.StoreMessage(
 				msg.Info.ID, chatJID, sender, emoji,
-				msg.Info.Timestamp, msg.Info.IsFromMe,
+				msgTimestamp, msg.Info.IsFromMe,
 				"reaction", reactedToID, "", nil, nil, nil, 0, "",
 			); err != nil {
 				logger.Warnf("Failed to store reaction: %v", err)
@@ -1607,11 +1709,14 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	// Extract text content
 	content := extractTextContent(msg.Message)
 
-	// Extract media info - pass message timestamp + ID for unique filenames
-	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message, msg.Info.Timestamp, msg.Info.ID)
+	// Extract media info - pass message timestamp + ID for unique filenames.
+	// Must be the same (retry-corrected) timestamp we store below: downloadMedia
+	// rebuilds the on-disk filename from the stored timestamp.
+	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message, msgTimestamp, msg.Info.ID)
 
 	// Extract quoted message info
 	quotedMessageId, quotedSender, quotedContent := extractQuotedMessageInfo(msg.Message)
+	mentionedJIDs := extractMentionedJIDs(msg.Message)
 
 	// Skip if there's no content and no media
 	if content == "" && mediaType == "" {
@@ -1625,7 +1730,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		chatJID,
 		sender,
 		content,
-		msg.Info.Timestamp,
+		msgTimestamp,
 		msg.Info.IsFromMe,
 		mediaType,
 		filename,
@@ -1638,6 +1743,15 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	)
 	if err != nil {
 		logger.Warnf("Failed to store message: %v", err)
+	}
+
+	var quotedIsFromMe *bool
+	if quotedMessageId != "" {
+		var lookupErr error
+		quotedIsFromMe, lookupErr = messageStore.GetMessageIsFromMe(quotedMessageId, chatJID)
+		if lookupErr != nil {
+			logger.Warnf("Failed to resolve quoted message origin: %v", lookupErr)
+		}
 	}
 
 	// For image messages, download media synchronously so we can include the base64
@@ -1695,11 +1809,11 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		if hasImage {
 			SendWebhookWithMedia(
 				sender, content, chatJID, msg.Info.IsFromMe,
-				quotedMessageId, quotedSender, quotedContent,
+				quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs,
 				msg.Info.ID, mediaType, imageMimeType, filename, imageDownloadPath,
 			)
 		} else {
-			SendWebhook(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent)
+			SendWebhook(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs)
 		}
 	}
 
@@ -2414,6 +2528,12 @@ func main() {
 		case *events.Message:
 			// Process regular messages
 			handleMessage(client, messageStore, v, logger)
+
+		case *events.UndecryptableMessage:
+			// The first (failed) delivery carries the original send-time. WhatsApp
+			// re-sends after our retry receipt, but that copy's `t` is the resend
+			// time — so stash the original now and reuse it in handleMessage.
+			rememberOriginalTimestamp(v.Info.ID, v.Info.Timestamp)
 
 		case *events.HistorySync:
 			// Process history sync events

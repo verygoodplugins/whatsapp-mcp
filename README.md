@@ -341,6 +341,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MCP_TRANSPORT` | `stdio`                                | MCP transport to serve clients: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST`    | `127.0.0.1`                              | Bind address for the `http`/`sse` transports |
 | `WHATSAPP_MCP_PORT`    | `8000`                                   | Port for the `http`/`sse` transports |
+| `WHATSAPP_PARENT_WATCHDOG_S` | `30`                              | Stdio parent-liveness poll interval (seconds); exits on parent reparent only |
 
 ### MCP transport (stdio vs http/sse)
 
@@ -676,6 +677,10 @@ are documented in [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Authentication Issues
 
+- **Pairing fails with `Client outdated` or HTTP 405**: Update to the latest
+  release and rebuild the bridge. WhatsApp periodically raises the minimum
+  supported linked-device client version, which can make older whatsmeow builds
+  fail before pairing completes.
 - **QR Code Not Displaying**: Restart the bridge. Check terminal QR code support.
 - **Device Limit Reached**: Remove a linked device from WhatsApp Settings > Linked Devices.
 - **No Messages Loading**: Initial sync can take several minutes for large chat histories.

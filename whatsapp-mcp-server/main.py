@@ -6,6 +6,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from mcp_config import resolve_host, resolve_port, resolve_transport
+from parent_watchdog import install_stdio_parent_watchdog
 from whatsapp import (
     download_media as whatsapp_download_media,
 )
@@ -420,6 +421,8 @@ def shutdown_handler(signum, frame):
 
 
 if __name__ == "__main__":
+    # Capture before any await — os.getppid() is dynamic.
+    parent_pid = os.getppid()
     # Register signal handlers for clean shutdown
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
@@ -440,4 +443,6 @@ if __name__ == "__main__":
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
 
+    if transport == "stdio":
+        install_stdio_parent_watchdog("WHATSAPP_PARENT_WATCHDOG_S", parent_pid=parent_pid)
     mcp.run(transport=transport)
