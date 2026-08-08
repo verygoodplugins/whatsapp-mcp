@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -49,7 +50,7 @@ func TestSendWebhookAttachesBridgeTokenHeader(t *testing.T) {
 	t.Setenv("WEBHOOK_URL", srv.URL)
 	setWebhookAuthToken(t, token)
 
-	SendWebhook("123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false, "", "", "")
+	SendWebhook("123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false, "", "", "", nil, nil)
 
 	if gotToken != token {
 		t.Fatalf("X-Bridge-Token header = %q, want %q", gotToken, token)
@@ -75,7 +76,7 @@ func TestSendWebhookOmitsBridgeTokenHeaderWhenNoToken(t *testing.T) {
 	t.Setenv("WEBHOOK_URL", srv.URL)
 	setWebhookAuthToken(t, "")
 
-	SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "")
+	SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
 
 	if !received {
 		t.Fatal("webhook was not delivered")
@@ -114,7 +115,7 @@ func TestSendWebhookPreservesURLBasicAuth(t *testing.T) {
 	t.Setenv("WEBHOOK_URL", u.String())
 	setWebhookAuthToken(t, token)
 
-	SendWebhook("123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false, "", "", "")
+	SendWebhook("123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false, "", "", "", nil, nil)
 
 	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
 	if gotAuth != wantAuth {
@@ -149,7 +150,7 @@ func TestSendWebhookOmitsBridgeTokenOnImplicitDefaultURL(t *testing.T) {
 	setDefaultWebhookURL(t, srv.URL)
 	setWebhookAuthToken(t, token)
 
-	SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "")
+	SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
 
 	if !received {
 		t.Fatal("webhook was not delivered to the default URL")
@@ -187,12 +188,39 @@ func TestSendWebhookDoesNotFollowRedirects(t *testing.T) {
 	t.Setenv("WEBHOOK_URL", redirector.URL)
 	setWebhookAuthToken(t, token)
 
-	SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "")
-
+	SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
 	if !redirectHit {
 		t.Fatal("expected the configured webhook URL to be hit")
 	}
 	if targetHit {
 		t.Fatal("bridge must not follow redirects to a different host (would leak X-Bridge-Token)")
+	}
+}
+
+func TestSendWebhookSerializesNativeMentionAndQuotedOrigin(t *testing.T) {
+	var payload WebhookPayload
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() { _ = r.Body.Close() }()
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode webhook payload: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	t.Setenv("WEBHOOK_URL", srv.URL)
+	quotedIsFromMe := true
+	quotedOrigin := &quotedIsFromMe
+	SendWebhook(
+		"123@s.whatsapp.net", "hello", "123@s.whatsapp.net", false,
+		"quoted-id", "456@s.whatsapp.net", "[🤖] prior response",
+		quotedOrigin, []string{"491742555497@s.whatsapp.net"},
+	)
+
+	if payload.QuotedIsFromMe == nil || !*payload.QuotedIsFromMe {
+		t.Fatalf("quotedIsFromMe = %v, want true", payload.QuotedIsFromMe)
+	}
+	if len(payload.MentionedJIDs) != 1 || payload.MentionedJIDs[0] != "491742555497@s.whatsapp.net" {
+		t.Fatalf("mentionedJids = %#v", payload.MentionedJIDs)
 	}
 }

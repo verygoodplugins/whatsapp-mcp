@@ -2382,6 +2382,39 @@ func TestExtractQuotedMessageInfo_ExtendedText(t *testing.T) {
 	}
 }
 
+func TestExtractMentionedJIDs_ExtendedText(t *testing.T) {
+	msg := &waProto.Message{
+		ExtendedTextMessage: &waProto.ExtendedTextMessage{
+			ContextInfo: &waProto.ContextInfo{
+				MentionedJID: []string{"491742555497@s.whatsapp.net"},
+			},
+		},
+	}
+
+	got := extractMentionedJIDs(msg)
+	if len(got) != 1 || got[0] != "491742555497@s.whatsapp.net" {
+		t.Errorf("mentioned JIDs = %#v", got)
+	}
+}
+
+func TestGetMessageIsFromMe(t *testing.T) {
+	store := newTestMessageStore(t)
+	chatJID := "15551234567@s.whatsapp.net"
+	if err := store.StoreMessage("outbound", chatJID, "15550000000", "[🤖] response", time.Now(), true, "", "", "", nil, nil, nil, 0, ""); err != nil {
+		t.Fatalf("store outbound message: %v", err)
+	}
+
+	isFromMe, err := store.GetMessageIsFromMe("outbound", chatJID)
+	if err != nil || isFromMe == nil || !*isFromMe {
+		t.Fatalf("GetMessageIsFromMe() = %v, %v; want true, nil", isFromMe, err)
+	}
+
+	missing, err := store.GetMessageIsFromMe("missing", chatJID)
+	if err != nil || missing != nil {
+		t.Fatalf("missing lookup = %v, %v; want nil, nil", missing, err)
+	}
+}
+
 // TestExtractQuotedMessageInfo_NoContextInfo verifies graceful handling when
 // the message has no ContextInfo (plain Conversation, ReactionMessage, etc.).
 func TestExtractQuotedMessageInfo_NoContextInfo(t *testing.T) {
@@ -2422,5 +2455,110 @@ func TestNewMessageStoreCreatesMessagesChatJIDIndex(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected idx_messages_chat_jid to exist, found %d", count)
+	}
+}
+
+func TestResolveDeviceName(t *testing.T) {
+	cases := []struct {
+		name string
+		set  bool
+		env  string
+		want string
+	}{
+		{name: "unset keeps default", set: false, want: ""},
+		{name: "empty keeps default", set: true, env: "", want: ""},
+		{name: "whitespace only keeps default", set: true, env: "   ", want: ""},
+		{name: "plain value", set: true, env: "Agent Works", want: "Agent Works"},
+		{name: "surrounding whitespace trimmed", set: true, env: "  My Assistant  ", want: "My Assistant"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("WHATSAPP_DEVICE_NAME", tc.env)
+			} else {
+				// t.Setenv restores on cleanup; unset explicitly for this case.
+				_ = os.Unsetenv("WHATSAPP_DEVICE_NAME")
+			}
+			if got := resolveDeviceName(); got != tc.want {
+				t.Fatalf("resolveDeviceName() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolveMentionJIDs verifies mapping of mention entries to the JID
+// strings placed in ContextInfo.MentionedJID, including the dual phone+LID
+// form for LID-addressed groups.
+func TestResolveMentionJIDs(t *testing.T) {
+	phonePN := types.JID{User: "12025551234", Server: types.DefaultUserServer}
+	phoneLID := types.JID{User: "111222333444555", Server: types.HiddenUserServer}
+	lidStore := &mockLIDStore{lidByPN: map[types.JID]types.JID{phonePN: phoneLID}}
+	client := newTestClient(lidStore)
+
+	cases := []struct {
+		name     string
+		mentions []string
+		want     []string
+	}{
+		{
+			"phone number with LID mapping yields both forms",
+			[]string{"12025551234"},
+			[]string{phonePN.String(), phoneLID.String()},
+		},
+		{
+			"phone number without LID mapping yields phone JID only",
+			[]string{"19998887777"},
+			[]string{"19998887777@" + types.DefaultUserServer},
+		},
+		{
+			"explicit LID JID passed through unchanged",
+			[]string{phoneLID.String()},
+			[]string{phoneLID.String()},
+		},
+		{
+			"unparseable entry skipped",
+			[]string{"1.2.3@s.whatsapp.net", "12025551234"},
+			[]string{phonePN.String(), phoneLID.String()},
+		},
+		{
+			"empty input yields nil",
+			nil,
+			nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveMentionJIDs(client, tc.mentions)
+			if len(got) != len(tc.want) {
+				t.Fatalf("resolveMentionJIDs(%v) = %v, want %v", tc.mentions, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("resolveMentionJIDs(%v)[%d] = %q, want %q", tc.mentions, i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestSendHandler_MentionsField_PassedThrough proves the mentions JSON field
+// is parsed by /api/send — mirrors the quoted-reply field test above.
+func TestSendHandler_MentionsField_PassedThrough(t *testing.T) {
+	const token = "supersecrettoken1234567890abcdef"
+	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
+
+	// POST with mentions but no recipient — should 400 before any send
+	// attempt, proving the new field parses without error.
+	body := `{"recipient":"","message":"hi @12025551234","mentions":["12025551234"]}`
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/send", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for empty recipient with mentions field, got %d", resp.Code)
 	}
 }

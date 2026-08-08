@@ -51,14 +51,16 @@ var defaultWebhookURL = "http://localhost:8769/whatsapp/webhook"
 
 // WebhookPayload represents the data sent to the webhook
 type WebhookPayload struct {
-	EventType       string `json:"eventType,omitempty"`
-	Sender          string `json:"sender"`
-	Content         string `json:"content"`
-	ChatJID         string `json:"chatJID"`
-	IsFromMe        bool   `json:"isFromMe"`
-	QuotedMessageId string `json:"quotedMessageId,omitempty"`
-	QuotedSender    string `json:"quotedSender,omitempty"`
-	QuotedContent   string `json:"quotedContent,omitempty"`
+	EventType       string   `json:"eventType,omitempty"`
+	Sender          string   `json:"sender"`
+	Content         string   `json:"content"`
+	ChatJID         string   `json:"chatJID"`
+	IsFromMe        bool     `json:"isFromMe"`
+	QuotedMessageId string   `json:"quotedMessageId,omitempty"`
+	QuotedSender    string   `json:"quotedSender,omitempty"`
+	QuotedContent   string   `json:"quotedContent,omitempty"`
+	QuotedIsFromMe  *bool    `json:"quotedIsFromMe,omitempty"`
+	MentionedJIDs   []string `json:"mentionedJids,omitempty"`
 	// Media fields - populated when the message contains an image attachment
 	MessageID     string `json:"messageId,omitempty"`
 	MediaType     string `json:"mediaType,omitempty"`
@@ -117,7 +119,7 @@ func sendWebhookPayload(payload WebhookPayload) {
 }
 
 // SendWebhook sends a text-only message to the webhook endpoint.
-func SendWebhook(sender, content, chatJID string, isFromMe bool, quotedMessageId, quotedSender, quotedContent string) {
+func SendWebhook(sender, content, chatJID string, isFromMe bool, quotedMessageId, quotedSender, quotedContent string, quotedIsFromMe *bool, mentionedJIDs []string) {
 	sendWebhookPayload(WebhookPayload{
 		Sender:          sender,
 		Content:         content,
@@ -126,6 +128,8 @@ func SendWebhook(sender, content, chatJID string, isFromMe bool, quotedMessageId
 		QuotedMessageId: quotedMessageId,
 		QuotedSender:    quotedSender,
 		QuotedContent:   quotedContent,
+		QuotedIsFromMe:  quotedIsFromMe,
+		MentionedJIDs:   mentionedJIDs,
 	})
 }
 
@@ -136,6 +140,7 @@ func SendWebhookWithMedia(
 	sender, content, chatJID string,
 	isFromMe bool,
 	quotedMessageId, quotedSender, quotedContent string,
+	quotedIsFromMe *bool, mentionedJIDs []string,
 	messageID, mediaType, mimeType, mediaFilename, localPath string,
 ) {
 	var mediaBase64 string
@@ -160,6 +165,8 @@ func SendWebhookWithMedia(
 		QuotedMessageId: quotedMessageId,
 		QuotedSender:    quotedSender,
 		QuotedContent:   quotedContent,
+		QuotedIsFromMe:  quotedIsFromMe,
+		MentionedJIDs:   mentionedJIDs,
 		MessageID:       messageID,
 		MediaType:       mediaType,
 		MimeType:        mimeType,
