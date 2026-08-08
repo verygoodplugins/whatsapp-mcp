@@ -1080,7 +1080,13 @@ def send_message(
         return False, f"Unexpected error: {str(e)}"
 
 
-def send_file(recipient: str, media_path: str) -> tuple[bool, str]:
+def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool, str]:
+    """Send a media file (image, video, document) with an optional caption.
+
+    The bridge populates the WA media-message Caption field from `message`, so
+    passing both in one /api/send call produces a single attachment-with-caption
+    message instead of two separate messages.
+    """
     try:
         # Validate input
         if not recipient:
@@ -1094,6 +1100,8 @@ def send_file(recipient: str, media_path: str) -> tuple[bool, str]:
 
         url = f"{WHATSAPP_API_BASE_URL}/send"
         payload = {"recipient": recipient, "media_path": media_path}
+        if caption:
+            payload["message"] = caption
 
         response = requests.post(url, json=payload, headers=_bridge_headers())
 

@@ -406,20 +406,26 @@ def mark_messages_read(
 
 
 @mcp.tool()
-def send_file(recipient: str, media_path: str) -> dict[str, Any]:
-    """Send a file such as a picture, raw audio, video or document via WhatsApp to the specified recipient. For group messages use the JID.
+def send_file(recipient: str, media_path: str, caption: str = "") -> dict[str, Any]:
+    """Send a file (image, video, document) via WhatsApp, optionally with a caption.
+
+    When `caption` is provided, the file and text arrive as a single
+    attachment-with-caption message (one bubble in the WA UI), instead of
+    needing a separate follow-up send_message call. For group chats use the JID.
 
     Args:
-        recipient: The recipient - either a phone number with country code but no + or other symbols,
-                 or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
-        media_path: The absolute path to the media file to send (image, video, document)
+        recipient: Either a phone number with country code (no + or symbols),
+                 or a JID (e.g., "123456789@s.whatsapp.net" or "123456789@g.us")
+        media_path: Absolute path to the media file (image, video, document)
+        caption: Optional text rendered with the file as a caption. Omit for a
+                 bare attachment.
 
     Returns:
         A dictionary containing success status and a status message
     """
 
     # Call the whatsapp_send_file function
-    success, status_message = whatsapp_send_file(recipient, media_path)
+    success, status_message = whatsapp_send_file(recipient, media_path, caption)
     return {"success": success, "message": status_message}
 
 
