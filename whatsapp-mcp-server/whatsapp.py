@@ -25,6 +25,19 @@ WHATSAPP_API_BASE_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:8080/api
 _BRIDGE_TOKEN_PATH = os.path.join(os.path.dirname(WHATSMEOW_DB_PATH), ".bridge-token")
 
 
+def _connect_messages_db() -> sqlite3.Connection:
+    """Open messages.db with the same WAL + busy_timeout pragmas as the bridge.
+
+    The bridge writes to this database continuously; without WAL mode, our
+    reads would contend with those writes under SQLite's default rollback
+    journal and surface as "database is locked" errors.
+    """
+    conn = sqlite3.connect(MESSAGES_DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
 def _read_bridge_token() -> str | None:
     env = os.getenv("WHATSAPP_BRIDGE_TOKEN", "").strip()
     if env:
@@ -260,7 +273,7 @@ def _resolve_name_from_whatsmeow(jid: str) -> str | None:
 
 def get_sender_name(sender_jid: str) -> str:
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         # First try matching by exact JID
@@ -384,7 +397,7 @@ def list_messages(
         List of message dictionaries with id, timestamp, sender, content, etc.
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         # Build base query
@@ -464,7 +477,7 @@ def list_messages(
             seen_ids = set()
             messages_with_context = []
             for msg in result:
-                context = get_message_context(msg.id, context_before, context_after)
+                context = get_message_context(msg.id, context_before, context_after, chat_jid=msg.chat_jid)
                 for ctx_msg in context.before:
                     if ctx_msg.id not in seen_ids:
                         seen_ids.add(ctx_msg.id)
@@ -490,22 +503,38 @@ def list_messages(
             conn.close()
 
 
-def get_message_context(message_id: str, before: int = 5, after: int = 5) -> MessageContext:
-    """Get context around a specific message."""
+def get_message_context(message_id: str, before: int = 5, after: int = 5, chat_jid: str | None = None) -> MessageContext:
+    """Get context around a specific message.
+
+    chat_jid is an optional hint: messages.id alone isn't indexed (the table's
+    primary key is (id, chat_jid)), so passing chat_jid when the caller already
+    knows it turns this into an indexed lookup instead of a full table scan.
+    """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         # Get the target message first
-        cursor.execute(
-            """
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type, messages.quoted_message_id, messages.filename
-            FROM messages
-            JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.id = ?
-        """,
-            (message_id,),
-        )
+        if chat_jid:
+            cursor.execute(
+                """
+                SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type, messages.quoted_message_id, messages.filename
+                FROM messages
+                JOIN chats ON messages.chat_jid = chats.jid
+                WHERE messages.id = ? AND messages.chat_jid = ?
+            """,
+                (message_id, chat_jid),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type, messages.quoted_message_id, messages.filename
+                FROM messages
+                JOIN chats ON messages.chat_jid = chats.jid
+                WHERE messages.id = ?
+            """,
+                (message_id,),
+            )
         msg_data = cursor.fetchone()
 
         if not msg_data:
@@ -607,7 +636,7 @@ def list_chats(
         List of chat dictionaries with jid, name, is_group, last_message, etc.
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         # Build base query. The last-message columns are referenced by tuple
@@ -702,7 +731,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
 
     # 1) Search messages.db chats table (existing behavior)
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -770,7 +799,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
         page: Page number for pagination (default 0)
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         aliases = _sender_aliases(jid)
@@ -833,7 +862,7 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
         Message dictionary or None if no messages found
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         aliases = _sender_aliases(jid)
@@ -891,7 +920,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
         Chat dictionary or None if not found
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         # See list_chats: keep result tuple shape stable across the
@@ -946,7 +975,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
 def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | None:
     """Get chat metadata by sender phone number."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         cursor.execute(
