@@ -21,7 +21,7 @@ dependencies = [
     # drops x86_64 macOS support.
     "cryptography>=48.0.1,<49",
     "httpx>=0.28.1",
-    "mcp[cli]>=1.27.1",
+    "mcp[cli]>=1.28.1,<2",
     "requests>=2.34.2",
     "anyio<4.14",
 ]
