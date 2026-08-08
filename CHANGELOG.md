@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0](https://github.com/verygoodplugins/whatsapp-mcp/compare/v0.4.2...v0.5.0) (2026-08-08)
+
+
+### Features
+
+* **bridge:** add on-demand history sync for a single chat ([#168](https://github.com/verygoodplugins/whatsapp-mcp/issues/168)) ([43afd2e](https://github.com/verygoodplugins/whatsapp-mcp/commit/43afd2ef77aa161ae353cc0d4c318bfd4f071808))
+* **bridge:** configurable linked-device name via WHATSAPP_DEVICE_NAME ([#157](https://github.com/verygoodplugins/whatsapp-mcp/issues/157)) ([eb0565d](https://github.com/verygoodplugins/whatsapp-mcp/commit/eb0565de3e123e23e9fcc28a308d34898f0c7d77)), closes [#156](https://github.com/verygoodplugins/whatsapp-mcp/issues/156)
+* **mcp:** add @-mention support to send_message ([#190](https://github.com/verygoodplugins/whatsapp-mcp/issues/190)) ([30d2bdb](https://github.com/verygoodplugins/whatsapp-mcp/commit/30d2bdb6947fd87ca21efbe43ae7bfd3c4781ea6))
+
 ## [0.4.2](https://github.com/verygoodplugins/whatsapp-mcp/compare/v0.4.1...v0.4.2) (2026-08-05)
 
 
