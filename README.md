@@ -272,6 +272,42 @@ Download media from a received message.
 
 ### Chat Operations
 
+All chat tools (`list_chats`, `get_chat`, `get_direct_chat_by_contact`,
+`get_contact_chats`) return the same chat shape:
+
+```jsonc
+{
+  "jid": "1234567890@s.whatsapp.net",
+  "name": "Alice",
+  "is_group": false,
+  "last_message_time": "2024-01-15T10:30:00+00:00",
+  "last_message": "hello world",       // null when include_last_message=false
+  "last_sender": "1234567890",         // null when include_last_message=false
+  "last_is_from_me": false,
+  "last_read_time": "2024-01-15T09:00:00+00:00", // how far the chat is read
+  "unread": true                       // last message is inbound and unread
+}
+```
+
+#### Read state (`last_read_time` / `unread`)
+
+`last_read_time` is the bridge's read marker for the chat, fed by read
+receipts from your own devices and backfilled from history sync. `unread` is
+derived from it: true when the chat's last message is inbound and newer than
+the marker. This distinguishes a genuinely unread chat from one whose last
+message merely happens to be inbound but was already read on the phone.
+
+Caveats:
+
+- **The marker only moves forward.** Marking an already-read chat as *unread*
+  again on the phone is not reflected.
+- **No marker means no read was ever reported** — for a chat with an inbound
+  last message, `unread` then falls back to the old heuristic and reports
+  true. Stores written by a bridge older than the `chats.last_read_time`
+  column report `last_read_time: null` and behave the same way.
+- **`unread` is a chat-level flag, not an unread count.** WhatsApp's unread
+  counter is not persisted.
+
 #### `list_chats`
 
 List all chats with metadata.

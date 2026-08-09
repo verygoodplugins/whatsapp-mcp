@@ -84,14 +84,15 @@ def test_list_chats_with_last_message(messages_db):
 
 def test_list_chats_without_last_message(messages_db):
     """Regression: include_last_message=False must not error and must
-    still return the chat row with NULL last-message fields."""
+    still return the chat row without the last message's content."""
     chats = whatsapp.list_chats(limit=10, include_last_message=False)
     assert len(chats) == 1
     assert chats[0]["jid"] == "1234567890@s.whatsapp.net"
     assert chats[0]["name"] == "Alice"
     assert chats[0]["last_message"] is None
     assert chats[0]["last_sender"] is None
-    assert chats[0]["last_is_from_me"] is None
+    # is_from_me is always joined — the unread flag is derived from it.
+    assert chats[0]["last_is_from_me"] == 0
 
 
 def test_list_chats_query_filter_with_include_last_message_false(messages_db):
@@ -119,7 +120,7 @@ def test_get_chat_without_last_message(messages_db):
     assert chat["name"] == "Alice"
     assert chat["last_message"] is None
     assert chat["last_sender"] is None
-    assert chat["last_is_from_me"] is None
+    assert chat["last_is_from_me"] == 0
 
 
 def test_get_chat_missing_jid_returns_none(messages_db):

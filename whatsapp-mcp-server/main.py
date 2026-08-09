@@ -224,6 +224,13 @@ def list_chats(
         page: Page number for pagination (default 0)
         include_last_message: Include the last message in each chat (default True)
         sort_by: "last_active" (default, most recent first) or "name" (alphabetical)
+
+    Returns:
+        Chat dictionaries with jid, name, is_group, last_message_time, last_message,
+        last_sender, last_is_from_me, last_read_time and unread. `last_read_time` is
+        how far the chat has been read on any device (null if never reported); `unread`
+        is true when the last message is inbound and newer than that marker, so chats
+        already read on the phone are not reported as unread.
     """
     # Cap limit at 200 to prevent excessive queries
     limit = min(limit, 200)
@@ -240,6 +247,9 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
     Args:
         chat_jid: The JID of the chat to retrieve
         include_last_message: Whether to include the last message (default True)
+
+    Returns:
+        Chat dictionary — same shape as list_chats, including last_read_time and unread.
     """
     chat = whatsapp_get_chat(chat_jid, include_last_message)
     return chat

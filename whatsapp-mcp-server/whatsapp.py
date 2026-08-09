@@ -71,11 +71,30 @@ class Chat:
     last_message: str | None = None
     last_sender: str | None = None
     last_is_from_me: bool | None = None
+    # Bridge read marker (chats.last_read_time): how far we have read this
+    # chat, from read receipts and history-sync backfill. NULL when the
+    # bridge has never seen a read for the chat, or predates the column.
+    last_read_time: datetime | None = None
 
     @property
     def is_group(self) -> bool:
         """Determine if chat is a group based on JID pattern."""
         return self.jid.endswith("@g.us")
+
+    @property
+    def unread(self) -> bool:
+        """Whether the chat's last message is inbound and unread by us.
+
+        With a read marker this is genuine unread — a chat read on the phone
+        or another linked device is not reported. Without one (older bridge,
+        or a chat WhatsApp never reported a read for) it degrades to the old
+        heuristic: unread if the last message is inbound.
+        """
+        if self.last_message_time is None or self.last_is_from_me:
+            return False
+        if self.last_read_time is None:
+            return True
+        return self.last_message_time > self.last_read_time
 
 
 @dataclass
@@ -140,12 +159,25 @@ def chat_to_dict(chat: "Chat") -> dict[str, Any]:
         "last_message": chat.last_message,
         "last_sender": chat.last_sender,
         "last_is_from_me": chat.last_is_from_me,
+        "last_read_time": chat.last_read_time.isoformat() if chat.last_read_time else None,
+        "unread": chat.unread,
     }
 
 
 def contact_to_dict(contact: "Contact") -> dict[str, Any]:
     """Convert a Contact dataclass to a dictionary for JSON serialization."""
     return {"phone_number": contact.phone_number, "name": contact.name, "jid": contact.jid}
+
+
+def _last_read_time_select(cursor: sqlite3.Cursor, table_alias: str) -> str:
+    """SELECT expression for chats.last_read_time, or a NULL literal.
+
+    The bridge adds the column through its own migration, so a messages.db
+    written by an older bridge doesn't have it yet. Reads must keep working
+    against such a store — those chats simply report last_read_time = None.
+    """
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(chats)").fetchall()}
+    return f"{table_alias}.last_read_time" if "last_read_time" in columns else "NULL"
 
 
 def _sender_aliases(value: str) -> list[str]:
@@ -610,19 +642,14 @@ def list_chats(
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
 
-        # Build base query. The last-message columns are referenced by tuple
-        # index downstream, so we keep the result shape constant and emit
-        # static NULLs when the messages table is not joined — otherwise the
-        # SELECT references messages.* with no FROM/JOIN and SQLite errors
-        # out with "no such column: messages.content".
+        # The last message is always joined — is_from_me feeds the unread
+        # flag — but its content is only selected when asked for. The columns
+        # are referenced by tuple index downstream, so the result shape stays
+        # constant across the branch.
         if include_last_message:
-            last_message_select = (
-                "messages.content as last_message, "
-                "messages.sender as last_sender, "
-                "messages.is_from_me as last_is_from_me"
-            )
+            last_message_select = "messages.content as last_message, messages.sender as last_sender"
         else:
-            last_message_select = "NULL as last_message, NULL as last_sender, NULL as last_is_from_me"
+            last_message_select = "NULL as last_message, NULL as last_sender"
 
         query_parts = [
             f"""
@@ -630,16 +657,14 @@ def list_chats(
                 chats.jid,
                 chats.name,
                 chats.last_message_time,
-                {last_message_select}
+                {last_message_select},
+                messages.is_from_me as last_is_from_me,
+                {_last_read_time_select(cursor, "chats")}
             FROM chats
+            LEFT JOIN messages ON chats.jid = messages.chat_jid
+                AND chats.last_message_time = messages.timestamp
         """
         ]
-
-        if include_last_message:
-            query_parts.append("""
-                LEFT JOIN messages ON chats.jid = messages.chat_jid
-                AND chats.last_message_time = messages.timestamp
-            """)
 
         where_clauses = []
         params = []
@@ -675,6 +700,7 @@ def list_chats(
                 last_message=chat_data[3],
                 last_sender=chat_data[4],
                 last_is_from_me=chat_data[5],
+                last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
             )
             result.append(chat_to_dict(chat))
 
@@ -783,7 +809,8 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
                 c.last_message_time,
                 last_msg.content as last_message,
                 last_msg.sender as last_sender,
-                last_msg.is_from_me as last_is_from_me
+                last_msg.is_from_me as last_is_from_me,
+                {_last_read_time_select(cursor, "c")}
             FROM chats c
             LEFT JOIN messages last_msg ON c.jid = last_msg.chat_jid
                 AND c.last_message_time = last_msg.timestamp
@@ -810,6 +837,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
                 last_message=chat_data[3],
                 last_sender=chat_data[4],
                 last_is_from_me=chat_data[5],
+                last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
             )
             result.append(chat_to_dict(chat))
 
@@ -894,30 +922,26 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
 
-        # See list_chats: keep result tuple shape stable across the
-        # include_last_message branch by emitting static NULLs when we
-        # don't JOIN the messages table.
+        # See list_chats: the last message is always joined for is_from_me,
+        # and the result tuple shape stays stable across the branch.
         if include_last_message:
-            last_message_select = "m.content as last_message, m.sender as last_sender, m.is_from_me as last_is_from_me"
+            last_message_select = "m.content as last_message, m.sender as last_sender"
         else:
-            last_message_select = "NULL as last_message, NULL as last_sender, NULL as last_is_from_me"
+            last_message_select = "NULL as last_message, NULL as last_sender"
 
         query = f"""
             SELECT
                 c.jid,
                 c.name,
                 c.last_message_time,
-                {last_message_select}
+                {last_message_select},
+                m.is_from_me as last_is_from_me,
+                {_last_read_time_select(cursor, "c")}
             FROM chats c
-        """
-
-        if include_last_message:
-            query += """
-                LEFT JOIN messages m ON c.jid = m.chat_jid
+            LEFT JOIN messages m ON c.jid = m.chat_jid
                 AND c.last_message_time = m.timestamp
-            """
-
-        query += " WHERE c.jid = ?"
+            WHERE c.jid = ?
+        """
 
         cursor.execute(query, (chat_jid,))
         chat_data = cursor.fetchone()
@@ -932,6 +956,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
             last_message=chat_data[3],
             last_sender=chat_data[4],
             last_is_from_me=chat_data[5],
+            last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
         )
         return chat_to_dict(chat)
 
@@ -950,14 +975,15 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
         cursor = conn.cursor()
 
         cursor.execute(
-            """
+            f"""
             SELECT
                 c.jid,
                 c.name,
                 c.last_message_time,
                 m.content as last_message,
                 m.sender as last_sender,
-                m.is_from_me as last_is_from_me
+                m.is_from_me as last_is_from_me,
+                {_last_read_time_select(cursor, "c")}
             FROM chats c
             LEFT JOIN messages m ON c.jid = m.chat_jid
                 AND c.last_message_time = m.timestamp
@@ -979,6 +1005,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
             last_message=chat_data[3],
             last_sender=chat_data[4],
             last_is_from_me=chat_data[5],
+            last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
         )
         return chat_to_dict(chat)
 
