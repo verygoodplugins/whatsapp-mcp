@@ -75,6 +75,16 @@ type WebhookPayload struct {
 
 // sendWebhookPayload marshals and POSTs a WebhookPayload to the configured webhook URL.
 func sendWebhookPayload(payload WebhookPayload) {
+	// WEBHOOK_ENABLED=false turns outbound webhooks off entirely. An empty
+	// WEBHOOK_URL cannot serve that purpose: os.Getenv cannot tell "unset"
+	// from "explicitly empty", and empty deliberately falls back to
+	// defaultWebhookURL below. Deployments with no webhook consumer would
+	// otherwise POST to that default for every message and log a connection
+	// refused error each time.
+	if !getEnvBool("WEBHOOK_ENABLED", true) {
+		return
+	}
+
 	webhookURL := os.Getenv("WEBHOOK_URL")
 	explicitlyConfigured := webhookURL != ""
 	if !explicitlyConfigured {

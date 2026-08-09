@@ -29,6 +29,48 @@ func setDefaultWebhookURL(t *testing.T, url string) {
 	t.Cleanup(func() { defaultWebhookURL = prev })
 }
 
+// TestSendWebhookDisabledByEnv verifies that WEBHOOK_ENABLED=false suppresses
+// outbound webhooks. An empty WEBHOOK_URL cannot express this, because empty
+// intentionally falls back to defaultWebhookURL (see
+// TestSendWebhookOmitsBridgeTokenOnImplicitDefaultURL), leaving deployments
+// with no webhook consumer no way to opt out.
+func TestSendWebhookDisabledByEnv(t *testing.T) {
+	var received bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	t.Setenv("WEBHOOK_ENABLED", "false")
+	t.Setenv("WEBHOOK_URL", srv.URL)
+
+	SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
+
+	if received {
+		t.Fatal("webhook was delivered despite WEBHOOK_ENABLED=false")
+	}
+}
+
+// TestSendWebhookEnabledByDefault guards the default: omitting WEBHOOK_ENABLED
+// must leave delivery behavior exactly as it was before the flag existed.
+func TestSendWebhookEnabledByDefault(t *testing.T) {
+	var received bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	t.Setenv("WEBHOOK_URL", srv.URL)
+
+	SendWebhook("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil)
+
+	if !received {
+		t.Fatal("webhook was not delivered with WEBHOOK_ENABLED unset")
+	}
+}
+
 // TestSendWebhookAttachesBridgeTokenHeader verifies that outbound webhook POSTs
 // carry the shared bridge token as an "X-Bridge-Token" header so the hub's
 // fail-closed inbound-auth middleware (autohub PR #898) accepts them. The token
