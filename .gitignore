@@ -3,6 +3,10 @@
 
 # Logs
 *.log
+logs/
+
+# Local outbox / scratch (not package examples)
+outbox/
 
 # Config
 claude_desktop_config.json
@@ -21,10 +25,12 @@ package-lock.json
 # Go binaries
 whatsapp-bridge/whatsapp-bridge
 whatsapp-bridge/whatsapp-client
+whatsapp-bridge/whatsapp-bridge.prev*
 *.exe
 
 # WhatsApp data (personal/sensitive)
 whatsapp-bridge/store/
+**/.bridge-token
 
 # Python
 __pycache__/
