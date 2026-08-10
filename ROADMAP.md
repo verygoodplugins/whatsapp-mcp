@@ -1,6 +1,6 @@
 # Roadmap
 
-This document defines what this fork (`verygoodplugins/whatsapp-mcp`) optimizes for, what it explicitly does **not** want to become, and how to propose changes that fit.
+This document defines what this fork (`DynamicDevices/whatsapp-mcp`, based on `verygoodplugins/whatsapp-mcp`) optimizes for, what it explicitly does **not** want to become, and how to propose changes that fit.
 
 > If your idea isn't on the "in scope" list, that doesn't mean it's bad — it usually means it belongs in a downstream fork or a separate companion project.
 

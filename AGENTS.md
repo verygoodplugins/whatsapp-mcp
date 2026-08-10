@@ -6,10 +6,12 @@ This file is the single source of truth for "how to contribute here". `CLAUDE.md
 
 ## Repository
 
-- **Repo:** [`verygoodplugins/whatsapp-mcp`](https://github.com/verygoodplugins/whatsapp-mcp)
-- **Origin remote:** always `origin` (this fork). PRs, issues, and `gh` commands target this fork, not the upstream `lharries/whatsapp-mcp`.
+- **Repo:** [`DynamicDevices/whatsapp-mcp`](https://github.com/DynamicDevices/whatsapp-mcp) (this fork)
+- **Upstream:** [`verygoodplugins/whatsapp-mcp`](https://github.com/verygoodplugins/whatsapp-mcp) (Very Good Plugins / Jack Arturo) — prefer syncing from here when pulling fixes
+- **Original:** [`lharries/whatsapp-mcp`](https://github.com/lharries/whatsapp-mcp) (Luke Harries)
+- **Origin remote:** always `origin` (Dynamic Devices). PRs, issues, and `gh` commands target this fork, not upstream.
 - **Default branch:** `main`. All PRs target `main`.
-- **Releases:** automated via [release-please](https://github.com/googleapis/release-please) — do **not** hand-edit `CHANGELOG.md` or version numbers.
+- **Releases:** release-please may still be present from upstream — do **not** hand-edit `CHANGELOG.md` or version numbers unless intentionally cutting a DD release.
 
 ## Architecture (read first)
 

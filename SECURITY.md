@@ -13,9 +13,9 @@ Security fixes ship on the latest minor release. Older minors are not patched.
 
 Please report vulnerabilities **privately** — do not open a public issue, PR, or discussion.
 
-**Preferred:** Use GitHub's [private vulnerability reporting](https://github.com/verygoodplugins/whatsapp-mcp/security/advisories/new) on this repository. This creates a draft Security Advisory visible only to maintainers and you, and lets us collaborate on a fix in a private fork before disclosure.
+**Preferred:** Use GitHub's [private vulnerability reporting](https://github.com/DynamicDevices/whatsapp-mcp/security/advisories/new) on this repository. This creates a draft Security Advisory visible only to maintainers and you, and lets us collaborate on a fix in a private fork before disclosure.
 
-**Alternative:** Email `security@verygoodplugins.com` with details.
+For issues that clearly belong in upstream [`verygoodplugins/whatsapp-mcp`](https://github.com/verygoodplugins/whatsapp-mcp), report there as well (or instead) so the wider fork lineage can benefit.
 
 When reporting, please include where possible:
 
@@ -33,7 +33,7 @@ When reporting, please include where possible:
 - A CVE requested through GitHub when the issue warrants one
 - Credit in the published advisory and release notes (unless you'd prefer to remain anonymous)
 
-If you don't hear back within 72 hours, please re-send — this is a solo-maintained project and occasional travel happens.
+If you don't hear back within 72 hours, please re-send — maintainers may be offline briefly.
 
 ## Scope and Threat Model
 

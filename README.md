@@ -1,13 +1,13 @@
 # WhatsApp MCP Server
 
-[![CI](https://github.com/verygoodplugins/whatsapp-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/verygoodplugins/whatsapp-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/DynamicDevices/whatsapp-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/DynamicDevices/whatsapp-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Go 1.25+](https://img.shields.io/badge/go-1.25+-00ADD8.svg)](https://go.dev/)
 
 A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and send WhatsApp messages.
 
-> Originally created by [Luke Harries](https://github.com/lharries/whatsapp-mcp). Maintained by [Very Good Plugins](https://verygoodplugins.com/?utm_source=github).
+> Originally created by [Luke Harries](https://github.com/lharries/whatsapp-mcp). Actively maintained upstream by [Very Good Plugins](https://verygoodplugins.com/?utm_source=github) ([Jack Arturo](https://github.com/jack-arturo)). This repository is the [Dynamic Devices](https://www.dynamicdevices.co.uk/) fork used with Briar / CursorPA.
 
 <p align="center">
   <a href="https://github.com/user-attachments/assets/9475af1d-2369-4315-9ccc-823dba2c5c32"><strong>Watch the WhatsApp MCP demo video</strong></a>
@@ -42,7 +42,7 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 1. **Clone the repository**
 
    ```bash
-   git clone https://github.com/verygoodplugins/whatsapp-mcp.git
+   git clone https://github.com/DynamicDevices/whatsapp-mcp.git
    cd whatsapp-mcp
    ```
 
@@ -749,9 +749,9 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Credits & History
 
-This project is a maintained fork of [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp), originally created by [Luke Harries](https://github.com/lharries).
+This project is a [Dynamic Devices](https://www.dynamicdevices.co.uk/) fork of [verygoodplugins/whatsapp-mcp](https://github.com/verygoodplugins/whatsapp-mcp) (Very Good Plugins / [Jack Arturo](https://github.com/jack-arturo)), itself a maintained fork of [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp) by [Luke Harries](https://github.com/lharries).
 
-**Why we forked:** The original repository hasn't been updated since April 2025. We needed continued maintenance, bug fixes, and new features for production use.
+**Why we forked:** production use with Briar / CursorPA and DD-specific bridge behaviour, while continuing to track Very Good Plugins upstream.
 
 **Highlights since the fork:**
 
@@ -777,7 +777,8 @@ And to Luke for creating the original project. See [CONTRIBUTING.md](CONTRIBUTIN
 
 ## Links
 
-- [Very Good Plugins](https://verygoodplugins.com/?utm_source=github)
+- [Dynamic Devices](https://www.dynamicdevices.co.uk/)
+- [Very Good Plugins](https://verygoodplugins.com/?utm_source=github) (upstream)
 - [MCP Specification](https://modelcontextprotocol.io/)
 - [whatsmeow](https://github.com/tulir/whatsmeow) - WhatsApp Web API library for Go
 - [FastMCP](https://github.com/jlowin/fastmcp) - Fast Model Context Protocol implementation

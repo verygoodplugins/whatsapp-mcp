@@ -1,8 +1,8 @@
-blank_issues_enabled: false
+blank_issues_enabled: true
 contact_links:
-  - name: Question or discussion
-    url: https://github.com/verygoodplugins/whatsapp-mcp/discussions
-    about: Ask a question, share an idea, or discuss usage. Please use Discussions for non-bug, non-feature topics.
+  - name: Upstream (Very Good Plugins)
+    url: https://github.com/verygoodplugins/whatsapp-mcp
+    about: Feature requests and discussions that belong in the public upstream fork — prefer filing there when the change is not DD-specific.
   - name: Roadmap & scope
-    url: https://github.com/verygoodplugins/whatsapp-mcp/blob/main/ROADMAP.md
+    url: https://github.com/DynamicDevices/whatsapp-mcp/blob/main/ROADMAP.md
     about: Before requesting a feature, check what this fork is (and is not) trying to be.

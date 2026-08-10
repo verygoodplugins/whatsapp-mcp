@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Before filing, please skim [`ROADMAP.md`](https://github.com/verygoodplugins/whatsapp-mcp/blob/main/ROADMAP.md). This fork is intentionally narrow — features outside the "in scope" list are usually closed with a redirect.
+        Before filing, please skim [`ROADMAP.md`](https://github.com/DynamicDevices/whatsapp-mcp/blob/main/ROADMAP.md). This fork is intentionally narrow — features outside the "in scope" list are usually closed with a redirect.
 
         State the **problem**, not the solution. Solutions are easier to design once the problem is clear.
 
