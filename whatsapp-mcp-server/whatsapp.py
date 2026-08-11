@@ -89,8 +89,14 @@ class Chat:
         or another linked device is not reported. Without one (older bridge,
         or a chat WhatsApp never reported a read for) it degrades to the old
         heuristic: unread if the last message is inbound.
+
+        A missing last-message row (`last_is_from_me is None`) cannot establish
+        direction — protocol/unsupported events can advance last_message_time
+        without storing a message — so those chats are not reported as unread.
         """
-        if self.last_message_time is None or self.last_is_from_me:
+        if self.last_message_time is None or self.last_is_from_me is None:
+            return False
+        if self.last_is_from_me:
             return False
         if self.last_read_time is None:
             return True
@@ -178,6 +184,25 @@ def _last_read_time_select(cursor: sqlite3.Cursor, table_alias: str) -> str:
     """
     columns = {row[1] for row in cursor.execute("PRAGMA table_info(chats)").fetchall()}
     return f"{table_alias}.last_read_time" if "last_read_time" in columns else "NULL"
+
+
+def _last_message_join(chat_alias: str, msg_alias: str) -> str:
+    """Deterministic single-row join to the chat's latest message.
+
+    Multiple messages can share last_message_time (history sync is second-
+    resolution). Joining solely on timestamp would duplicate chat rows and
+    make last_is_from_me / unread non-deterministic; pick one id as tie-break.
+    """
+    return f"""
+            LEFT JOIN messages {msg_alias} ON {chat_alias}.jid = {msg_alias}.chat_jid
+                AND {msg_alias}.id = (
+                    SELECT m.id FROM messages m
+                    WHERE m.chat_jid = {chat_alias}.jid
+                      AND m.timestamp = {chat_alias}.last_message_time
+                    ORDER BY m.id DESC
+                    LIMIT 1
+                )
+    """
 
 
 def _sender_aliases(value: str) -> list[str]:
@@ -661,8 +686,7 @@ def list_chats(
                 messages.is_from_me as last_is_from_me,
                 {_last_read_time_select(cursor, "chats")}
             FROM chats
-            LEFT JOIN messages ON chats.jid = messages.chat_jid
-                AND chats.last_message_time = messages.timestamp
+            {_last_message_join("chats", "messages")}
         """
         ]
 
@@ -812,8 +836,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
                 last_msg.is_from_me as last_is_from_me,
                 {_last_read_time_select(cursor, "c")}
             FROM chats c
-            LEFT JOIN messages last_msg ON c.jid = last_msg.chat_jid
-                AND c.last_message_time = last_msg.timestamp
+            {_last_message_join("c", "last_msg")}
             WHERE EXISTS (
                 SELECT 1
                 FROM messages contact_msg
@@ -938,8 +961,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
                 m.is_from_me as last_is_from_me,
                 {_last_read_time_select(cursor, "c")}
             FROM chats c
-            LEFT JOIN messages m ON c.jid = m.chat_jid
-                AND c.last_message_time = m.timestamp
+            {_last_message_join("c", "m")}
             WHERE c.jid = ?
         """
 
@@ -985,8 +1007,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
                 m.is_from_me as last_is_from_me,
                 {_last_read_time_select(cursor, "c")}
             FROM chats c
-            LEFT JOIN messages m ON c.jid = m.chat_jid
-                AND c.last_message_time = m.timestamp
+            {_last_message_join("c", "m")}
             WHERE c.jid LIKE ? AND c.jid NOT LIKE '%@g.us'
             LIMIT 1
         """,

@@ -152,3 +152,39 @@ def test_reads_work_against_store_without_read_state_column(legacy_db):
     chat = whatsapp.get_chat("read@s.whatsapp.net")
     assert chat["last_read_time"] is None
     assert chat["unread"] is True
+
+
+def test_list_chats_dedupes_timestamp_ties(tmp_path, monkeypatch):
+    """Two messages sharing last_message_time must not duplicate the chat row."""
+    db_path = tmp_path / "tie.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(SCHEMA_WITH_READ_STATE + MESSAGES_SCHEMA)
+    conn.execute(
+        "INSERT INTO chats (jid, name, last_message_time, last_read_time) VALUES (?, ?, ?, NULL)",
+        ("tie@s.whatsapp.net", "Tie", "2024-01-15 10:30:00+00:00"),
+    )
+    conn.execute(
+        """INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+           VALUES ('aaa', 'tie@s.whatsapp.net', 'peer', 'first', '2024-01-15 10:30:00+00:00', 0),
+                  ('zzz', 'tie@s.whatsapp.net', 'peer', 'second', '2024-01-15 10:30:00+00:00', 1)"""
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(db_path))
+
+    chats = whatsapp.list_chats(limit=10, include_last_message=False)
+    assert len(chats) == 1
+    # Deterministic tie-break prefers higher id ('zzz'), which is from_me.
+    assert chats[0]["last_is_from_me"] == 1
+    assert chats[0]["unread"] is False
+
+
+def test_unread_false_when_last_message_row_missing():
+    chat = whatsapp.Chat(
+        jid="x@s.whatsapp.net",
+        name="X",
+        last_message_time=whatsapp.datetime.fromisoformat("2024-01-15T10:30:00+00:00"),
+        last_is_from_me=None,
+        last_read_time=None,
+    )
+    assert chat.unread is False

@@ -1109,9 +1109,9 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_MigratesAndIsIdempotent(t *testing.T) 
 	phoneJID := "222@s.whatsapp.net"
 
 	_, err = ms.db.Exec(`
-		INSERT INTO chats (jid, name, last_message_time) VALUES
-			(?, 'Legacy LID Name', '2026-03-01T10:00:00Z'),
-			(?, '', '2026-03-01T09:00:00Z');
+		INSERT INTO chats (jid, name, last_message_time, last_read_time) VALUES
+			(?, 'Legacy LID Name', '2026-03-01T10:00:00Z', '2026-03-01T09:30:00Z'),
+			(?, '', '2026-03-01T09:00:00Z', '2026-03-01T08:00:00Z');
 
 		INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length) VALUES
 			('dup', ?, 'alice', 'lid duplicate', '2026-03-01T10:00:00Z', 0, '', '', '', NULL, NULL, NULL, 0),
@@ -1152,6 +1152,14 @@ func TestMigrateLegacyLIDChatsToPhoneJIDs_MigratesAndIsIdempotent(t *testing.T) 
 	}
 	if phoneTime != "2026-03-01T10:00:00Z" {
 		t.Fatalf("expected phone chat last_message_time to be the latest (from LID chat), got %q", phoneTime)
+	}
+
+	phoneRead, readFound := queryChatLastReadTime(ms, phoneJID)
+	if !readFound || phoneRead == "" {
+		t.Fatalf("expected phone chat last_read_time to be preserved, got %q found=%v", phoneRead, readFound)
+	}
+	if phoneRead != "2026-03-01T09:30:00Z" {
+		t.Fatalf("expected last_read_time merged to later LID marker, got %q", phoneRead)
 	}
 
 	if err := ms.MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath, logger); err != nil {
@@ -2313,7 +2321,18 @@ func TestMarkReadHandler_InvalidRequests_Return400(t *testing.T) {
 
 func TestMarkReadHandler_Disconnected_Returns503(t *testing.T) {
 	const token = "supersecrettoken1234567890abcdef"
-	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
+	ms := newTestMessageStore(t)
+	chatJID := "120363012345678901@g.us"
+	sender := "15551234567"
+	msgID := "3AABCDEF01234567"
+	if _, err := ms.db.Exec(
+		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
+		 VALUES (?, ?, ?, 'hi', ?, 0)`,
+		msgID, chatJID, sender, time.Unix(1710000000, 0),
+	); err != nil {
+		t.Fatalf("seed message: %v", err)
+	}
+	handler := newRESTMux(newTestClient(&mockLIDStore{}), ms, 8080, token, nil)
 
 	body := `{"message_ids":["3AABCDEF01234567"],"chat_jid":"120363012345678901@g.us","sender_jid":"15551234567","timestamp":"2026-08-11T18:30:00Z"}`
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/mark-read", strings.NewReader(body))
@@ -2324,7 +2343,7 @@ func TestMarkReadHandler_Disconnected_Returns503(t *testing.T) {
 	handler.ServeHTTP(resp, req)
 
 	if resp.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503 for disconnected client, got %d", resp.Code)
+		t.Errorf("expected 503 for disconnected client, got %d body=%s", resp.Code, resp.Body.String())
 	}
 }
 
@@ -2383,6 +2402,65 @@ func TestResolveRecipientJID_ForMarkReadTargets(t *testing.T) {
 	}
 	if gotGroup != group {
 		t.Fatalf("expected group JID unchanged, got %s", gotGroup)
+	}
+}
+
+func TestValidateInboundMarkRead(t *testing.T) {
+	ms := newTestMessageStore(t)
+	chat := "15551234567@s.whatsapp.net"
+	group := "120363012345678901@g.us"
+	if _, err := ms.db.Exec(`
+		INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) VALUES
+			('in-dm', ?, '15551234567', 'hi', ?, 0),
+			('out-dm', ?, '15559876543', 'yo', ?, 1),
+			('in-group', ?, '15557654321', 'hi', ?, 0);
+	`, chat, time.Unix(1710000000, 0), chat, time.Unix(1710000001, 0), group, time.Unix(1710000002, 0)); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := ms.ValidateInboundMarkRead(chat, "", []string{"in-dm"}); err != nil {
+		t.Fatalf("DM validate: %v", err)
+	}
+	if err := ms.ValidateInboundMarkRead(group, "15557654321@s.whatsapp.net", []string{"in-group"}); err != nil {
+		t.Fatalf("group validate: %v", err)
+	}
+	if err := ms.ValidateInboundMarkRead(chat, "", []string{"missing"}); err == nil {
+		t.Fatal("expected missing message error")
+	}
+	if err := ms.ValidateInboundMarkRead(chat, "", []string{"out-dm"}); err == nil {
+		t.Fatal("expected outbound message error")
+	}
+	if err := ms.ValidateInboundMarkRead(group, "15551234567", []string{"in-group"}); err == nil {
+		t.Fatal("expected sender mismatch error")
+	}
+}
+
+func TestMaxMessageTimestamp(t *testing.T) {
+	ms := newTestMessageStore(t)
+	chat := "15551234567@s.whatsapp.net"
+	early := time.Unix(1710000000, 0).UTC()
+	late := time.Unix(1710009999, 0).UTC()
+	if _, err := ms.db.Exec(`
+		INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) VALUES
+			('a', ?, '15551234567', 'early', ?, 0),
+			('b', ?, '15551234567', 'late', ?, 0);
+	`, chat, early, chat, late); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	got, ok, err := ms.MaxMessageTimestamp(chat, []string{"a", "b"})
+	if err != nil || !ok {
+		t.Fatalf("MaxMessageTimestamp: ok=%v err=%v", ok, err)
+	}
+	if !got.Equal(late) {
+		t.Fatalf("expected %v, got %v", late, got)
+	}
+	_, ok, err = ms.MaxMessageTimestamp(chat, []string{"missing"})
+	if err != nil {
+		t.Fatalf("missing ids: %v", err)
+	}
+	if ok {
+		t.Fatal("expected ok=false for missing ids")
 	}
 }
 

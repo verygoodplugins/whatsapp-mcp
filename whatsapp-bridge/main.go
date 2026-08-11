@@ -339,7 +339,8 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 					FROM messages msg
 					WHERE msg.chat_jid = m.lid_jid
 				)
-			) AS source_last_message_time
+			) AS source_last_message_time,
+			c.last_read_time AS source_last_read_time
 		FROM tmp_lid_to_phone m
 		LEFT JOIN chats c ON c.jid = m.lid_jid;
 	`); err != nil {
@@ -364,7 +365,8 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 				),
 				substr(c.phone_jid, 1, instr(c.phone_jid, '@') - 1)
 			) AS source_name,
-			MAX(c.source_last_message_time) AS source_last_message_time
+			MAX(c.source_last_message_time) AS source_last_message_time,
+			MAX(c.source_last_read_time) AS source_last_read_time
 		FROM tmp_lid_chat_candidates c
 		GROUP BY c.phone_jid;
 	`); err != nil {
@@ -372,8 +374,8 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 	}
 
 	if _, err := tx.Exec(`
-		INSERT OR IGNORE INTO chats (jid, name, last_message_time)
-		SELECT phone_jid, source_name, source_last_message_time
+		INSERT OR IGNORE INTO chats (jid, name, last_message_time, last_read_time)
+		SELECT phone_jid, source_name, source_last_message_time, source_last_read_time
 		FROM tmp_lid_chat_meta;
 	`); err != nil {
 		return fmt.Errorf("failed to upsert destination chat rows: %w", err)
@@ -411,6 +413,28 @@ func (store *MessageStore) MigrateLegacyLIDChatsToPhoneJIDs(whatsappDBPath strin
 					WHERE m.phone_jid = chats.jid
 				)
 				ELSE last_message_time
+			END,
+			last_read_time = CASE
+				WHEN (
+					SELECT m.source_last_read_time
+					FROM tmp_lid_chat_meta m
+					WHERE m.phone_jid = chats.jid
+				) IS NULL THEN last_read_time
+				WHEN last_read_time IS NULL THEN (
+					SELECT m.source_last_read_time
+					FROM tmp_lid_chat_meta m
+					WHERE m.phone_jid = chats.jid
+				)
+				WHEN (
+					SELECT m.source_last_read_time
+					FROM tmp_lid_chat_meta m
+					WHERE m.phone_jid = chats.jid
+				) > last_read_time THEN (
+					SELECT m.source_last_read_time
+					FROM tmp_lid_chat_meta m
+					WHERE m.phone_jid = chats.jid
+				)
+				ELSE last_read_time
 			END
 		WHERE jid IN (SELECT phone_jid FROM tmp_lid_chat_meta);
 	`); err != nil {
@@ -704,6 +728,84 @@ func (store *MessageStore) GetMessageIsFromMe(id, chatJID string) (*bool, error)
 		return nil, err
 	}
 	return &isFromMe, nil
+}
+
+// bareSenderUser normalizes a phone/LID or full JID to the bare user part
+// stored in messages.sender.
+func bareSenderUser(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '@'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// ValidateInboundMarkRead checks that every message ID exists in chatJID, is
+// inbound, and belongs to the expected sender before we send a read receipt.
+// senderHint may be bare or a full JID; when empty (DM), the chat user is used.
+func (store *MessageStore) ValidateInboundMarkRead(chatJID, senderHint string, ids []string) error {
+	expected := bareSenderUser(senderHint)
+	if expected == "" {
+		if jid, err := types.ParseJID(chatJID); err == nil {
+			expected = jid.User
+		}
+	}
+	if expected == "" {
+		return fmt.Errorf("could not determine expected sender for chat %q", chatJID)
+	}
+
+	for _, id := range ids {
+		var sender string
+		var isFromMe bool
+		err := store.db.QueryRow(
+			`SELECT sender, is_from_me FROM messages WHERE id = ? AND chat_jid = ?`,
+			id, chatJID,
+		).Scan(&sender, &isFromMe)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("message %q not found in chat %q", id, chatJID)
+		}
+		if err != nil {
+			return err
+		}
+		if isFromMe {
+			return fmt.Errorf("message %q is outbound; only inbound messages can be marked read", id)
+		}
+		if bareSenderUser(sender) != expected {
+			return fmt.Errorf("message %q sender %q does not match %q", id, sender, expected)
+		}
+	}
+	return nil
+}
+
+// MaxMessageTimestamp returns the latest stored timestamp among the given
+// message IDs in chatJID. ok is false when none of the IDs are present.
+func (store *MessageStore) MaxMessageTimestamp(chatJID string, ids []string) (time.Time, bool, error) {
+	if len(ids) == 0 {
+		return time.Time{}, false, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, 1+len(ids))
+	args = append(args, chatJID)
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	var raw any
+	err := store.db.QueryRow(
+		`SELECT MAX(timestamp) FROM messages WHERE chat_jid = ? AND id IN (`+strings.Join(placeholders, ",")+`)`,
+		args...,
+	).Scan(&raw)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if raw == nil {
+		return time.Time{}, false, nil
+	}
+	ts := anchorTime(raw)
+	if ts.IsZero() {
+		return time.Time{}, false, fmt.Errorf("unparseable message timestamp %v", raw)
+	}
+	return ts, true, nil
 }
 
 // Store a message in the database
@@ -2315,6 +2417,13 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			return
 		}
 
+		// Validate against the storage (phone-form) chat JID before any
+		// external side effect. LID rewrite happens only for the receipt.
+		if err := messageStore.ValidateInboundMarkRead(req.ChatJID, req.SenderJID, req.MessageIDs); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
 		// MCP storage normalizes chats/senders to phone JIDs; MarkRead routes
 		// the receipt `to`/`participant` as given, so resolve PN -> LID the
 		// same way sendWhatsAppMessage does or migrated contacts silently fail.
@@ -2336,6 +2445,18 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			_ = json.NewEncoder(w).Encode(SendMessageResponse{Success: false, Message: err.Error()})
 			return
 		}
+
+		// Advance the local read marker immediately so list_chats unread
+		// clears without waiting for the self-read receipt round-trip.
+		localReadAt := readAt
+		if ts, ok, tsErr := messageStore.MaxMessageTimestamp(req.ChatJID, req.MessageIDs); tsErr == nil && ok {
+			localReadAt = ts
+		}
+		if err := messageStore.MarkChatRead(req.ChatJID, localReadAt); err != nil {
+			// Receipt already sent; log but still report success to the caller.
+			fmt.Printf("Warning: failed to persist local read marker for %s: %v\n", req.ChatJID, err)
+		}
+
 		_ = json.NewEncoder(w).Encode(SendMessageResponse{Success: true, Message: "Messages marked as read"})
 	}))
 
@@ -2728,7 +2849,20 @@ func main() {
 			// from "latest message is inbound". Only our own reads count.
 			if isSelfReadReceipt(v) {
 				chatJID := resolveLIDChat(client, v.Chat, v.SenderAlt, v.RecipientAlt, v.IsFromMe).String()
-				if err := messageStore.MarkChatRead(chatJID, v.Timestamp); err != nil {
+				// Prefer the acknowledged messages' timestamps over the
+				// receipt event time so out-of-order delivery cannot advance
+				// the marker past an unread message.
+				readAt := v.Timestamp
+				ids := make([]string, len(v.MessageIDs))
+				for i, id := range v.MessageIDs {
+					ids[i] = string(id)
+				}
+				if ts, ok, err := messageStore.MaxMessageTimestamp(chatJID, ids); err != nil {
+					logger.Warnf("Failed to look up read receipt message times for %s: %v", chatJID, err)
+				} else if ok {
+					readAt = ts
+				}
+				if err := messageStore.MarkChatRead(chatJID, readAt); err != nil {
 					logger.Warnf("Failed to mark chat %s read: %v", chatJID, err)
 				}
 			}
@@ -3226,11 +3360,13 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 			timestamp := time.Unix(int64(ts), 0)
 
 			_ = messageStore.StoreChat(chatJID, name, timestamp)
-			// Backfill read state: a conversation WhatsApp reports as fully
-			// read (no unread count, not manually flagged) is read up to its
-			// last message. Conversations with genuine unread are left
-			// unmarked so they correctly stay "awaiting".
-			if conversation.GetUnreadCount() == 0 && !conversation.GetMarkedAsUnread() {
+			// Backfill read state only when WhatsApp explicitly reports unread
+			// metadata. Sparse history-sync chunks omit UnreadCount; the
+			// generated getter then returns 0 and would permanently mark the
+			// chat read under the monotonic merge.
+			if conversation.UnreadCount != nil &&
+				conversation.GetUnreadCount() == 0 &&
+				!conversation.GetMarkedAsUnread() {
 				if err := messageStore.MarkChatRead(chatJID, timestamp); err != nil {
 					logger.Warnf("Failed to backfill read state for %s: %v", chatJID, err)
 				}
