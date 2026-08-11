@@ -290,6 +290,24 @@ Download media from a received message.
 - `message_id` (required): ID of the message with media
 - `chat_jid` (required): JID of the chat containing the message
 
+#### `delete_message`
+
+Delete a message this account sent.
+
+**Parameters:**
+
+- `chat_jid` (required): JID of the chat the message lives in
+- `message_id` (required): WhatsApp message ID (the `id` from `list_messages`)
+- `for_everyone` (optional, default `true`): revoke on both sides, or only
+  remove the local row
+
+With `for_everyone: true` the recipient sees the "This message was deleted"
+placeholder. WhatsApp only accepts a revoke for messages this account sent, and
+rejects it past its delete-for-everyone window — both come back as
+`success: false` with the server's message. With `for_everyone: false` nothing
+is sent: the row is dropped locally so `list_messages` stops returning it, and
+the message stays visible to the other party.
+
 ### Chat Operations
 
 All chat tools (`list_chats`, `get_chat`, `get_direct_chat_by_contact`,
