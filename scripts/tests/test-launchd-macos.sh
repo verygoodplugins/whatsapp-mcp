@@ -197,7 +197,7 @@ test_install_generates_launchd_files() {
   assert_contains "$launch_agents/com.whatsapp-mcp.bridge-monitor.plist" "$support/monitor-whatsapp-bridge.sh"
   assert_contains "$launch_agents/com.whatsapp-mcp.bridge-monitor.plist" "<key>StartInterval</key><integer>60</integer>"
 
-  assert_contains "$tmp/cmd.log" "go build -o $repo/whatsapp-bridge/whatsapp-bridge ."
+  assert_contains "$tmp/cmd.log" "go build -tags sqlite_fts5 -o $repo/whatsapp-bridge/whatsapp-bridge ."
   assert_contains "$tmp/cmd.log" "launchctl bootout gui/501/com.whatsapp-mcp.bridge"
   assert_contains "$tmp/cmd.log" "launchctl bootstrap gui/501 $launch_agents/com.whatsapp-mcp.bridge.plist"
   assert_contains "$tmp/cmd.log" "launchctl kickstart -k gui/501/com.whatsapp-mcp.bridge-monitor"

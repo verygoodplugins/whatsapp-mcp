@@ -57,10 +57,10 @@ If unsure whether something is in scope, **open an issue first**. Do not open a 
 ```bash
 # Go bridge
 cd whatsapp-bridge
-go run .                    # dev
-go build -o whatsapp-bridge && ./whatsapp-bridge   # release-ish
+go run -tags sqlite_fts5 .  # dev
+go build -tags sqlite_fts5 -o whatsapp-bridge && ./whatsapp-bridge   # release-ish
 golangci-lint run           # lint
-go test ./...               # tests (sparse today)
+go test -tags sqlite_fts5 ./... # tests (sparse today)
 
 # Python MCP server
 cd whatsapp-mcp-server
