@@ -2272,6 +2272,48 @@ func TestMarkReadHandler_NoAuth_Returns401(t *testing.T) {
 	}
 }
 
+// TestResolveRecipientJID_ForMarkReadTargets locks the PN -> LID rewrite used
+// by /api/mark-read: MCP returns phone-form JIDs from messages.db, but
+// MarkRead must address migrated DMs (and group participants) by LID.
+func TestResolveRecipientJID_ForMarkReadTargets(t *testing.T) {
+	phoneChat := types.NewJID("15551234567", types.DefaultUserServer)
+	lidChat := types.NewJID("999888777666555", types.HiddenUserServer)
+	phoneSender := types.NewJID("15557654321", types.DefaultUserServer)
+	lidSender := types.NewJID("111222333444555", types.HiddenUserServer)
+	group := types.NewJID("120363012345678901", types.GroupServer)
+
+	client := newTestClient(&mockLIDStore{
+		lidByPN: map[types.JID]types.JID{
+			phoneChat:   lidChat,
+			phoneSender: lidSender,
+		},
+	})
+
+	gotChat, err := resolveRecipientJID(client, phoneChat.String())
+	if err != nil {
+		t.Fatalf("chat resolve: %v", err)
+	}
+	if gotChat != lidChat {
+		t.Fatalf("expected chat LID %s, got %s", lidChat, gotChat)
+	}
+
+	gotSender, err := resolveRecipientJID(client, phoneSender.User)
+	if err != nil {
+		t.Fatalf("sender resolve: %v", err)
+	}
+	if gotSender != lidSender {
+		t.Fatalf("expected sender LID %s, got %s", lidSender, gotSender)
+	}
+
+	gotGroup, err := resolveRecipientJID(client, group.String())
+	if err != nil {
+		t.Fatalf("group resolve: %v", err)
+	}
+	if gotGroup != group {
+		t.Fatalf("expected group JID unchanged, got %s", gotGroup)
+	}
+}
+
 func TestHandleMessage_RegularMessageDoesNotMarkDeleted(t *testing.T) {
 	client := newTestClient(&mockLIDStore{})
 	ms := newTestMessageStore(t)

@@ -2281,6 +2281,23 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			})
 			return
 		}
+
+		// MCP storage normalizes chats/senders to phone JIDs; MarkRead routes
+		// the receipt `to`/`participant` as given, so resolve PN -> LID the
+		// same way sendWhatsAppMessage does or migrated contacts silently fail.
+		chatJID, err = resolveRecipientJID(client, req.ChatJID)
+		if err != nil || chatJID.User == "" || chatJID.Server == "" {
+			http.Error(w, "Invalid chat_jid", http.StatusBadRequest)
+			return
+		}
+		if req.SenderJID != "" {
+			senderJID, err = resolveRecipientJID(client, req.SenderJID)
+			if err != nil || senderJID.User == "" || senderJID.Server == "" {
+				http.Error(w, "Invalid sender_jid", http.StatusBadRequest)
+				return
+			}
+		}
+
 		if err := client.MarkRead(context.Background(), messageIDs, readAt, chatJID, senderJID); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			_ = json.NewEncoder(w).Encode(SendMessageResponse{Success: false, Message: err.Error()})
