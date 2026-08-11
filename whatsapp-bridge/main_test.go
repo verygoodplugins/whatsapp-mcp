@@ -2205,6 +2205,73 @@ func TestReactHandler_NoAuth_Returns401(t *testing.T) {
 	}
 }
 
+func TestMarkReadHandler_InvalidRequests_Return400(t *testing.T) {
+	const token = "supersecrettoken1234567890abcdef"
+	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty body", `{}`},
+		{"missing message_ids", `{"chat_jid":"15551234567@s.whatsapp.net"}`},
+		{"missing chat_jid", `{"message_ids":["3AABCDEF01234567"]}`},
+		{"empty message_id", `{"message_ids":["3AABCDEF01234567",""],"chat_jid":"15551234567@s.whatsapp.net"}`},
+		{"invalid chat_jid", `{"message_ids":["3AABCDEF01234567"],"chat_jid":"@s.whatsapp.net"}`},
+		{"invalid sender_jid", `{"message_ids":["3AABCDEF01234567"],"chat_jid":"15551234567@s.whatsapp.net","sender_jid":"@s.whatsapp.net"}`},
+		{"group missing sender_jid", `{"message_ids":["3AABCDEF01234567"],"chat_jid":"120363012345678901@g.us"}`},
+		{"invalid timestamp", `{"message_ids":["3AABCDEF01234567"],"chat_jid":"15551234567@s.whatsapp.net","timestamp":"yesterday"}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/mark-read", strings.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Content-Type", "application/json")
+			resp := httptest.NewRecorder()
+
+			handler.ServeHTTP(resp, req)
+
+			if resp.Code != http.StatusBadRequest {
+				t.Errorf("body=%q: expected 400, got %d", tc.body, resp.Code)
+			}
+		})
+	}
+}
+
+func TestMarkReadHandler_Disconnected_Returns503(t *testing.T) {
+	const token = "supersecrettoken1234567890abcdef"
+	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
+
+	body := `{"message_ids":["3AABCDEF01234567"],"chat_jid":"120363012345678901@g.us","sender_jid":"15551234567","timestamp":"2026-08-11T18:30:00Z"}`
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/mark-read", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 for disconnected client, got %d", resp.Code)
+	}
+}
+
+func TestMarkReadHandler_NoAuth_Returns401(t *testing.T) {
+	const token = "supersecrettoken1234567890abcdef"
+	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/mark-read",
+		strings.NewReader(`{"message_ids":["3AABCDEF01234567"],"chat_jid":"15551234567@s.whatsapp.net"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without auth, got %d", resp.Code)
+	}
+}
+
 func TestHandleMessage_RegularMessageDoesNotMarkDeleted(t *testing.T) {
 	client := newTestClient(&mockLIDStore{})
 	ms := newTestMessageStore(t)

@@ -955,6 +955,14 @@ type SendMessageRequest struct {
 	Mentions []string `json:"mentions,omitempty"`
 }
 
+// MarkReadRequest is the request body for the /api/mark-read endpoint.
+type MarkReadRequest struct {
+	MessageIDs []string `json:"message_ids"`
+	ChatJID    string   `json:"chat_jid"`
+	SenderJID  string   `json:"sender_jid,omitempty"`
+	Timestamp  string   `json:"timestamp,omitempty"`
+}
+
 // ReactRequest is the request body for the /api/react endpoint.
 type ReactRequest struct {
 	Recipient string  `json:"recipient"`  // chat JID
@@ -2205,6 +2213,80 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			Success: success,
 			Message: message,
 		})
+	}))
+
+	// Handler for explicitly sending read receipts for selected messages.
+	mux.HandleFunc("/api/mark-read", auth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req MarkReadRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.ChatJID == "" || len(req.MessageIDs) == 0 {
+			http.Error(w, "chat_jid and message_ids are required", http.StatusBadRequest)
+			return
+		}
+
+		messageIDs := make([]types.MessageID, len(req.MessageIDs))
+		for i, id := range req.MessageIDs {
+			if strings.TrimSpace(id) == "" {
+				http.Error(w, "message_ids must not contain empty values", http.StatusBadRequest)
+				return
+			}
+			messageIDs[i] = types.MessageID(id)
+		}
+
+		chatJID, err := types.ParseJID(req.ChatJID)
+		if err != nil || chatJID.User == "" || chatJID.Server == "" {
+			http.Error(w, "Invalid chat_jid", http.StatusBadRequest)
+			return
+		}
+
+		senderJID := types.EmptyJID
+		if req.SenderJID != "" {
+			if strings.Contains(req.SenderJID, "@") {
+				senderJID, err = types.ParseJID(req.SenderJID)
+			} else {
+				senderJID = types.NewJID(strings.TrimSpace(req.SenderJID), types.DefaultUserServer)
+			}
+			if err != nil || senderJID.User == "" || senderJID.Server == "" {
+				http.Error(w, "Invalid sender_jid", http.StatusBadRequest)
+				return
+			}
+		} else if chatJID.Server == types.GroupServer {
+			http.Error(w, "sender_jid is required for group read receipts", http.StatusBadRequest)
+			return
+		}
+
+		readAt := time.Now()
+		if req.Timestamp != "" {
+			readAt, err = time.Parse(time.RFC3339, req.Timestamp)
+			if err != nil {
+				http.Error(w, "timestamp must be RFC 3339", http.StatusBadRequest)
+				return
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if !client.IsConnected() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(SendMessageResponse{
+				Success: false,
+				Message: "WhatsApp client is not connected. Please wait for reconnection.",
+			})
+			return
+		}
+		if err := client.MarkRead(context.Background(), messageIDs, readAt, chatJID, senderJID); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(SendMessageResponse{Success: false, Message: err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(SendMessageResponse{Success: true, Message: "Messages marked as read"})
 	}))
 
 	// Handler for sending (or removing) emoji reactions
