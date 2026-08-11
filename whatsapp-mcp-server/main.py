@@ -459,8 +459,23 @@ def download_media(message_id: str, chat_jid: str) -> dict[str, Any]:
 
 
 def shutdown_handler(signum, frame):
-    """Handle shutdown signals gracefully to prevent zombie processes."""
-    sys.exit(0)
+    """Handle shutdown signals by terminating immediately.
+
+    We deliberately use os._exit() rather than sys.exit(). sys.exit() raises
+    SystemExit, which runs full interpreter finalization. If a daemon thread
+    spawned by the MCP/anyio stdio transport is mid-write to stdout/stderr at
+    that moment, the finalizer cannot acquire the stream lock and CPython aborts
+    with "_enter_buffered_busy: could not acquire lock for <_io.BufferedWriter>
+    at interpreter shutdown, possibly due to daemon threads" (SIGABRT). os._exit()
+    terminates without finalization, so that race cannot happen. Flush first so
+    buffered output is not lost.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    os._exit(0)
 
 
 if __name__ == "__main__":
