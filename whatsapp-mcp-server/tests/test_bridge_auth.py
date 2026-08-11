@@ -82,6 +82,7 @@ def test_send_message_without_token_surfaces_bridge_401(monkeypatch, tmp_path):
         ("send_audio_message", ("12025551234", "FILE"), "/send"),
         ("download_media", ("msg-id", "12025551234@s.whatsapp.net"), "/download"),
         ("send_reaction", ("12025551234@s.whatsapp.net", "3AABCDEF01234567", "👍"), "/react"),
+        ("mark_messages_read", (["3AABCDEF01234567"], "12025551234@s.whatsapp.net"), "/mark-read"),
     ],
 )
 def test_bridge_post_helpers_include_auth_headers(monkeypatch, tmp_path, func_name, args, expected_suffix):
@@ -163,6 +164,55 @@ def test_send_reaction_missing_message_id_returns_error():
     success, msg = whatsapp.send_reaction("12025551234@s.whatsapp.net", "", "👍")
     assert success is False
     assert "Message ID" in msg
+
+
+def test_mark_messages_read_posts_correct_payload(monkeypatch):
+    calls = []
+    monkeypatch.setenv("WHATSAPP_BRIDGE_TOKEN", "test-token")
+
+    def fake_post(url, json, headers=None):
+        calls.append({"url": url, "json": json, "headers": headers})
+        return DummyResponse(payload={"success": True, "message": "Messages marked as read"})
+
+    monkeypatch.setattr(whatsapp.requests, "post", fake_post)
+
+    success, message = whatsapp.mark_messages_read(
+        [" 3AABCDEF01234567 ", "3AABCDEF76543210"],
+        "120363012345678901@g.us",
+        sender_jid="15551234567@s.whatsapp.net",
+        timestamp="2026-08-11T18:30:00Z",
+    )
+
+    assert success is True
+    assert message == "Messages marked as read"
+    assert calls == [
+        {
+            "url": f"{whatsapp.WHATSAPP_API_BASE_URL}/mark-read",
+            "json": {
+                "message_ids": ["3AABCDEF01234567", "3AABCDEF76543210"],
+                "chat_jid": "120363012345678901@g.us",
+                "sender_jid": "15551234567@s.whatsapp.net",
+                "timestamp": "2026-08-11T18:30:00Z",
+            },
+            "headers": {"Authorization": "Bearer test-token"},
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("message_ids", "chat_jid", "sender_jid", "expected_message"),
+    [
+        ([], "12025551234@s.whatsapp.net", "", "message ID"),
+        ([""], "12025551234@s.whatsapp.net", "", "message ID"),
+        (["3AABCDEF01234567"], "", "", "Chat JID"),
+        (["3AABCDEF01234567"], "120363012345678901@g.us", "", "Sender JID"),
+    ],
+)
+def test_mark_messages_read_validates_input(message_ids, chat_jid, sender_jid, expected_message):
+    success, message = whatsapp.mark_messages_read(message_ids, chat_jid, sender_jid)
+
+    assert success is False
+    assert expected_message in message
 
 
 def test_send_message_with_quoted_reply_includes_quote_fields(monkeypatch):

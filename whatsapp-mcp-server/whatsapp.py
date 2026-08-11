@@ -1155,6 +1155,50 @@ def send_reaction(
         return False, f"Unexpected error: {str(e)}"
 
 
+def mark_messages_read(
+    message_ids: list[str],
+    chat_jid: str,
+    sender_jid: str = "",
+    timestamp: str | None = None,
+) -> tuple[bool, str]:
+    """Mark selected messages as read through the WhatsApp bridge."""
+    try:
+        normalized_ids = [message_id.strip() for message_id in message_ids]
+        if not normalized_ids or any(not message_id for message_id in normalized_ids):
+            return False, "At least one non-empty message ID must be provided"
+        if not chat_jid:
+            return False, "Chat JID must be provided"
+        if chat_jid.endswith("@g.us") and not sender_jid:
+            return False, "Sender JID must be provided for group read receipts"
+
+        payload: dict[str, Any] = {
+            "message_ids": normalized_ids,
+            "chat_jid": chat_jid,
+        }
+        if sender_jid:
+            payload["sender_jid"] = sender_jid
+        if timestamp:
+            payload["timestamp"] = timestamp
+
+        response = requests.post(
+            f"{WHATSAPP_API_BASE_URL}/mark-read",
+            json=payload,
+            headers=_bridge_headers(),
+        )
+
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "Unknown response")
+        return False, f"Error: HTTP {response.status_code} - {response.text}"
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
 def download_media(message_id: str, chat_jid: str) -> str | None:
     """Download media from a message and return the local file path.
 

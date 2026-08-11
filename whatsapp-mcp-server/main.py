@@ -35,6 +35,9 @@ from whatsapp import (
     list_messages as whatsapp_list_messages,
 )
 from whatsapp import (
+    mark_messages_read as whatsapp_mark_messages_read,
+)
+from whatsapp import (
     msg_to_dict,
 )
 from whatsapp import (
@@ -364,6 +367,31 @@ def send_reaction(
         A dictionary containing success status and a status message
     """
     success, status_message = whatsapp_send_reaction(recipient, message_id, emoji, from_me, sender_jid)
+    return {"success": success, "message": status_message}
+
+
+@mcp.tool()
+def mark_messages_read(
+    message_ids: list[str],
+    chat_jid: str,
+    sender_jid: str = "",
+    timestamp: str | None = None,
+) -> dict[str, Any]:
+    """Mark selected WhatsApp messages as read and send read receipts.
+
+    This is an explicit external side effect. All message IDs must belong to the
+    same chat and sender.
+
+    Args:
+        message_ids: IDs of the messages to mark as read
+        chat_jid: JID of the chat containing the messages
+        sender_jid: JID or bare phone number of the original sender; required for groups
+        timestamp: Optional RFC 3339 read timestamp; defaults to the current time
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    success, status_message = whatsapp_mark_messages_read(message_ids, chat_jid, sender_jid, timestamp)
     return {"success": success, "message": status_message}
 
 
