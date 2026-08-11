@@ -168,16 +168,46 @@ Get messages with filters, date ranges, and sorting.
 **Parameters:**
 
 - `chat_jid` (optional): Filter by specific chat JID
+- `query` (optional): Full-text search over message content
 - `limit` (optional): Number of messages (default 50, max 500)
 - `before_date` (optional): Messages before this date (YYYY-MM-DD)
 - `after_date` (optional): Messages after this date (YYYY-MM-DD)
-- `sort_by` (optional): "newest" or "oldest" (default "newest")
+- `sort_by` (optional): "newest", "oldest" or "relevance" (default "newest")
 
 **Natural Language Examples:**
 
 - "Show me the last 100 messages from today"
 - "Get messages from the family group chat"
 - "Find messages from last week"
+
+##### Full-text search
+
+`query` matches whole words through a SQLite FTS5 index and ignores diacritics,
+so `orcamento` finds `orçamento` and `ana` no longer matches `semana`. FTS5
+syntax is accepted:
+
+| Query | Meaning |
+|---|---|
+| `invoice payment` | messages containing both words, anywhere |
+| `invoice OR receipt` | either word |
+| `"wire transfer"` | that exact phrase |
+| `invoic*` | any word starting with `invoic` |
+| `invoice NOT draft` | one word without the other |
+
+Pass `sort_by="relevance"` to rank by BM25 instead of by date.
+
+The index is built automatically the first time you search, which takes a few
+seconds on a large database, and is then kept current by SQLite triggers. It
+stores only the inverted index, not a second copy of the message text: on a
+1.1M message database it added about 13% to the file size.
+
+Two cases fall back to the previous substring scan rather than failing:
+
+- Queries in scripts written without spaces between words (Japanese, Chinese,
+  Thai). FTS5's `unicode61` tokenizer has no word segmentation for them, so a
+  whole sentence would be a single token.
+- Databases where the index cannot be created, such as a read-only mount or a
+  SQLite build without FTS5.
 
 #### `send_message`
 

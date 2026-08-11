@@ -1,6 +1,7 @@
 import json
 import os
 import os.path
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
@@ -352,6 +353,122 @@ def format_messages_list(messages: list[Message], show_chat_info: bool = True) -
     return output
 
 
+FTS_TABLE = "messages_fts"
+
+# unicode61 is the only built-in tokenizer that segments on Unicode word
+# boundaries; remove_diacritics 2 folds combining marks correctly (level 1 skips
+# a few Latin cases). Together they are what makes "orcamento" find "orçamento"
+# and CJK/Arabic/Devanagari text tokenize at all.
+_FTS_CREATE = f"""
+CREATE VIRTUAL TABLE {FTS_TABLE} USING fts5(
+    content,
+    content='messages',
+    content_rowid='rowid',
+    tokenize="unicode61 remove_diacritics 2"
+)
+"""
+
+_FTS_TRIGGERS = [
+    f"""
+    CREATE TRIGGER {FTS_TABLE}_ai AFTER INSERT ON messages BEGIN
+        INSERT INTO {FTS_TABLE}(rowid, content) VALUES (new.rowid, new.content);
+    END
+    """,
+    f"""
+    CREATE TRIGGER {FTS_TABLE}_ad AFTER DELETE ON messages BEGIN
+        INSERT INTO {FTS_TABLE}({FTS_TABLE}, rowid, content)
+        VALUES ('delete', old.rowid, old.content);
+    END
+    """,
+    f"""
+    CREATE TRIGGER {FTS_TABLE}_au AFTER UPDATE ON messages BEGIN
+        INSERT INTO {FTS_TABLE}({FTS_TABLE}, rowid, content)
+        VALUES ('delete', old.rowid, old.content);
+        INSERT INTO {FTS_TABLE}(rowid, content) VALUES (new.rowid, new.content);
+    END
+    """,
+]
+
+# Cached per database path so the check runs once per process, not per search.
+_fts_ready: dict[str, bool] = {}
+
+
+def _ensure_fts_index(conn: sqlite3.Connection, db_path: str) -> bool:
+    """Build the full-text index over messages.content if it isn't there yet.
+
+    Returns whether the index is usable. Callers fall back to a substring scan
+    when it isn't, so an old database, a read-only mount or a SQLite build
+    without FTS5 degrades instead of failing.
+
+    The index uses an external content table, so the message text is not stored
+    twice: only the inverted index is added. Three triggers keep it in sync. The
+    bridge writes with INSERT ... ON CONFLICT DO UPDATE, which fires ordinary
+    INSERT and UPDATE triggers, so this does not depend on recursive_triggers.
+    """
+    cached = _fts_ready.get(db_path)
+    if cached is not None:
+        return cached
+
+    try:
+        exists = (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (FTS_TABLE,),
+            ).fetchone()
+            is not None
+        )
+        if not exists:
+            conn.execute(_FTS_CREATE)
+            for ddl in _FTS_TRIGGERS:
+                conn.execute(ddl)
+            conn.execute(
+                f"INSERT INTO {FTS_TABLE}(rowid, content) "
+                "SELECT rowid, content FROM messages "
+                "WHERE content IS NOT NULL AND content != ''"
+            )
+            conn.commit()
+        ready = True
+    except sqlite3.Error as e:
+        # Most common causes: SQLite compiled without FTS5, or the database file
+        # is read-only. Neither is worth failing a search over.
+        print(f"Full-text index unavailable, falling back to substring search: {e}")
+        ready = False
+
+    _fts_ready[db_path] = ready
+    return ready
+
+
+# Scripts that do not put separators between words. unicode61 splits on
+# non-word characters only, so a whole Japanese or Thai sentence becomes a single
+# token and searching for a word inside it matches nothing. Those queries keep
+# using the substring scan, which is what they already relied on.
+_UNSEGMENTED = re.compile(
+    "["
+    "぀-ゟ"  # Hiragana
+    "゠-ヿ"  # Katakana
+    "㐀-䶿"  # CJK Unified Ideographs Extension A
+    "一-鿿"  # CJK Unified Ideographs
+    "฀-๿"  # Thai
+    "]"
+)
+
+
+def _is_unsegmented_script(query: str) -> bool:
+    """Whether the query is in a script FTS5's unicode61 cannot tokenize by word."""
+    return _UNSEGMENTED.search(query) is not None
+
+
+def _fts_quote(query: str) -> str:
+    """Rewrite arbitrary text into an FTS5 expression that cannot be a syntax error.
+
+    FTS5 reads ", (, ), *, - and bare AND/OR/NOT as operators, so a literal
+    search for 'obra (casa)' raises OperationalError. Quoting every token makes
+    any input legal while keeping FTS5's implicit AND between terms. Returns an
+    empty string when the input has no tokens at all.
+    """
+    return " AND ".join('"' + t + '"' for t in re.findall(r"\w+", query, flags=re.UNICODE))
+
+
 def list_messages(
     after: str | None = None,
     before: str | None = None,
@@ -372,13 +489,16 @@ def list_messages(
         before: Optional ISO-8601 formatted string to only return messages before this date
         sender_phone_number: Optional phone number to filter messages by sender
         chat_jid: Optional chat JID to filter messages by chat
-        query: Optional search term to filter messages by content
+        query: Optional full-text search over message content. Matches whole words
+            and ignores diacritics, so "orcamento" finds "orçamento". Accepts FTS5
+            syntax: "exact phrase", prefix*, term1 AND term2, term1 OR term2, NOT term
         limit: Maximum number of messages to return (default 20)
         page: Page number for pagination (default 0)
         include_context: Whether to include messages before and after matches (default True)
         context_before: Number of messages to include before each match (default 1)
         context_after: Number of messages to include after each match (default 1)
-        sort_by: Sort order - "newest" (default) or "oldest" for chronological ordering
+        sort_by: Sort order - "newest" (default), "oldest" for chronological ordering,
+            or "relevance" to rank by BM25 (requires query)
 
     Returns:
         List of message dictionaries with id, timestamp, sender, content, etc.
@@ -424,24 +544,52 @@ def list_messages(
             where_clauses.append("messages.chat_jid = ?")
             params.append(chat_jid)
 
+        fts_param = None
         if query:
-            # SQLite's LOWER() only handles ASCII, so LIKE LOWER(...) silently
-            # excludes Unicode matches. instr() on the raw column preserves them.
-            where_clauses.append("(instr(LOWER(messages.content), LOWER(?)) > 0 OR instr(messages.content, ?) > 0)")
-            params.extend([query, query])
+            if _ensure_fts_index(conn, MESSAGES_DB_PATH) and not _is_unsegmented_script(query):
+                # Whole-word, diacritic-insensitive matching through an index
+                # lookup rather than a scan of every message. The raw text goes
+                # straight to MATCH so FTS5 operators keep working; _fts_quote is
+                # the retry path for text FTS5 rejects as a syntax error.
+                query_parts.append(f"JOIN {FTS_TABLE} ON {FTS_TABLE}.rowid = messages.rowid")
+                where_clauses.append(f"{FTS_TABLE} MATCH ?")
+                fts_param = len(params)
+                params.append(query)
+            else:
+                # SQLite's LOWER() only handles ASCII, so LIKE LOWER(...) silently
+                # excludes Unicode matches. instr() on the raw column preserves them.
+                where_clauses.append("(instr(LOWER(messages.content), LOWER(?)) > 0 OR instr(messages.content, ?) > 0)")
+                params.extend([query, query])
 
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
 
         # Add sorting and pagination
         offset = page * limit
-        order = "DESC" if sort_by == "newest" else "ASC"
-        query_parts.append(f"ORDER BY messages.timestamp {order}")
+        if sort_by == "relevance" and fts_param is not None:
+            query_parts.append(f"ORDER BY bm25({FTS_TABLE})")
+        else:
+            order = "DESC" if sort_by == "newest" else "ASC"
+            query_parts.append(f"ORDER BY messages.timestamp {order}")
         query_parts.append("LIMIT ? OFFSET ?")
         params.extend([limit, offset])
 
-        cursor.execute(" ".join(query_parts), tuple(params))
-        messages = cursor.fetchall()
+        sql = " ".join(query_parts)
+        try:
+            cursor.execute(sql, tuple(params))
+            messages = cursor.fetchall()
+        except sqlite3.OperationalError:
+            if fts_param is None:
+                raise
+            # The search text tripped FTS5's expression parser. Retry with every
+            # token quoted so a literal search never reaches the caller as an error.
+            safe = _fts_quote(query)
+            if not safe:
+                messages = []
+            else:
+                params[fts_param] = safe
+                cursor.execute(sql, tuple(params))
+                messages = cursor.fetchall()
 
         result = []
         for msg in messages:

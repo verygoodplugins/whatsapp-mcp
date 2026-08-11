@@ -183,13 +183,16 @@ def list_messages(
         before: ISO-8601 date string (e.g., "2026-01-09" or "2026-01-09T18:00:00")
         sender_phone_number: Phone number to filter by sender (e.g., "12025551234")
         chat_jid: Chat JID to filter by (e.g., "12025551234@s.whatsapp.net" or group JID)
-        query: Search term to filter messages by content
+        query: Full-text search over message content. Matches whole words and
+               ignores diacritics, so "orcamento" finds "orçamento". Supports FTS5
+               syntax: "exact phrase", prefix*, AND, OR, NOT
         limit: Max messages to return (default 50, max 500)
         page: Page number for pagination (default 0)
         include_context: Include surrounding messages for context (default True)
         context_before: Messages to include before each match (default 1)
         context_after: Messages to include after each match (default 1)
-        sort_by: "newest" (default, most recent first) or "oldest" (chronological)
+        sort_by: "newest" (default, most recent first), "oldest" (chronological),
+                 or "relevance" to rank by match quality (requires query)
     """
     # Cap limit at 500 to prevent excessive queries
     limit = min(limit, 500)
