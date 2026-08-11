@@ -22,6 +22,7 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 - **Message Management**: Search and read personal WhatsApp messages (text, images, videos, documents, audio)
 - **Contact Search**: Search contacts by name or phone number with `sender_display` format ("Name (phone)")
 - **Send Messages**: Send text messages to individuals or groups
+- **Read Receipts**: Explicitly mark selected messages as read across linked devices
 - **Media Support**: Send and download images, videos, documents, and voice messages
 - **Call History**: Capture incoming voice/video calls into a local SQLite table (live, 1:1 and group)
 - **Webhook Integration**: Forward incoming messages to external services
@@ -199,6 +200,24 @@ Inbound quoted replies are stored automatically. The `quoted_message_id` field i
 - "Send 'Hello!' to +1234567890"
 - "Message the team group saying 'Meeting at 3pm'"
 - "Reply to that message saying 'Sounds good'"
+
+#### `mark_messages_read`
+
+Mark one or more messages from the same chat and sender as read. This explicitly
+sends WhatsApp read receipts; reading or searching messages never does so
+automatically.
+
+**Parameters:**
+
+- `message_ids` (required): IDs of messages from the same chat and sender
+- `chat_jid` (required): JID of the chat containing the messages
+- `sender_jid` (required for groups): Full JID or bare phone number of the original message sender
+- `timestamp` (optional): RFC 3339 read timestamp; defaults to the current time
+
+**Natural Language Examples:**
+
+- "Mark those messages as read"
+- "Mark the last three messages from Alice in the team group as read"
 
 #### `send_reaction`
 
@@ -609,6 +628,7 @@ flowchart LR
     subgraph GoAPI["Go Bridge REST API"]
         direction TB
         SEND["/api/send"]
+        READ["/api/mark-read"]
         DOWN["/api/download"]
         REACT["/api/react"]
         TYPE["/api/typing"]
@@ -616,7 +636,7 @@ flowchart LR
         HEALTH["/api/health"]
     end
 
-    subgraph MCPTools["MCP Tools (14 total)"]
+    subgraph MCPTools["MCP Tools (15 total)"]
         direction TB
         CONT["Contact Tools<br/>search_contacts, get_contact"]
         MSG["Message Tools<br/>list_messages, send_message, etc."]
