@@ -102,8 +102,10 @@ func NewMessageStore() (*MessageStore, error) {
 		return nil, fmt.Errorf("failed to create store directory: %v", err)
 	}
 
-	// Open SQLite database for messages
-	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on")
+	// Open SQLite database for messages. WAL mode + a busy timeout let the
+	// Python MCP server read concurrently with the bridge's writes instead of
+	// hitting "database is locked" under the default rollback-journal mode.
+	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
@@ -155,6 +157,8 @@ func NewMessageStore() (*MessageStore, error) {
 		CREATE INDEX IF NOT EXISTS idx_calls_chat ON calls(chat_jid);
 		CREATE INDEX IF NOT EXISTS idx_calls_timestamp ON calls(timestamp);
 		CREATE INDEX IF NOT EXISTS idx_messages_chat_jid ON messages(chat_jid);
+		CREATE INDEX IF NOT EXISTS idx_messages_chat_jid_timestamp ON messages(chat_jid, timestamp);
+		CREATE INDEX IF NOT EXISTS idx_messages_id ON messages(id);
 	`)
 	if err != nil {
 		_ = db.Close()
