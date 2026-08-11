@@ -1946,14 +1946,19 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}
 	}
 
-	// For image messages, download media synchronously so we can include the base64
-	// payload in the webhook. Other media types (video, audio, document) are still
-	// downloaded asynchronously since they are not passed to the AI vision pipeline.
+	// Avoid webhook-only image work when no webhook will receive the message. Media
+	// still downloads asynchronously in that case so it remains available to MCP
+	// tools, but message handling never blocks on a disabled outbound webhook.
+	shouldForward := webhooksEnabled() && (forwardSelfMessages || !msg.Info.IsFromMe)
+
+	// For image messages that will be forwarded, download media synchronously so we
+	// can include the base64 payload in the webhook. Other media types (and images
+	// when webhook forwarding is disabled) download asynchronously for caching.
 	var imageDownloadPath string
 	var imageMimeType string
-	if mediaType == "image" && url != "" && len(mediaKey) > 0 {
+	if mediaType == "image" && url != "" && len(mediaKey) > 0 && shouldForward {
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
-		success, _, _, dlPath, dlErr := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+		success, _, _, dlPath, dlErr := downloadMediaForMessage(client, messageStore, msg.Info.ID, chatJID)
 		if success && dlErr == nil {
 			imageDownloadPath = dlPath
 			// Detect MIME type by sniffing the actual file bytes rather than
@@ -1973,14 +1978,14 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			logger.Warnf("❌ Image download failed: %v", dlErr)
 			// Fall back to async download so media is cached for future MCP tool calls
 			go func() {
-				_, _, _, _, _ = downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+				_, _, _, _, _ = downloadMediaForMessage(client, messageStore, msg.Info.ID, chatJID)
 			}()
 		}
-	} else if mediaType != "" && mediaType != "image" && url != "" && len(mediaKey) > 0 {
-		// Non-image media: async download for caching only (not sent to vision pipeline)
+	} else if mediaType != "" && url != "" && len(mediaKey) > 0 {
+		// Media that is not included in a webhook payload: async download for caching.
 		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
 		go func() {
-			success, _, _, downloadPath, err := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
+			success, _, _, downloadPath, err := downloadMediaForMessage(client, messageStore, msg.Info.ID, chatJID)
 			if success && err == nil {
 				logger.Infof("✅ Auto-downloaded media: %s", downloadPath)
 			} else {
@@ -1993,7 +1998,6 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	// Forward self-messages when FORWARD_SELF=true.
 	// Always forward image messages (even without a text caption) so the AI vision
 	// pipeline can analyse the image content.
-	shouldForward := forwardSelfMessages || !msg.Info.IsFromMe
 	hasText := content != ""
 	hasImage := mediaType == "image"
 
@@ -2229,6 +2233,10 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	fmt.Printf("Successfully downloaded %s media to %s (%d bytes)\n", mediaType, absPath, len(mediaData))
 	return true, mediaType, filename, absPath, nil
 }
+
+// downloadMediaForMessage allows message-handling tests to verify whether a
+// download blocks event processing without changing production behavior.
+var downloadMediaForMessage = downloadMedia
 
 // Extract direct path from a WhatsApp media URL
 func extractDirectPathFromURL(url string) string {
@@ -2679,6 +2687,16 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	}()
 }
 
+func webhookStartupMessage(forwardSelf bool) string {
+	if !webhooksEnabled() {
+		return "WEBHOOK_ENABLED=false: outbound webhooks disabled"
+	}
+	if forwardSelf {
+		return "FORWARD_SELF enabled: forwarding self messages to webhook"
+	}
+	return "FORWARD_SELF disabled: self messages will NOT be forwarded"
+}
+
 func main() {
 	flag.Parse()
 
@@ -2686,11 +2704,7 @@ func main() {
 	logger := waLog.Stdout("Client", "DEBUG", true)
 	logger.Infof("Starting WhatsApp client...")
 
-	if forwardSelfMessages {
-		logger.Infof("FORWARD_SELF enabled: forwarding self messages to webhook")
-	} else {
-		logger.Infof("FORWARD_SELF disabled: self messages will NOT be forwarded")
-	}
+	logger.Infof("%s", webhookStartupMessage(forwardSelfMessages))
 
 	// Create database connection for storing session data
 	dbLog := waLog.Stdout("Database", "INFO", true)

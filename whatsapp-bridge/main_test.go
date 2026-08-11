@@ -1562,6 +1562,66 @@ func TestHandleMessage_ImageWithCaption_WebhookForwarded(t *testing.T) {
 	}
 }
 
+// TestHandleMessage_WebhookDisabledDownloadsImageAsynchronously ensures the
+// webhook opt-out does not make incoming image processing wait on a download
+// solely used for the vision webhook payload.
+func TestHandleMessage_WebhookDisabledDownloadsImageAsynchronously(t *testing.T) {
+	t.Setenv("WEBHOOK_ENABLED", "false")
+
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+	msg := buildImageMessage(phonePN, phonePN, false, "")
+	msg.Message.ImageMessage.URL = proto.String("https://example.invalid/image")
+	msg.Message.ImageMessage.MediaKey = []byte("test-media-key")
+
+	originalDownload := downloadMediaForMessage
+	downloadStarted := make(chan struct{})
+	releaseDownload := make(chan struct{})
+	downloadMediaForMessage = func(_ *whatsmeow.Client, _ *MessageStore, _ string, _ string) (bool, string, string, string, error) {
+		close(downloadStarted)
+		<-releaseDownload
+		return false, "", "", "", nil
+	}
+	t.Cleanup(func() {
+		downloadMediaForMessage = originalDownload
+		select {
+		case <-releaseDownload:
+		default:
+			close(releaseDownload)
+		}
+	})
+
+	done := make(chan struct{})
+	go func() {
+		handleMessage(client, ms, msg, logger)
+		close(done)
+	}()
+
+	select {
+	case <-downloadStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for asynchronous media download")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("message handling waited for media download while webhook was disabled")
+	}
+}
+
+func TestWebhookStartupMessage(t *testing.T) {
+	t.Setenv("WEBHOOK_ENABLED", "false")
+	if got, want := webhookStartupMessage(true), "WEBHOOK_ENABLED=false: outbound webhooks disabled"; got != want {
+		t.Errorf("disabled startup message = %q, want %q", got, want)
+	}
+
+	t.Setenv("WEBHOOK_ENABLED", "true")
+	if got, want := webhookStartupMessage(true), "FORWARD_SELF enabled: forwarding self messages to webhook"; got != want {
+		t.Errorf("enabled startup message = %q, want %q", got, want)
+	}
+}
+
 // queryCallResult returns the (result, duration_sec, reason) for a call row,
 // or empties if no row exists.
 func queryCallResult(ms *MessageStore, callID, chatJID string) (result string, duration sql.NullInt64, reason sql.NullString, found bool) {
