@@ -101,7 +101,7 @@ write_export "WHATSAPP_API_URL" "$API_URL"
 write_export "WHATSAPP_MCP_LOG_DIR" "$LOG_DIR"
 write_export "WHATSAPP_MCP_STATE_DIR" "$STATE_DIR"
 
-for optional_var in WEBHOOK_URL FORWARD_SELF WHATSAPP_BRIDGE_TOKEN WHATSAPP_MEDIA_ROOTS; do
+for optional_var in WEBHOOK_URL WEBHOOK_ENABLED FORWARD_SELF WHATSAPP_BRIDGE_TOKEN WHATSAPP_MEDIA_ROOTS; do
   if [[ -v "$optional_var" ]]; then
     write_export "$optional_var" "${(P)optional_var}"
   fi

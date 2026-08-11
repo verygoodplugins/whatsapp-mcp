@@ -119,6 +119,7 @@ if [ "${FAKE_CURL_EMPTY:-0}" = "1" ]; then
   exit 7
 fi
 printf '%s\n' "${FAKE_CURL_RESPONSE:-{\"status\":\"ok\",\"connected\":true}}"
+printf '%s\n' "${FAKE_CURL_STATUS:-200}"
 exit "${FAKE_CURL_EXIT:-0}"
 EOF
 
@@ -212,6 +213,7 @@ test_install_preserves_optional_env_values() {
     FAKE_CMD_LOG="$tmp/cmd.log" \
     WHATSAPP_BRIDGE_PORT="9090" \
     WEBHOOK_URL="http://127.0.0.1:8769/whatsapp/webhook" \
+    WEBHOOK_ENABLED="false" \
     FORWARD_SELF="true" \
     WHATSAPP_BRIDGE_TOKEN="test token with spaces" \
     WHATSAPP_MEDIA_ROOTS="/tmp/outbox:/tmp/other outbox" \
@@ -222,6 +224,7 @@ test_install_preserves_optional_env_values() {
   assert_contains "$support/launchd.env" "export WHATSAPP_BRIDGE_PORT='9090'"
   assert_contains "$support/launchd.env" "export WHATSAPP_API_URL='http://127.0.0.1:9090/api'"
   assert_contains "$support/launchd.env" "export WEBHOOK_URL='http://127.0.0.1:8769/whatsapp/webhook'"
+  assert_contains "$support/launchd.env" "export WEBHOOK_ENABLED='false'"
   assert_contains "$support/launchd.env" "export FORWARD_SELF='true'"
   assert_contains "$support/launchd.env" "export WHATSAPP_BRIDGE_TOKEN='test token with spaces'"
   assert_contains "$support/launchd.env" "export WHATSAPP_MEDIA_ROOTS='/tmp/outbox:/tmp/other outbox'"

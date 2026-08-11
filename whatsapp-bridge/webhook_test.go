@@ -7,8 +7,34 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// TestMain keeps host-level opt-out configuration from silently changing tests
+// that exercise webhook delivery. Individual tests set WEBHOOK_ENABLED when
+// they need to cover an enabled or disabled value.
+func TestMain(m *testing.M) {
+	_ = os.Unsetenv("WEBHOOK_ENABLED")
+	os.Exit(m.Run())
+}
+
+func unsetWebhookEnabled(t *testing.T) {
+	t.Helper()
+	value, wasSet := os.LookupEnv("WEBHOOK_ENABLED")
+	if err := os.Unsetenv("WEBHOOK_ENABLED"); err != nil {
+		t.Fatalf("unset WEBHOOK_ENABLED: %v", err)
+	}
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv("WEBHOOK_ENABLED", value)
+		} else {
+			_ = os.Unsetenv("WEBHOOK_ENABLED")
+		}
+	})
+}
 
 // setWebhookAuthToken sets the package-level outbound webhook token for the
 // duration of a test and restores the previous value on cleanup.
@@ -55,6 +81,7 @@ func TestSendWebhookDisabledByEnv(t *testing.T) {
 // TestSendWebhookEnabledByDefault guards the default: omitting WEBHOOK_ENABLED
 // must leave delivery behavior exactly as it was before the flag existed.
 func TestSendWebhookEnabledByDefault(t *testing.T) {
+	unsetWebhookEnabled(t)
 	var received bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		received = true
@@ -68,6 +95,45 @@ func TestSendWebhookEnabledByDefault(t *testing.T) {
 
 	if !received {
 		t.Fatal("webhook was not delivered with WEBHOOK_ENABLED unset")
+	}
+}
+
+func TestSendWebhookWithMediaDisabledSkipsMediaIO(t *testing.T) {
+	var received bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	t.Setenv("WEBHOOK_ENABLED", "false")
+	t.Setenv("WEBHOOK_URL", srv.URL)
+	missingPath := filepath.Join(t.TempDir(), "missing.jpg")
+
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stdout pipe: %v", err)
+	}
+	previousStdout := os.Stdout
+	os.Stdout = writeEnd
+	SendWebhookWithMedia(
+		"123@s.whatsapp.net", "", "123@s.whatsapp.net", false,
+		"", "", "", nil, nil,
+		"message-id", "image", "image/jpeg", "missing.jpg", missingPath,
+	)
+	_ = writeEnd.Close()
+	os.Stdout = previousStdout
+	output, err := io.ReadAll(readEnd)
+	if err != nil {
+		t.Fatalf("read captured stdout: %v", err)
+	}
+	_ = readEnd.Close()
+
+	if received {
+		t.Fatal("webhook was delivered despite WEBHOOK_ENABLED=false")
+	}
+	if strings.Contains(string(output), "Could not stat media file") {
+		t.Fatalf("disabled webhook still touched media path: %s", output)
 	}
 }
 

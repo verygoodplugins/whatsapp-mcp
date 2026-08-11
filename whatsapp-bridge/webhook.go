@@ -73,6 +73,13 @@ type WebhookPayload struct {
 	ReactionRemoved     *bool   `json:"reactionRemoved,omitempty"`
 }
 
+// webhooksEnabled reports whether webhook processing is enabled. Keep this
+// separate from sendWebhookPayload so media callers can avoid their webhook-only
+// file work when delivery is disabled.
+func webhooksEnabled() bool {
+	return getEnvBool("WEBHOOK_ENABLED", true)
+}
+
 // sendWebhookPayload marshals and POSTs a WebhookPayload to the configured webhook URL.
 func sendWebhookPayload(payload WebhookPayload) {
 	// WEBHOOK_ENABLED=false turns outbound webhooks off entirely. An empty
@@ -81,7 +88,7 @@ func sendWebhookPayload(payload WebhookPayload) {
 	// defaultWebhookURL below. Deployments with no webhook consumer would
 	// otherwise POST to that default for every message and log a connection
 	// refused error each time.
-	if !getEnvBool("WEBHOOK_ENABLED", true) {
+	if !webhooksEnabled() {
 		return
 	}
 
@@ -153,6 +160,10 @@ func SendWebhookWithMedia(
 	quotedIsFromMe *bool, mentionedJIDs []string,
 	messageID, mediaType, mimeType, mediaFilename, localPath string,
 ) {
+	if !webhooksEnabled() {
+		return
+	}
+
 	var mediaBase64 string
 	if localPath != "" {
 		info, statErr := os.Stat(localPath)
