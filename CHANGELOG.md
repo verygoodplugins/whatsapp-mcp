@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/verygoodplugins/whatsapp-mcp/compare/v0.5.1...v0.6.0) (2026-08-11)
+
+
+### Features
+
+* add explicit message read receipts ([#201](https://github.com/verygoodplugins/whatsapp-mcp/issues/201)) ([65751f1](https://github.com/verygoodplugins/whatsapp-mcp/commit/65751f1ceb32b5db1f421c9b6f73f244de6be2fc))
+* **bridge:** add outbound webhook opt-out ([#204](https://github.com/verygoodplugins/whatsapp-mcp/issues/204)) ([a9be700](https://github.com/verygoodplugins/whatsapp-mcp/commit/a9be7001db482c89193c73f0eff620d16883f1c3))
+* **bridge:** persist chat read state from read receipts + history-sync backfill ([#155](https://github.com/verygoodplugins/whatsapp-mcp/issues/155)) ([a677828](https://github.com/verygoodplugins/whatsapp-mcp/commit/a677828a180b8ad0bccec83ae81b6471921eac87))
+* optional caption on send_file ([#193](https://github.com/verygoodplugins/whatsapp-mcp/issues/193)) ([21df01f](https://github.com/verygoodplugins/whatsapp-mcp/commit/21df01f45afd36b379e00d250974ffb82a1542a3))
+
+
+### Bug Fixes
+
+* harden read-state observe/act after [#155](https://github.com/verygoodplugins/whatsapp-mcp/issues/155) and [#201](https://github.com/verygoodplugins/whatsapp-mcp/issues/201) ([#203](https://github.com/verygoodplugins/whatsapp-mcp/issues/203)) ([f0892be](https://github.com/verygoodplugins/whatsapp-mcp/commit/f0892beb1dcc23273f85604d287aa741c3fd92a7))
+
 ## [0.5.1](https://github.com/verygoodplugins/whatsapp-mcp/compare/v0.5.0...v0.5.1) (2026-08-08)
 
 
