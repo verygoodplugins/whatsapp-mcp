@@ -19,18 +19,18 @@ dependencies = [
     # cryptography 49+ no longer publishes Intel macOS wheels. Keep the
     # developer-laptop install path working until the project deliberately
     # drops x86_64 macOS support.
-    "cryptography>=48.0.1,<49",
+    "cryptography>=50.0.0,<51",
     "httpx>=0.28.1",
-    "mcp[cli]>=1.28.1,<2",
+    "mcp[cli]>=2.0.0,<3",
     "requests>=2.34.2",
-    "anyio<4.14",
+    "anyio<4.15",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=9.0.3",
+    "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
-    "ruff>=0.15.15",
+    "ruff>=0.16.2",
 ]
 
 [project.urls]
