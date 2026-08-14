@@ -3016,16 +3016,27 @@ func main() {
 				continue
 			}
 
-			// Print QR code for pairing with phone
-			qrCodeShown := false
+			// Print QR code for pairing with phone.
+			//
+			// whatsmeow hands out a sequence of codes (currently 6: the first
+			// valid 60s, each subsequent one 20s) and the server rejects every
+			// code but the current one. Redraw on each rotation -- printing only
+			// the first code leaves a stale QR on screen for the remaining ~100s
+			// of the pairing window, which fails *mid-handshake*: the phone
+			// reports "check your connection and try again", so it reads as a
+			// network fault rather than an expired code.
+			qrCodeCount := 0
 			for evt := range qrChan {
 				if evt.Event == "code" {
-					if !qrCodeShown {
+					qrCodeCount++
+					if qrCodeCount == 1 {
 						fmt.Println("\nScan this QR code with your WhatsApp app:")
-						qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-						fmt.Println("\nWaiting for QR code scan...")
-						qrCodeShown = true
+					} else {
+						fmt.Printf("\nPrevious QR code expired. Scan this new one (#%d):\n", qrCodeCount)
 					}
+					qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+					fmt.Printf("\nWaiting for QR code scan... (this code is valid for %s;\n", evt.Timeout.Round(time.Second))
+					fmt.Println("if it is replaced below, scan the newest one)")
 				} else if evt.Event == "success" {
 					connected <- true
 					break
