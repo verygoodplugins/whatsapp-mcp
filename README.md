@@ -290,6 +290,69 @@ Download media from a received message.
 - `message_id` (required): ID of the message with media
 - `chat_jid` (required): JID of the chat containing the message
 
+### Typing/Presence Operations
+
+#### `get_typing_state`
+
+Query inbound typing/composing state for WhatsApp chats.
+
+Returns contacts who are currently typing or recording a voice message.
+Useful for detecting when a contact is composing a message before responding
+(e.g., to avoid sending a reaction while they're still typing).
+
+**Parameters:**
+
+- `chat_jid` (optional): Filter results to a specific chat. If not provided,
+  returns all currently-typing contacts across all chats.
+
+**Returns:**
+
+```jsonc
+{
+  "success": true,
+  "typing": [
+    {
+      "chat_jid": "1234567890@s.whatsapp.net",
+      "sender_jid": "9876543210@s.whatsapp.net",
+      "is_typing": true,
+      "media": "",        // "" for text, "audio" for voice recording
+      "updated_at": "2024-01-15T10:30:00Z"
+    }
+  ]
+}
+```
+
+**How it works:**
+
+The bridge marks itself as "available" on connection so that WhatsApp sends
+typing notifications (`events.ChatPresence`). Composing states are tracked
+in-memory and expire after ~30 seconds if no "paused" event arrives.
+
+**Natural Language Examples:**
+
+- "Is anyone typing in the customer support chat?"
+- "Check if the user is composing a message before I react"
+- "Who is currently typing across all my chats?"
+
+**Webhook Integration:**
+
+When `WEBHOOK_URL` is set, typing events are forwarded as they happen:
+
+```json
+{
+  "eventType": "typing",
+  "chatJID": "1234567890@s.whatsapp.net",
+  "senderJID": "9876543210@s.whatsapp.net",
+  "isTyping": true,
+  "media": "",
+  "timestamp": 1705315800
+}
+```
+
+Events are sent for both compose start (`isTyping: true`) and stop
+(`isTyping: false`). The webhook respects the same `WEBHOOK_ENABLED` and
+`X-Bridge-Token` authentication as message webhooks.
+
 ### Chat Operations
 
 All chat tools (`list_chats`, `get_chat`, `get_direct_chat_by_contact`,
@@ -673,12 +736,13 @@ flowchart LR
         HEALTH["/api/health"]
     end
 
-    subgraph MCPTools["MCP Tools (15 total)"]
+    subgraph MCPTools["MCP Tools (16 total)"]
         direction TB
         CONT["Contact Tools<br/>search_contacts, get_contact"]
         MSG["Message Tools<br/>list_messages, send_message, etc."]
         CHAT["Chat Tools<br/>list_chats, get_chat, etc."]
         MEDIA["Media Tools<br/>send_file, download_media, etc."]
+        PRES["Presence Tools<br/>get_typing_state"]
     end
 
     MCPTools -->|HTTP Requests| GoAPI

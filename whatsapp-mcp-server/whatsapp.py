@@ -1255,6 +1255,41 @@ def mark_messages_read(
         return False, f"Unexpected error: {str(e)}"
 
 
+def get_typing_state(chat_jid: str | None = None) -> list[dict[str, Any]]:
+    """Query inbound typing/composing state from the bridge.
+
+    Args:
+        chat_jid: Optional chat JID to filter results. If None, returns all active typing states.
+
+    Returns:
+        List of typing state dictionaries with chat_jid, sender_jid, is_typing, media, updated_at.
+    """
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/typing"
+        params = {}
+        if chat_jid:
+            params["chat_jid"] = chat_jid
+
+        response = requests.get(url, params=params, headers=_bridge_headers())
+
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("success", False):
+                return result.get("typing", [])
+            return []
+        return []
+
+    except requests.RequestException as e:
+        print(f"Request error while getting typing state: {str(e)}")
+        return []
+    except json.JSONDecodeError:
+        print(f"Error parsing typing state response: {response.text}")
+        return []
+    except Exception as e:
+        print(f"Unexpected error while getting typing state: {str(e)}")
+        return []
+
+
 def download_media(message_id: str, chat_jid: str) -> str | None:
     """Download media from a message and return the local file path.
 

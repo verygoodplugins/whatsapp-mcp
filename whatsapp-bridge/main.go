@@ -42,6 +42,10 @@ import (
 // Defaults to true. Override with env FORWARD_SELF=false.
 var forwardSelfMessages = getEnvBool("FORWARD_SELF", true)
 
+// typingStore tracks inbound typing/composing presence across all chats.
+// Initialized in main() before the event handler is attached.
+var typingStore *TypingStore
+
 // CLI flag: request a full history sync at pair time.
 // Only meaningful on a fresh pair (whatsapp.db deleted). See the usage block
 // near NewClient for the full rationale and caveats.
@@ -2583,79 +2587,106 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 		})
 	}))
 
-	// Handler for sending typing indicator
+	// Handler for typing indicators: GET to query inbound state, POST to send outbound.
 	mux.HandleFunc("/api/typing", auth(func(w http.ResponseWriter, r *http.Request) {
-		// Only allow POST requests
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		// Parse the request body
-		var req struct {
-			Recipient string `json:"recipient"`
-			IsTyping  bool   `json:"is_typing"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request format", http.StatusBadRequest)
-			return
-		}
-
-		// Validate request
-		if req.Recipient == "" {
-			http.Error(w, "Recipient is required", http.StatusBadRequest)
-			return
-		}
-
-		// Create JID for recipient
-		var recipientJID types.JID
-		var err error
-
-		// Check if recipient is a JID
-		if strings.Contains(req.Recipient, "@") {
-			recipientJID, err = types.ParseJID(req.Recipient)
-			if err != nil {
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"success": false,
-					"message": fmt.Sprintf("Error parsing JID: %v", err),
-				})
-				return
-			}
-		} else {
-			// Create JID from phone number
-			recipientJID = types.JID{
-				User:   req.Recipient,
-				Server: "s.whatsapp.net",
-			}
-		}
-
-		// Determine the chat presence state
-		var state types.ChatPresence
-		if req.IsTyping {
-			state = types.ChatPresenceComposing
-		} else {
-			state = types.ChatPresencePaused
-		}
-
-		// Send the chat presence update
-		err = client.SendChatPresence(context.Background(), recipientJID, state, types.ChatPresenceMediaText)
-
-		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
 
-		// Send response
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"message": fmt.Sprintf("Failed to send typing indicator: %v", err),
-			})
-		} else {
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": true,
-				"message": fmt.Sprintf("Typing indicator set to %v", req.IsTyping),
-			})
+		switch r.Method {
+		case http.MethodGet:
+			// Query inbound typing state.
+			chatJID := r.URL.Query().Get("chat_jid")
+
+			// Response structure.
+			type TypingResponse struct {
+				ChatJID   string `json:"chat_jid"`
+				SenderJID string `json:"sender_jid"`
+				IsTyping  bool   `json:"is_typing"`
+				Media     string `json:"media,omitempty"`
+				UpdatedAt string `json:"updated_at"`
+			}
+			type GetTypingResponse struct {
+				Success bool             `json:"success"`
+				Typing  []TypingResponse `json:"typing"`
+			}
+
+			var states []*TypingState
+			if chatJID != "" {
+				states = typingStore.GetForChat(chatJID)
+			} else {
+				states = typingStore.ListActive()
+			}
+
+			resp := GetTypingResponse{Success: true, Typing: make([]TypingResponse, 0, len(states))}
+			for _, s := range states {
+				resp.Typing = append(resp.Typing, TypingResponse{
+					ChatJID:   s.ChatJID,
+					SenderJID: s.SenderJID,
+					IsTyping:  s.IsTyping,
+					Media:     s.Media,
+					UpdatedAt: s.UpdatedAt.Format(time.RFC3339),
+				})
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+
+		case http.MethodPost:
+			// Send outbound typing indicator (existing behavior).
+			var req struct {
+				Recipient string `json:"recipient"`
+				IsTyping  bool   `json:"is_typing"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "Invalid request format", http.StatusBadRequest)
+				return
+			}
+
+			if req.Recipient == "" {
+				http.Error(w, "Recipient is required", http.StatusBadRequest)
+				return
+			}
+
+			var recipientJID types.JID
+			var err error
+
+			if strings.Contains(req.Recipient, "@") {
+				recipientJID, err = types.ParseJID(req.Recipient)
+				if err != nil {
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"success": false,
+						"message": fmt.Sprintf("Error parsing JID: %v", err),
+					})
+					return
+				}
+			} else {
+				recipientJID = types.JID{
+					User:   req.Recipient,
+					Server: "s.whatsapp.net",
+				}
+			}
+
+			var state types.ChatPresence
+			if req.IsTyping {
+				state = types.ChatPresenceComposing
+			} else {
+				state = types.ChatPresencePaused
+			}
+
+			err = client.SendChatPresence(context.Background(), recipientJID, state, types.ChatPresenceMediaText)
+
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"message": fmt.Sprintf("Failed to send typing indicator: %v", err),
+				})
+			} else {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": true,
+					"message": fmt.Sprintf("Typing indicator set to %v", req.IsTyping),
+				})
+			}
+
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	}))
 
@@ -2705,6 +2736,9 @@ func main() {
 	logger.Infof("Starting WhatsApp client...")
 
 	logger.Infof("%s", webhookStartupMessage(forwardSelfMessages))
+
+	// Initialize typing store for inbound presence tracking.
+	typingStore = NewTypingStore(DefaultTypingExpiry)
 
 	// Create database connection for storing session data
 	dbLog := waLog.Stdout("Database", "INFO", true)
@@ -2932,6 +2966,34 @@ func main() {
 
 		case *events.Connected:
 			logger.Infof("✓ Successfully connected to WhatsApp servers")
+			// Mark self as available so WhatsApp sends us typing notifications.
+			// Without this, events.ChatPresence is never emitted.
+			if err := client.SendPresence(context.Background(), types.PresenceAvailable); err != nil {
+				logger.Warnf("Failed to send presence available: %v", err)
+			} else {
+				logger.Infof("Marked self as available for typing notifications")
+			}
+
+		case *events.ChatPresence:
+			// Inbound typing/composing state from a contact.
+			chatJID := v.Chat.String()
+			senderJID := v.Sender.String()
+			isTyping := v.State == types.ChatPresenceComposing
+			media := ""
+			if v.Media == types.ChatPresenceMediaAudio {
+				media = "audio"
+			}
+
+			_, changed := typingStore.Update(chatJID, senderJID, isTyping, media)
+			if changed {
+				state := "paused"
+				if isTyping {
+					state = "composing"
+				}
+				logger.Debugf("Typing state: %s is %s in %s", senderJID, state, chatJID)
+				// Forward to webhook.
+				SendTypingWebhook(chatJID, senderJID, isTyping, media)
+			}
 
 		case *events.LoggedOut:
 			logger.Warnf("⚠️  Device logged out, please scan QR code to log in again")

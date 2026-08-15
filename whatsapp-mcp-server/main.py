@@ -29,6 +29,9 @@ from whatsapp import (
     get_sender_name as whatsapp_get_sender_name,
 )
 from whatsapp import (
+    get_typing_state as whatsapp_get_typing_state,
+)
+from whatsapp import (
     list_chats as whatsapp_list_chats,
 )
 from whatsapp import (
@@ -462,6 +465,35 @@ def download_media(message_id: str, chat_jid: str) -> dict[str, Any]:
         return {"success": True, "message": "Media downloaded successfully", "file_path": file_path}
     else:
         return {"success": False, "message": "Failed to download media"}
+
+
+@mcp.tool()
+def get_typing_state(chat_jid: str | None = None) -> dict[str, Any]:
+    """Get current typing/composing state for WhatsApp chats.
+
+    Returns contacts who are currently typing or recording a voice message.
+    Useful for detecting when a contact is composing a message before responding.
+
+    The bridge marks itself as "available" on connection so that WhatsApp sends
+    typing notifications. States expire after ~30 seconds if no "paused" event
+    arrives.
+
+    Args:
+        chat_jid: Optional chat JID to filter results. If not provided, returns
+                  all currently-typing contacts across all chats.
+
+    Returns:
+        A dictionary containing:
+        - success: Whether the query succeeded
+        - typing: List of typing states, each with:
+          - chat_jid: The chat where typing is happening
+          - sender_jid: Who is typing
+          - is_typing: Always true (paused states are not returned)
+          - media: "" for text, "audio" for voice recording
+          - updated_at: ISO-8601 timestamp of when typing started/refreshed
+    """
+    typing_states = whatsapp_get_typing_state(chat_jid)
+    return {"success": True, "typing": typing_states}
 
 
 def shutdown_handler(signum, frame):

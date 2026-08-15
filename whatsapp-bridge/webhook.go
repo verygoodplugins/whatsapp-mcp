@@ -213,5 +213,70 @@ func SendReactionWebhook(sender, chatJID string, isFromMe bool, messageID, react
 	})
 }
 
+// TypingWebhookPayload represents typing/composing events sent to the webhook.
+type TypingWebhookPayload struct {
+	EventType string `json:"eventType"`
+	ChatJID   string `json:"chatJID"`
+	SenderJID string `json:"senderJID"`
+	IsTyping  bool   `json:"isTyping"`
+	Media     string `json:"media,omitempty"` // "" for text, "audio" for voice recording
+	Timestamp int64  `json:"timestamp"`
+}
+
+// SendTypingWebhook sends a typing state change to the webhook endpoint.
+func SendTypingWebhook(chatJID, senderJID string, isTyping bool, media string) {
+	if !webhooksEnabled() {
+		return
+	}
+
+	webhookURL := os.Getenv("WEBHOOK_URL")
+	explicitlyConfigured := webhookURL != ""
+	if !explicitlyConfigured {
+		webhookURL = defaultWebhookURL
+	}
+
+	payload := TypingWebhookPayload{
+		EventType: "typing",
+		ChatJID:   chatJID,
+		SenderJID: senderJID,
+		IsTyping:  isTyping,
+		Media:     media,
+		Timestamp: time.Now().Unix(),
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		fmt.Printf("Error marshaling typing webhook payload: %v\n", err)
+		return
+	}
+
+	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		fmt.Printf("Error building typing webhook request: %v\n", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if webhookAuthToken != "" && explicitlyConfigured {
+		req.Header.Set("X-Bridge-Token", webhookAuthToken)
+	}
+
+	resp, err := webhookClient.Do(req)
+	if err != nil {
+		fmt.Printf("Error sending typing webhook: %v\n", err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	state := "stopped"
+	if isTyping {
+		state = "started"
+	}
+	if resp.StatusCode == 200 {
+		fmt.Printf("✓ Typing webhook sent: %s %s typing in %s\n", senderJID, state, chatJID)
+	} else {
+		fmt.Printf("⚠ Typing webhook failed with status %d\n", resp.StatusCode)
+	}
+}
+
 // In main.go, handleMessage forwards webhooks for messages with text content.
 // It will forward self-sent messages when the env var FORWARD_SELF=true.
