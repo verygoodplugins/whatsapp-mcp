@@ -3434,21 +3434,34 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				// Determine sender. History-sync rows do not carry SenderAlt,
 				// so any LID-based participant is resolved through the
 				// whatsmeow LID store (populated during live message handling).
+				// Group senders live in the top-level WebMessageInfo.participant
+				// field on modern history syncs; Key.Participant is only a legacy
+				// fallback. Participant is only consulted for group/broadcast
+				// chats — for one-to-one (phone or LID) and newsletter chats
+				// the sender is the chat itself. Same order and gating as
+				// whatsmeow's ParseWebMessage.
 				var sender string
 				isFromMe := false
 				if msg.Message.Key != nil {
 					if msg.Message.Key.FromMe != nil {
 						isFromMe = *msg.Message.Key.FromMe
 					}
+					var participant string
+					if jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer && jid.Server != types.NewsletterServer {
+						participant = msg.Message.GetParticipant()
+						if participant == "" {
+							participant = msg.Message.Key.GetParticipant()
+						}
+					}
 					var rawSender types.JID
 					switch {
 					case isFromMe && client.Store.ID != nil:
 						rawSender = client.Store.ID.ToNonAD()
-					case msg.Message.Key.Participant != nil && *msg.Message.Key.Participant != "":
-						if parsed, perr := types.ParseJID(*msg.Message.Key.Participant); perr == nil {
+					case participant != "":
+						if parsed, perr := types.ParseJID(participant); perr == nil {
 							rawSender = parsed
 						} else {
-							rawSender = types.JID{User: *msg.Message.Key.Participant}
+							rawSender = types.JID{User: participant}
 						}
 					default:
 						rawSender = jid

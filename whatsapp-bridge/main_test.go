@@ -1082,6 +1082,121 @@ func TestHandleHistorySync_LIDParticipant_ResolvedViaStore(t *testing.T) {
 	}
 }
 
+// TestHandleHistorySync_GroupSenderFromTopLevelParticipant pins the sender
+// source for history-synced group messages: modern history syncs carry the
+// sender in the top-level WebMessageInfo.participant field while
+// Key.Participant is empty. The sender column must hold that participant,
+// not the group JID fallback.
+func TestHandleHistorySync_GroupSenderFromTopLevelParticipant(t *testing.T) {
+	groupJID := types.JID{User: "120363000000000001", Server: types.GroupServer}
+	participant := types.JID{User: "31612345678", Server: types.DefaultUserServer}
+
+	client := newTestClientWithSelf(&mockLIDStore{}, selfPhone)
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	historySync := &events.HistorySync{
+		Data: &waProto.HistorySync{
+			SyncType: waProto.HistorySync_RECENT.Enum(),
+			Conversations: []*waProto.Conversation{
+				{
+					ID:   proto.String(groupJID.String()),
+					Name: proto.String("Test Group"),
+					Messages: []*waProto.HistorySyncMsg{
+						{
+							Message: &waProto.WebMessageInfo{
+								Key: &waCommon.MessageKey{
+									ID:     proto.String("hist-group-001"),
+									FromMe: proto.Bool(false),
+								},
+								Participant:      proto.String(participant.String()),
+								MessageTimestamp: proto.Uint64(uint64(time.Now().Unix())),
+								Message: &waProto.Message{
+									Conversation: proto.String("group history payload"),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	handleHistorySync(client, ms, historySync, logger)
+
+	got := querySender(ms, groupJID.String())
+	if got != participant.User {
+		t.Errorf("history-sync group sender = %q, want participant %q (group JID fallback was %q)",
+			got, participant.User, groupJID.User)
+	}
+}
+
+// TestHandleHistorySync_DMSenderIgnoresParticipant guards the other side of
+// the participant lookup: for one-to-one chats the sender is always the
+// remote chat itself, even if the history row carries a top-level or
+// Key-level Participant. Without this gate a DM row with Participant set
+// would be attributed to that participant instead of the chat peer, which
+// is the ordering whatsmeow's ParseWebMessage enforces.
+func TestHandleHistorySync_DMSenderIgnoresParticipant(t *testing.T) {
+	peer := types.JID{User: "31612345678", Server: types.DefaultUserServer}
+	peerLID := types.JID{User: "987654321000001", Server: types.HiddenUserServer}
+	stray := types.JID{User: "31699999999", Server: types.DefaultUserServer}
+
+	cases := []struct {
+		name    string
+		chatJID types.JID
+		wantKey string // chat_jid the row is stored under
+	}{
+		{name: "phone DM", chatJID: peer, wantKey: peer.String()},
+		{name: "LID DM resolved via store", chatJID: peerLID, wantKey: peer.String()},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newTestClientWithSelf(&mockLIDStore{
+				pnByLID: map[types.JID]types.JID{peerLID: peer},
+			}, selfPhone)
+			ms := newTestMessageStore(t)
+			logger := testLogger()
+
+			historySync := &events.HistorySync{
+				Data: &waProto.HistorySync{
+					SyncType: waProto.HistorySync_RECENT.Enum(),
+					Conversations: []*waProto.Conversation{
+						{
+							ID: proto.String(tc.chatJID.String()),
+							Messages: []*waProto.HistorySyncMsg{
+								{
+									Message: &waProto.WebMessageInfo{
+										Key: &waCommon.MessageKey{
+											ID:          proto.String("hist-dm-001"),
+											FromMe:      proto.Bool(false),
+											Participant: proto.String(stray.String()),
+										},
+										Participant:      proto.String(stray.String()),
+										MessageTimestamp: proto.Uint64(uint64(time.Now().Unix())),
+										Message: &waProto.Message{
+											Conversation: proto.String("dm history payload"),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+
+			handleHistorySync(client, ms, historySync, logger)
+
+			got := querySender(ms, tc.wantKey)
+			if got != peer.User {
+				t.Errorf("history-sync DM sender = %q, want chat peer %q (stray participant was %q)",
+					got, peer.User, stray.User)
+			}
+		})
+	}
+}
+
 func TestMigrateLegacyLIDChatsToPhoneJIDs_MigratesAndIsIdempotent(t *testing.T) {
 	ms := newTestMessageStore(t)
 	logger := testLogger()
