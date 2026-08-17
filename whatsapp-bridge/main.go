@@ -2941,16 +2941,22 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				// whatsmeow LID store (populated during live message handling).
 				// Group senders live in the top-level WebMessageInfo.participant
 				// field on modern history syncs; Key.Participant is only a legacy
-				// fallback — same order whatsmeow's ParseWebMessage uses.
+				// fallback. Participant is only consulted for group/broadcast
+				// chats — for one-to-one (phone or LID) and newsletter chats
+				// the sender is the chat itself. Same order and gating as
+				// whatsmeow's ParseWebMessage.
 				var sender string
 				isFromMe := false
 				if msg.Message.Key != nil {
 					if msg.Message.Key.FromMe != nil {
 						isFromMe = *msg.Message.Key.FromMe
 					}
-					participant := msg.Message.GetParticipant()
-					if participant == "" {
-						participant = msg.Message.Key.GetParticipant()
+					var participant string
+					if jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer && jid.Server != types.NewsletterServer {
+						participant = msg.Message.GetParticipant()
+						if participant == "" {
+							participant = msg.Message.Key.GetParticipant()
+						}
 					}
 					var rawSender types.JID
 					switch {
