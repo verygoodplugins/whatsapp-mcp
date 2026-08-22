@@ -288,6 +288,64 @@ func TestResolveRecipientJIDResolvesPhoneToCachedLID(t *testing.T) {
 	}
 }
 
+// resolveQuotedParticipantJID feeds ContextInfo.Participant, which recipient
+// clients use to attribute a quoted reply. The messages.db sender column holds
+// bare user-parts, so the raw value reaching the bridge is a phone number with
+// no server — which no client can match to a group member, rendering the quote
+// as "You" for every viewer.
+func TestResolveQuotedParticipantJID_BareNumberPrefersCachedLID(t *testing.T) {
+	phoneJID := types.JID{User: "15551234567", Server: types.DefaultUserServer}
+	lidJID := types.JID{User: "123456789012345", Server: types.HiddenUserServer}
+	client := newTestClient(&mockLIDStore{
+		lidByPN: map[types.JID]types.JID{phoneJID: lidJID},
+	})
+
+	got := resolveQuotedParticipantJID(client, phoneJID.User)
+	if got != lidJID.String() {
+		t.Fatalf("expected cached LID %s, got %q", lidJID, got)
+	}
+}
+
+func TestResolveQuotedParticipantJID_BareNumberWithoutLIDGetsPhoneServer(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+
+	got := resolveQuotedParticipantJID(client, "15551234567")
+	want := types.JID{User: "15551234567", Server: types.DefaultUserServer}.String()
+	if got != want {
+		t.Fatalf("expected phone JID %q, got %q", want, got)
+	}
+}
+
+func TestResolveQuotedParticipantJID_LIDJIDPassesThrough(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+	lid := types.JID{User: "123456789012345", Server: types.HiddenUserServer}.String()
+
+	if got := resolveQuotedParticipantJID(client, lid); got != lid {
+		t.Fatalf("expected LID JID %q unchanged, got %q", lid, got)
+	}
+}
+
+func TestResolveQuotedParticipantJID_PhoneJIDResolvesToCachedLID(t *testing.T) {
+	phoneJID := types.JID{User: "15551234567", Server: types.DefaultUserServer}
+	lidJID := types.JID{User: "123456789012345", Server: types.HiddenUserServer}
+	client := newTestClient(&mockLIDStore{
+		lidByPN: map[types.JID]types.JID{phoneJID: lidJID},
+	})
+
+	got := resolveQuotedParticipantJID(client, phoneJID.String())
+	if got != lidJID.String() {
+		t.Fatalf("expected cached LID %s, got %q", lidJID, got)
+	}
+}
+
+func TestResolveQuotedParticipantJID_EmptyStaysEmpty(t *testing.T) {
+	client := newTestClient(&mockLIDStore{})
+
+	if got := resolveQuotedParticipantJID(client, ""); got != "" {
+		t.Fatalf("expected empty participant for empty sender, got %q", got)
+	}
+}
+
 // TestUpdateChatEphemeralSettings_IgnoresZeroTimestamp pins down the sparse-chunk
 // guard: a write with settingTimestamp == 0 carries no information about when
 // the user toggled the chat's ephemeral state, so it must not clobber a

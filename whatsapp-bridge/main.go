@@ -1334,6 +1334,36 @@ func resolveMentionJIDs(client *whatsmeow.Client, mentions []string) []string {
 	return resolved
 }
 
+// resolveQuotedParticipantJID maps the quoted-reply sender (a bare phone
+// number, phone JID, or LID JID) to the JID string WhatsApp expects in
+// ContextInfo.Participant. Recipient clients resolve the quoted message's
+// author name from this field; a bare number or a phone JID in a LID-addressed
+// group matches no participant, so clients fall back to rendering "You" and
+// misfire the quote notification for everyone. The LID form is preferred when
+// the mapping is cached, matching how the group addresses its members.
+func resolveQuotedParticipantJID(client *whatsmeow.Client, quotedSender string) string {
+	if quotedSender == "" {
+		return ""
+	}
+	var jid types.JID
+	if strings.Contains(quotedSender, "@") {
+		parsed, err := types.ParseJID(quotedSender)
+		if err != nil {
+			fmt.Printf("Warning: keeping unparseable quoted sender %q as-is: %v\n", quotedSender, err)
+			return quotedSender
+		}
+		jid = parsed
+	} else {
+		jid = types.JID{User: quotedSender, Server: types.DefaultUserServer}
+	}
+	if jid.Server == types.DefaultUserServer {
+		if lid, err := client.Store.LIDs.GetLIDForPN(context.Background(), jid); err == nil && !lid.IsEmpty() {
+			return lid.String()
+		}
+	}
+	return jid.String()
+}
+
 // Function to send a WhatsApp message
 func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string) (bool, string) {
 	if !client.IsConnected() {
@@ -1465,7 +1495,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		ctx := &waProto.ContextInfo{}
 		if quotedMsgID != "" {
 			ctx.StanzaID = proto.String(quotedMsgID)
-			ctx.Participant = proto.String(quotedSenderJID)
+			ctx.Participant = proto.String(resolveQuotedParticipantJID(client, quotedSenderJID))
 			ctx.QuotedMessage = &waProto.Message{Conversation: proto.String(quotedContent)}
 		}
 		ctx.MentionedJID = mentionedJIDs
