@@ -17,7 +17,7 @@ cd whatsapp-mcp
 
 # Bridge
 cd whatsapp-bridge
-go run .           # scan QR to pair
+go run -tags sqlite_fts5 . # scan QR to pair
 
 # MCP server (separate terminal)
 cd ../whatsapp-mcp-server
@@ -34,7 +34,7 @@ uv run main.py
    - `fix:` user-visible bug fix → patch bump
    - `chore:`, `docs:`, `ci:`, `refactor:`, `test:`, `perf:` → no version bump
    - `feat!:` / `fix!:` / `BREAKING CHANGE:` in body → major bump
-4. **Test locally** — `uv run pytest`, `golangci-lint run`, `go build ./...`.
+4. **Test locally** — `uv run pytest`, `golangci-lint run`, `go test -tags sqlite_fts5 ./...`, `go build -tags sqlite_fts5 ./...`.
 5. **Open a PR** to `main` against `verygoodplugins/whatsapp-mcp`. Use the PR template.
 6. **Iterate** — address review comments. Squash isn't required; meaningful commit history is fine.
 7. **Merge** — maintainers merge once CI is green and at least one approving review is in. Release-please cuts the next release automatically.

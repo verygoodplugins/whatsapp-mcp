@@ -73,7 +73,7 @@ mkdir -p "$SUPPORT_DIR" "$STATE_DIR" "$LOG_DIR" "$LAUNCH_AGENTS_DIR"
 
 if command -v go >/dev/null 2>&1; then
   print -r -- "Building WhatsApp bridge..."
-  (cd "$BRIDGE_DIR" && go build -o "$BRIDGE_BINARY" .)
+  (cd "$BRIDGE_DIR" && go build -tags sqlite_fts5 -o "$BRIDGE_BINARY" .)
 elif [[ ! -x "$BRIDGE_BINARY" ]]; then
   fail "Go is not available and no executable bridge binary exists at $BRIDGE_BINARY."
 fi

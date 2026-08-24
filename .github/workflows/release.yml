@@ -46,12 +46,12 @@ jobs:
       - name: Run Go tests
         run: |
           cd whatsapp-bridge
-          go test ./...
+          go test -tags sqlite_fts5 ./...
 
       - name: Build Go bridge
         run: |
           cd whatsapp-bridge
-          go build -v ./...
+          go build -tags sqlite_fts5 -v ./...
 
       - name: Run Python tests
         run: |
@@ -77,7 +77,7 @@ jobs:
           mkdir -p dist
 
           cd whatsapp-bridge
-          GOOS=linux GOARCH=amd64 go build -o ../dist/whatsapp-bridge-linux-amd64 .
+          GOOS=linux GOARCH=amd64 go build -tags sqlite_fts5 -o ../dist/whatsapp-bridge-linux-amd64 .
           cd ..
 
           cd whatsapp-mcp-server

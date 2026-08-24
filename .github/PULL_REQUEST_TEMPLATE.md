@@ -35,7 +35,7 @@ Thanks for the PR! A couple of quick checks before you submit:
 
 - [ ] Added or updated tests
 - [ ] Ran `uv run pytest -v` (Python changes)
-- [ ] Ran `golangci-lint run` and `go build ./...` (Go changes)
+- [ ] Ran `golangci-lint run`, `go test -tags sqlite_fts5 ./...`, and `go build -tags sqlite_fts5 ./...` (Go changes)
 - [ ] Manually exercised the affected code path
 
 ## Docs

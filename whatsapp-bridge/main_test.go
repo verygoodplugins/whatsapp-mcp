@@ -132,6 +132,18 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 	return &MessageStore{db: db}
 }
 
+func TestSQLiteFTS5IsAvailable(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open in-memory database: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec("CREATE VIRTUAL TABLE messages_fts_test USING fts5(content)"); err != nil {
+		t.Fatalf("SQLite FTS5 is required because message searches create FTS5 triggers: %v", err)
+	}
+}
+
 func TestOpenWhatsmeowContactsDB_MissingPathDoesNotCreateDB(t *testing.T) {
 	missingPath := filepath.Join(t.TempDir(), "whatsapp.db")
 
