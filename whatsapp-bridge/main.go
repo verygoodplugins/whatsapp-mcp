@@ -74,6 +74,14 @@ func resolveDeviceName() string {
 	return strings.TrimSpace(os.Getenv("WHATSAPP_DEVICE_NAME"))
 }
 
+// stdoutIsTerminal reports whether stdout is an interactive terminal, so the
+// QR refresh can clear the screen without spraying escape sequences into a log
+// file or a pipe.
+func stdoutIsTerminal() bool {
+	fi, err := os.Stdout.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
 // Message represents a chat message for our client
 type Message struct {
 	Time      time.Time
@@ -3016,16 +3024,22 @@ func main() {
 				continue
 			}
 
-			// Print QR code for pairing with phone
-			qrCodeShown := false
+			// Print QR code for pairing with phone. whatsmeow rotates the code
+			// every ~20s and only the newest one is scannable, so every event
+			// gets redrawn -- rendering just the first leaves a dead QR on
+			// screen that looks identical to a live one.
+			qrCodeCount := 0
+			clearScreen := stdoutIsTerminal()
 			for evt := range qrChan {
 				if evt.Event == "code" {
-					if !qrCodeShown {
-						fmt.Println("\nScan this QR code with your WhatsApp app:")
-						qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-						fmt.Println("\nWaiting for QR code scan...")
-						qrCodeShown = true
+					qrCodeCount++
+					if clearScreen {
+						fmt.Print("\033[H\033[2J")
 					}
+					fmt.Printf("\nScan this QR code with your WhatsApp app (code #%d, generated %s):\n",
+						qrCodeCount, time.Now().Format("15:04:05"))
+					qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+					fmt.Println("\nWaiting for QR code scan... a new code replaces it every ~20s; always scan the most recent one.")
 				} else if evt.Event == "success" {
 					connected <- true
 					break
