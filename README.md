@@ -773,6 +773,9 @@ are documented in [docs/RELEASING.md](docs/RELEASING.md).
   supported linked-device client version, which can make older whatsmeow builds
   fail before pairing completes.
 - **QR Code Not Displaying**: Restart the bridge. Check terminal QR code support.
+- **QR Code Not Accepted**: The code rotates roughly every 20 seconds and only
+  the newest one works. The bridge redraws it on every rotation and labels each
+  with a counter and timestamp — always scan the most recent one.
 - **Device Limit Reached**: Remove a linked device from WhatsApp Settings > Linked Devices.
 - **No Messages Loading**: Initial sync can take several minutes for large chat histories.
 - **Out of Sync**: Back up `whatsapp-bridge/store`, then move
