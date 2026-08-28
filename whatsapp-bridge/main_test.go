@@ -1288,6 +1288,86 @@ func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 			want: "",
 		},
 		{
+			name: "ContactMessage with phone number in vCard",
+			msg: &waProto.Message{
+				ContactMessage: &waProto.ContactMessage{
+					DisplayName: proto.String("John Doe"),
+					Vcard: proto.String("BEGIN:VCARD\nVERSION:3.0\nN:;John Doe;;;\nFN:John Doe\n" +
+						"TEL;type=CELL;waid=6281234567890:+62 812-3456-7890\nEND:VCARD"),
+				},
+			},
+			want: "📇 John Doe (+62 812-3456-7890)",
+		},
+		{
+			name: "ContactMessage with iPhone-style grouped TEL property",
+			msg: &waProto.Message{
+				ContactMessage: &waProto.ContactMessage{
+					DisplayName: proto.String("Adie Taxi"),
+					Vcard: proto.String("BEGIN:VCARD\nVERSION:3.0\nFN:Adie Taxi\n" +
+						"item1.TEL;waid=6281338417222:+62 813-3841-7222\nitem1.X-ABLabel:Mobil\nEND:VCARD"),
+				},
+			},
+			want: "📇 Adie Taxi (+62 813-3841-7222)",
+		},
+		{
+			name: "ContactMessage with multiple TEL lines keeps every number",
+			msg: &waProto.Message{
+				ContactMessage: &waProto.ContactMessage{
+					DisplayName: proto.String("John Doe"),
+					Vcard: proto.String("BEGIN:VCARD\r\nVERSION:3.0\r\nFN:John Doe\r\n" +
+						"TEL;type=CELL:+62 812-3456-7890\r\nTEL;type=WORK:+47 22 33 44 55\r\nEND:VCARD"),
+				},
+			},
+			want: "📇 John Doe (+62 812-3456-7890, +47 22 33 44 55)",
+		},
+		{
+			name: "ContactMessage without a TEL line falls back to name only",
+			msg: &waProto.Message{
+				ContactMessage: &waProto.ContactMessage{
+					DisplayName: proto.String("Jane Doe"),
+					Vcard:       proto.String("BEGIN:VCARD\nVERSION:3.0\nFN:Jane Doe\nEND:VCARD"),
+				},
+			},
+			want: "📇 Jane Doe",
+		},
+		{
+			name: "ContactMessage with neither name nor TEL returns empty (no placeholder row)",
+			msg: &waProto.Message{
+				ContactMessage: &waProto.ContactMessage{
+					Vcard: proto.String("BEGIN:VCARD\nVERSION:3.0\nEND:VCARD"),
+				},
+			},
+			want: "",
+		},
+		{
+			name: "ContactsArrayMessage with multiple shared contacts",
+			msg: &waProto.Message{
+				ContactsArrayMessage: &waProto.ContactsArrayMessage{
+					DisplayName: proto.String("2 contacts"),
+					Contacts: []*waProto.ContactMessage{
+						{
+							DisplayName: proto.String("John Doe"),
+							Vcard:       proto.String("BEGIN:VCARD\nTEL;waid=1:+1 111\nEND:VCARD"),
+						},
+						{
+							DisplayName: proto.String("Jane Doe"),
+							Vcard:       proto.String("BEGIN:VCARD\nFN:Jane Doe\nEND:VCARD"),
+						},
+					},
+				},
+			},
+			want: "📇 2 contacts shared: John Doe (+1 111); Jane Doe",
+		},
+		{
+			name: "ContactsArrayMessage with no contacts returns empty (no placeholder row)",
+			msg: &waProto.Message{
+				ContactsArrayMessage: &waProto.ContactsArrayMessage{
+					DisplayName: proto.String("0 contacts"),
+				},
+			},
+			want: "",
+		},
+		{
 			name: "Nil message returns empty",
 			msg:  nil,
 			want: "",
