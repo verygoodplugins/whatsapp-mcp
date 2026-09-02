@@ -128,3 +128,63 @@ func TestResolveMediaRootsAcceptsEnvList(t *testing.T) {
 		t.Fatalf("expected 2 roots, got %d", len(roots))
 	}
 }
+
+func TestOutboundFileNameNeverLeaksThePath(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "windows absolute path, the reported leak",
+			in:   `C:\Users\someone\.local\share\whatsapp-mcp\outbox\brief.zip`,
+			want: "brief.zip",
+		},
+		{
+			name: "windows path with spaces and parentheses",
+			in:   `C:\Users\someone\outbox\2026-08-24 pitch (v19).mp4`,
+			want: "2026-08-24 pitch (v19).mp4",
+		},
+		{
+			name: "posix absolute path",
+			in:   "/home/someone/.local/share/whatsapp-mcp/outbox/brief.zip",
+			want: "brief.zip",
+		},
+		{
+			name: "mixed separators, as a hand-written path often is",
+			in:   `C:/Users/someone\outbox/brief.zip`,
+			want: "brief.zip",
+		},
+		{
+			name: "bare name, already safe",
+			in:   "brief.zip",
+			want: "brief.zip",
+		},
+		{
+			name: "drive-relative path with no separator at all",
+			in:   `C:brief.zip`,
+			want: "brief.zip",
+		},
+		{
+			name: "trailing separator yields a neutral fallback, never empty",
+			in:   `C:\Users\someone\outbox\`,
+			want: "file",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := outboundFileName(tc.in)
+			if got != tc.want {
+				t.Fatalf("outboundFileName(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			// The real invariant: nothing that identifies the machine or the
+			// user survives into the name, on any platform.
+			for _, leak := range []string{"Users", "home", "someone", ":", `\`, "/"} {
+				if strings.Contains(got, leak) {
+					t.Fatalf("outboundFileName(%q) = %q, leaks %q", tc.in, got, leak)
+				}
+			}
+		})
+	}
+}
