@@ -141,3 +141,43 @@ func pathHasPrefix(child, parent string) bool {
 	rest := child[len(parent):]
 	return strings.HasPrefix(rest, string(os.PathSeparator))
 }
+
+// outboundFileName returns the name a RECIPIENT should see for an outbound
+// document, given a local media path.
+//
+// This is not cosmetic. The document filename travels to the recipient inside
+// the message, so every character of the path we put here is published. The
+// previous code took everything after the last forward slash:
+//
+//	mediaPath[strings.LastIndex(mediaPath, "/")+1:]
+//
+// On Windows that leaks the entire absolute path. The path handed to the send
+// routine has already been through filepath.EvalSymlinks (see the /api/send
+// handler), which normalises separators to backslash, so LastIndex for "/"
+// returns -1, the slice starts at 0, and the recipient sees something like
+// C:\Users\<name>\.local\share\whatsapp-mcp\outbox\file.zip -- username and
+// home layout included.
+//
+// filepath.Base alone is not enough either: it only honours the separator of
+// the platform it runs on, so a Windows-style path handled by a Linux or macOS
+// build would still come through whole. We split on BOTH separators regardless
+// of GOOS, which is what a filename crossing machines requires.
+//
+// If the path ends in a separator, or is otherwise nameless, we fall back to a
+// neutral constant rather than sending an empty filename.
+func outboundFileName(mediaPath string) string {
+	name := mediaPath
+	if i := strings.LastIndexAny(name, `/\`); i >= 0 {
+		name = name[i+1:]
+	}
+	// Drop a Windows drive prefix such as "C:" left behind by a bare
+	// "C:file.zip" style path, which has no separator at all.
+	if i := strings.LastIndex(name, ":"); i >= 0 {
+		name = name[i+1:]
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "file"
+	}
+	return name
+}
