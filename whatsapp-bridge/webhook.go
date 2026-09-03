@@ -135,8 +135,16 @@ func sendWebhookPayload(payload WebhookPayload) {
 	}
 }
 
-// SendWebhook sends a text-only message to the webhook endpoint.
+// SendWebhook sends a text-only message to the webhook endpoint. New callers
+// should use SendWebhookWithMessageID so receiver-side idempotency can identify
+// repeated WhatsApp events; this wrapper remains for compatibility.
 func SendWebhook(sender, content, chatJID string, isFromMe bool, quotedMessageId, quotedSender, quotedContent string, quotedIsFromMe *bool, mentionedJIDs []string) {
+	SendWebhookWithMessageID(sender, content, chatJID, isFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs, "")
+}
+
+// SendWebhookWithMessageID sends a text-only message and preserves the native
+// WhatsApp message ID in the payload for downstream idempotency.
+func SendWebhookWithMessageID(sender, content, chatJID string, isFromMe bool, quotedMessageId, quotedSender, quotedContent string, quotedIsFromMe *bool, mentionedJIDs []string, messageID string) {
 	sendWebhookPayload(WebhookPayload{
 		Sender:          sender,
 		Content:         content,
@@ -147,6 +155,7 @@ func SendWebhook(sender, content, chatJID string, isFromMe bool, quotedMessageId
 		QuotedContent:   quotedContent,
 		QuotedIsFromMe:  quotedIsFromMe,
 		MentionedJIDs:   mentionedJIDs,
+		MessageID:       messageID,
 	})
 }
 
