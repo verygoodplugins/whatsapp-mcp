@@ -1129,6 +1129,21 @@ func classifyMediaPath(mediaPath string) (whatsmeow.MediaType, string, string) {
 	}
 }
 
+// outboundMediaRow derives the columns sendWhatsAppMessage persists for an
+// outbound message: the media category (via classifyMediaPath, so it can't
+// drift from the upload-side classification), the filename, and the upload
+// metadata downloadMedia needs to redownload it later. Returns zero values
+// for a plain text message (mediaPath == ""). Split out as its own function
+// so it's unit-testable without a live whatsmeow.Client.
+func outboundMediaRow(mediaPath string, upload whatsmeow.UploadResponse) (mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) {
+	if mediaPath == "" {
+		return "", "", "", nil, nil, nil, 0
+	}
+	_, _, mediaType = classifyMediaPath(mediaPath)
+	filename = filepath.Base(mediaPath)
+	return mediaType, filename, upload.URL, upload.MediaKey, upload.FileSHA256, upload.FileEncSHA256, upload.FileLength
+}
+
 func buildDisappearingMode() *waProto.DisappearingMode {
 	return &waProto.DisappearingMode{
 		Initiator: waProto.DisappearingMode_CHANGED_IN_CHAT.Enum(),
@@ -1370,6 +1385,10 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 
 	msg := &waProto.Message{}
 
+	// Populated below when mediaPath != "", then reused both to build the
+	// outgoing proto and to persist media metadata further down.
+	var upload whatsmeow.UploadResponse
+
 	// Check if we have media to send
 	if mediaPath != "" {
 		// Read media file
@@ -1381,12 +1400,25 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		mediaType, mimeType, _ := classifyMediaPath(mediaPath)
 
 		// Upload media to WhatsApp servers
-		resp, err := client.Upload(context.Background(), mediaData, mediaType)
+		upload, err = client.Upload(context.Background(), mediaData, mediaType)
 		if err != nil {
 			return false, fmt.Sprintf("Error uploading media: %v", err)
 		}
 
-		fmt.Println("Media uploaded", resp)
+		// Don't log the struct itself — UploadResponse carries MediaKey, the
+		// AES key that decrypts this attachment on the CDN.
+		fmt.Printf("Media uploaded: %s (%d bytes)\n", upload.URL, upload.FileLength)
+
+		// downloadMedia reconstructs DirectPath from the stored URL instead
+		// of persisting it directly (no column for it). extractDirectPathFromURL
+		// keeps the URL's query string on purpose (the CDN auth tokens); strip
+		// it from both sides before comparing so this only fires on an actual
+		// mismatch, not the query string that's expected to differ.
+		derivedPath, _, _ := strings.Cut(extractDirectPathFromURL(upload.URL), "?")
+		directPath, _, _ := strings.Cut(upload.DirectPath, "?")
+		if derivedPath != directPath {
+			fmt.Printf("Warning: upload DirectPath %q does not match path derived from URL %q; redownload of this attachment may fail\n", upload.DirectPath, derivedPath)
+		}
 
 		// Create the appropriate message type based on media type
 		switch mediaType {
@@ -1394,12 +1426,12 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 			msg.ImageMessage = &waProto.ImageMessage{
 				Caption:       proto.String(message),
 				Mimetype:      proto.String(mimeType),
-				URL:           &resp.URL,
-				DirectPath:    &resp.DirectPath,
-				MediaKey:      resp.MediaKey,
-				FileEncSHA256: resp.FileEncSHA256,
-				FileSHA256:    resp.FileSHA256,
-				FileLength:    &resp.FileLength,
+				URL:           &upload.URL,
+				DirectPath:    &upload.DirectPath,
+				MediaKey:      upload.MediaKey,
+				FileEncSHA256: upload.FileEncSHA256,
+				FileSHA256:    upload.FileSHA256,
+				FileLength:    &upload.FileLength,
 			}
 		case whatsmeow.MediaAudio:
 			// Handle ogg audio files
@@ -1421,12 +1453,12 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 
 			msg.AudioMessage = &waProto.AudioMessage{
 				Mimetype:      proto.String(mimeType),
-				URL:           &resp.URL,
-				DirectPath:    &resp.DirectPath,
-				MediaKey:      resp.MediaKey,
-				FileEncSHA256: resp.FileEncSHA256,
-				FileSHA256:    resp.FileSHA256,
-				FileLength:    &resp.FileLength,
+				URL:           &upload.URL,
+				DirectPath:    &upload.DirectPath,
+				MediaKey:      upload.MediaKey,
+				FileEncSHA256: upload.FileEncSHA256,
+				FileSHA256:    upload.FileSHA256,
+				FileLength:    &upload.FileLength,
 				Seconds:       proto.Uint32(seconds),
 				PTT:           proto.Bool(true),
 				Waveform:      waveform,
@@ -1435,12 +1467,12 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 			msg.VideoMessage = &waProto.VideoMessage{
 				Caption:       proto.String(message),
 				Mimetype:      proto.String(mimeType),
-				URL:           &resp.URL,
-				DirectPath:    &resp.DirectPath,
-				MediaKey:      resp.MediaKey,
-				FileEncSHA256: resp.FileEncSHA256,
-				FileSHA256:    resp.FileSHA256,
-				FileLength:    &resp.FileLength,
+				URL:           &upload.URL,
+				DirectPath:    &upload.DirectPath,
+				MediaKey:      upload.MediaKey,
+				FileEncSHA256: upload.FileEncSHA256,
+				FileSHA256:    upload.FileSHA256,
+				FileLength:    &upload.FileLength,
 			}
 		case whatsmeow.MediaDocument:
 			msg.DocumentMessage = &waProto.DocumentMessage{
@@ -1448,13 +1480,18 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 				FileName:      proto.String(mediaPath[strings.LastIndex(mediaPath, "/")+1:]),
 				Caption:       proto.String(message),
 				Mimetype:      proto.String(mimeType),
-				URL:           &resp.URL,
-				DirectPath:    &resp.DirectPath,
-				MediaKey:      resp.MediaKey,
-				FileEncSHA256: resp.FileEncSHA256,
-				FileSHA256:    resp.FileSHA256,
-				FileLength:    &resp.FileLength,
+				URL:           &upload.URL,
+				DirectPath:    &upload.DirectPath,
+				MediaKey:      upload.MediaKey,
+				FileEncSHA256: upload.FileEncSHA256,
+				FileSHA256:    upload.FileSHA256,
+				FileLength:    &upload.FileLength,
 			}
+		default:
+			// Unreachable today (classifyMediaPath only returns the four
+			// types above), but fail loudly rather than send an empty proto
+			// while still persisting media metadata for it.
+			return false, fmt.Sprintf("Unsupported media type for %s", mediaPath)
 		}
 	} else if quotedMsgID != "" || len(mentionedJIDs) > 0 {
 		// Quoted reply and/or mentions: use ExtendedTextMessage so we can
@@ -1525,21 +1562,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 			timestamp = time.Now()
 		}
 
-		var mediaType, filename string
-		if mediaPath != "" {
-			filename = filepath.Base(mediaPath)
-			ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(mediaPath), "."))
-			switch ext {
-			case "jpg", "jpeg", "png", "gif", "webp":
-				mediaType = "image"
-			case "ogg":
-				mediaType = "audio"
-			case "mp4", "avi", "mov":
-				mediaType = "video"
-			default:
-				mediaType = "document"
-			}
-		}
+		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := outboundMediaRow(mediaPath, upload)
 
 		// Pass empty name so StoreChat preserves any existing resolved
 		// contact/group name; we don't have one available here and
@@ -1549,7 +1572,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		}
 		if storeErr := messageStore.StoreMessage(
 			resp.ID, chatJID, senderUser, message, timestamp, true,
-			mediaType, filename, "", nil, nil, nil, 0, quotedMsgID,
+			mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMsgID,
 		); storeErr != nil {
 			fmt.Printf("Warning: failed to persist outbound message: %v\n", storeErr)
 		}
@@ -2113,6 +2136,14 @@ func (d *MediaDownloader) GetMediaType() whatsmeow.MediaType {
 	return d.MediaType
 }
 
+// hasCompleteMediaInfo reports whether a stored message row carries enough
+// media metadata to be downloadable. Extracted so tests can exercise the
+// exact predicate downloadMedia enforces, instead of a hand-copied duplicate
+// that can silently drift from it.
+func hasCompleteMediaInfo(url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) bool {
+	return url != "" && len(mediaKey) != 0 && len(fileSHA256) != 0 && len(fileEncSHA256) != 0 && fileLength != 0
+}
+
 // Function to download media from a message
 func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, messageID, chatJID string) (bool, string, string, string, error) {
 	// Query the database for the message including timestamp
@@ -2181,7 +2212,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	}
 
 	// If we don't have all the media info we need, we can't download
-	if url == "" || len(mediaKey) == 0 || len(fileSHA256) == 0 || len(fileEncSHA256) == 0 || fileLength == 0 {
+	if !hasCompleteMediaInfo(url, mediaKey, fileSHA256, fileEncSHA256, fileLength) {
 		return false, "", "", "", fmt.Errorf("incomplete media information for download")
 	}
 
