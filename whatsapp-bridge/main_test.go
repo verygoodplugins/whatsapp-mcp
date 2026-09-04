@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -2879,5 +2880,157 @@ func TestSendHandler_MentionsField_PassedThrough(t *testing.T) {
 
 	if resp.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for empty recipient with mentions field, got %d", resp.Code)
+	}
+}
+
+// --- Outbound media persistence ---
+//
+// sendWhatsAppMessage needs a live, connected *whatsmeow.Client to reach
+// client.Upload/client.SendMessage, so these tests cover the two pieces
+// that don't: outboundMediaRow, the pure function that derives what gets
+// persisted from an upload response, and StoreMessage's own round-trip
+// through SQLite. Both are checked against hasCompleteMediaInfo, the same
+// predicate downloadMedia uses to decide whether a row is downloadable.
+
+// TestOutboundMediaRow_PopulatedUpload_SatisfiesRedownloadCheck verifies
+// that a populated upload response maps to a downloadable row.
+func TestOutboundMediaRow_PopulatedUpload_SatisfiesRedownloadCheck(t *testing.T) {
+	upload := whatsmeow.UploadResponse{
+		URL:           "https://mmg.whatsapp.net/v/t62.7161-24/sticker.enc",
+		DirectPath:    "/v/t62.7161-24/sticker.enc",
+		MediaKey:      []byte{0x01, 0x02, 0x03, 0x04},
+		FileSHA256:    []byte{0xaa, 0xbb, 0xcc},
+		FileEncSHA256: []byte{0xdd, 0xee, 0xff},
+		FileLength:    30524,
+	}
+
+	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := outboundMediaRow("/tmp/wa-test/test-sticker.webp", upload)
+
+	if mediaType != "image" {
+		t.Errorf("mediaType = %q, want %q", mediaType, "image")
+	}
+	if filename != "test-sticker.webp" {
+		t.Errorf("filename = %q, want %q", filename, "test-sticker.webp")
+	}
+	if !hasCompleteMediaInfo(url, mediaKey, fileSHA256, fileEncSHA256, fileLength) {
+		t.Errorf("outboundMediaRow result is incomplete, would fail downloadMedia's check: url=%q keyLen=%d shaLen=%d encShaLen=%d len=%d",
+			url, len(mediaKey), len(fileSHA256), len(fileEncSHA256), fileLength)
+	}
+
+	// Check values, not just non-empty — a FileSHA256/FileEncSHA256 swap
+	// compiles cleanly and hasCompleteMediaInfo alone wouldn't catch it.
+	if url != upload.URL {
+		t.Errorf("url = %q, want %q", url, upload.URL)
+	}
+	if !bytes.Equal(mediaKey, upload.MediaKey) {
+		t.Errorf("mediaKey = %x, want %x", mediaKey, upload.MediaKey)
+	}
+	if !bytes.Equal(fileSHA256, upload.FileSHA256) {
+		t.Errorf("fileSHA256 = %x, want %x (upload.FileSHA256) — check for a FileSHA256/FileEncSHA256 swap", fileSHA256, upload.FileSHA256)
+	}
+	if !bytes.Equal(fileEncSHA256, upload.FileEncSHA256) {
+		t.Errorf("fileEncSHA256 = %x, want %x (upload.FileEncSHA256) — check for a FileSHA256/FileEncSHA256 swap", fileEncSHA256, upload.FileEncSHA256)
+	}
+	if fileLength != upload.FileLength {
+		t.Errorf("fileLength = %d, want %d", fileLength, upload.FileLength)
+	}
+}
+
+// TestOutboundMediaRow_EmptyMediaPath_ReturnsEmpty verifies the text-message
+// case (mediaPath == "") stays a no-media row, matching the previous
+// inline behavior exactly — no ambiguity between "no media" and "upload
+// returned an empty value".
+func TestOutboundMediaRow_EmptyMediaPath_ReturnsEmpty(t *testing.T) {
+	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := outboundMediaRow("", whatsmeow.UploadResponse{})
+
+	if mediaType != "" || filename != "" {
+		t.Errorf("expected empty mediaType/filename for mediaPath=\"\", got mediaType=%q filename=%q", mediaType, filename)
+	}
+	if hasCompleteMediaInfo(url, mediaKey, fileSHA256, fileEncSHA256, fileLength) {
+		t.Fatalf("expected incomplete media info for a text message, got a complete row")
+	}
+}
+
+// queryMediaFields reads back the columns downloadMedia's own query selects,
+// for the first message stored under a chat JID.
+func queryMediaFields(t *testing.T, ms *MessageStore, chatJID, msgID string) (url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) {
+	t.Helper()
+	err := ms.db.QueryRow(
+		"SELECT url, media_key, file_sha256, file_enc_sha256, file_length FROM messages WHERE id = ? AND chat_jid = ?",
+		msgID, chatJID,
+	).Scan(&url, &mediaKey, &fileSHA256, &fileEncSHA256, &fileLength)
+	if err != nil {
+		t.Fatalf("failed to query stored message: %v", err)
+	}
+	return
+}
+
+// TestStoreMessage_MediaFields_RoundTrip verifies that populated upload
+// metadata (the shape sendWhatsAppMessage now passes) round-trips through
+// SQLite intact and satisfies hasCompleteMediaInfo. mediaType is "image",
+// not "sticker": the outbound path classifies every .webp as "image" (see
+// main.go's extension switch) — "sticker" is only ever written on the
+// inbound path (extractMediaInfo).
+func TestStoreMessage_MediaFields_RoundTrip(t *testing.T) {
+	ms := newTestMessageStore(t)
+	chatJID := "50372269345@s.whatsapp.net"
+
+	url := "https://mmg.whatsapp.net/v/t62.7161-24/sticker.enc"
+	mediaKey := []byte{0x01, 0x02, 0x03, 0x04}
+	fileSHA256 := []byte{0xaa, 0xbb, 0xcc}
+	fileEncSHA256 := []byte{0xdd, 0xee, 0xff}
+	var fileLength uint64 = 30524
+
+	if err := ms.StoreMessage(
+		"OUTBOUND1", chatJID, "50372269345", "", time.Now(), true,
+		"image", "test-sticker.webp", url, mediaKey, fileSHA256, fileEncSHA256, fileLength, "",
+	); err != nil {
+		t.Fatalf("StoreMessage failed: %v", err)
+	}
+
+	gotURL, gotKey, gotSHA, gotEncSHA, gotLen := queryMediaFields(t, ms, chatJID, "OUTBOUND1")
+	if !hasCompleteMediaInfo(gotURL, gotKey, gotSHA, gotEncSHA, gotLen) {
+		t.Errorf("stored media row is incomplete, would fail downloadMedia's check: url=%q keyLen=%d shaLen=%d encShaLen=%d len=%d",
+			gotURL, len(gotKey), len(gotSHA), len(gotEncSHA), gotLen)
+	}
+
+	// Check values, not just non-empty — same rationale as
+	// TestOutboundMediaRow_PopulatedUpload_SatisfiesRedownloadCheck above.
+	if gotURL != url {
+		t.Errorf("url = %q, want %q", gotURL, url)
+	}
+	if !bytes.Equal(gotKey, mediaKey) {
+		t.Errorf("mediaKey = %x, want %x", gotKey, mediaKey)
+	}
+	if !bytes.Equal(gotSHA, fileSHA256) {
+		t.Errorf("fileSHA256 = %x, want %x — check for a file_sha256/file_enc_sha256 column swap", gotSHA, fileSHA256)
+	}
+	if !bytes.Equal(gotEncSHA, fileEncSHA256) {
+		t.Errorf("fileEncSHA256 = %x, want %x — check for a file_sha256/file_enc_sha256 column swap", gotEncSHA, fileEncSHA256)
+	}
+	if gotLen != fileLength {
+		t.Errorf("fileLength = %d, want %d", gotLen, fileLength)
+	}
+}
+
+// TestStoreMessage_EmptyMediaFields_FailsRedownloadCheck documents the shape
+// sendWhatsAppMessage used to pass unconditionally ("", nil, nil, nil, 0)
+// regardless of what client.Upload actually returned. A row stored this way
+// must fail hasCompleteMediaInfo — this is what made every outbound
+// attachment un-redownloadable before the fix.
+func TestStoreMessage_EmptyMediaFields_FailsRedownloadCheck(t *testing.T) {
+	ms := newTestMessageStore(t)
+	chatJID := "50372269345@s.whatsapp.net"
+
+	if err := ms.StoreMessage(
+		"OUTBOUND2", chatJID, "50372269345", "", time.Now(), true,
+		"image", "test-sticker.webp", "", nil, nil, nil, 0, "",
+	); err != nil {
+		t.Fatalf("StoreMessage failed: %v", err)
+	}
+
+	gotURL, gotKey, gotSHA, gotEncSHA, gotLen := queryMediaFields(t, ms, chatJID, "OUTBOUND2")
+	if hasCompleteMediaInfo(gotURL, gotKey, gotSHA, gotEncSHA, gotLen) {
+		t.Fatalf("expected incomplete media info (the pre-fix bug shape), got a complete row")
 	}
 }
