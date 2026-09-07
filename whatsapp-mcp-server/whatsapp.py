@@ -25,6 +25,27 @@ WHATSAPP_API_BASE_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:8080/api
 _BRIDGE_TOKEN_PATH = os.path.join(os.path.dirname(WHATSMEOW_DB_PATH), ".bridge-token")
 
 
+def _connect_messages_db() -> sqlite3.Connection:
+    """Open messages.db read-only, refusing to invent it.
+
+    sqlite3.connect() silently creates an empty database when the path is
+    wrong, and every read path here maps sqlite3.Error to an empty result, so
+    a misconfigured WHATSAPP_DB_PATH (or a bridge that never ran) used to read
+    as "you have no messages" rather than a setup problem. FileNotFoundError is
+    not a sqlite3.Error, so it surfaces to the MCP client as a tool error with
+    an actionable message. query_only then guarantees the MCP server never
+    writes to the bridge-owned store.
+    """
+    if not os.path.isfile(MESSAGES_DB_PATH):
+        raise FileNotFoundError(
+            f"WhatsApp messages database not found at {MESSAGES_DB_PATH}. "
+            "Start the bridge once so it creates the store, or point WHATSAPP_DB_PATH at it."
+        )
+    conn = sqlite3.connect(MESSAGES_DB_PATH)
+    conn.execute("PRAGMA query_only = ON")
+    return conn
+
+
 def _read_bridge_token() -> str | None:
     env = os.getenv("WHATSAPP_BRIDGE_TOKEN", "").strip()
     if env:
@@ -322,7 +343,7 @@ def _like_escape(value: str) -> str:
 
 def get_sender_name(sender_jid: str) -> str:
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         # First try matching by exact JID
@@ -376,7 +397,9 @@ def get_sender_name(sender_jid: str) -> str:
 
         return sender_jid
 
-    except sqlite3.Error as e:
+    except (sqlite3.Error, FileNotFoundError) as e:
+        # Name enrichment must never break a result that was already read;
+        # the primary read tools surface a missing store loudly on their own.
         print(f"Database error while getting sender name: {e}")
         return sender_jid
     finally:
@@ -448,7 +471,7 @@ def list_messages(
         List of message dictionaries with id, timestamp, sender, content, etc.
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         # Build base query
@@ -557,7 +580,7 @@ def list_messages(
 def get_message_context(message_id: str, before: int = 5, after: int = 5) -> MessageContext:
     """Get context around a specific message."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         # Get the target message first
@@ -671,7 +694,7 @@ def list_chats(
         List of chat dictionaries with jid, name, is_group, last_message, etc.
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         # The last message is always joined — is_from_me feeds the unread
@@ -759,7 +782,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
 
     # 1) Search messages.db chats table (existing behavior)
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -827,7 +850,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
         page: Page number for pagination (default 0)
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         aliases = _sender_aliases(jid)
@@ -891,7 +914,7 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
         Message dictionary or None if no messages found
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         aliases = _sender_aliases(jid)
@@ -949,7 +972,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
         Chat dictionary or None if not found
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         # See list_chats: the last message is always joined for is_from_me,
@@ -1000,7 +1023,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
 def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | None:
     """Get chat metadata by sender phone number."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _connect_messages_db()
         cursor = conn.cursor()
 
         cursor.execute(
