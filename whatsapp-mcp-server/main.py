@@ -5,7 +5,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from mcp_config import resolve_host, resolve_port, resolve_transport
+from mcp_config import build_transport_security, resolve_host, resolve_port, resolve_transport
 from parent_watchdog import install_stdio_parent_watchdog
 from whatsapp import (
     download_media as whatsapp_download_media,
@@ -484,6 +484,22 @@ if __name__ == "__main__":
         if transport != "stdio":
             mcp.settings.host = resolve_host(os.getenv("WHATSAPP_MCP_HOST"))
             mcp.settings.port = resolve_port(os.getenv("WHATSAPP_MCP_PORT"))
+            # FastMCP froze a loopback-only Host allow-list when it was constructed
+            # above (default host). Re-derive it for the real bind address, or every
+            # non-loopback caller gets 421 Misdirected Request.
+            security = build_transport_security(
+                mcp.settings.host,
+                os.getenv("WHATSAPP_MCP_ALLOWED_HOSTS"),
+                os.getenv("WHATSAPP_MCP_ALLOWED_ORIGINS"),
+            )
+            if security is not None:
+                mcp.settings.transport_security = security
+                if not security.enable_dns_rebinding_protection:
+                    print(
+                        "WARNING: accepting any Host header (no WHATSAPP_MCP_ALLOWED_HOSTS set); "
+                        "set it to the hostname(s) clients use to keep DNS-rebinding protection on",
+                        file=sys.stderr,
+                    )
             # stdout is reserved for the protocol on stdio; log startup to stderr.
             print(
                 f"WhatsApp MCP server listening on {mcp.settings.host}:{mcp.settings.port} via {transport}",

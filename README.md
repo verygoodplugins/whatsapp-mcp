@@ -398,6 +398,8 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MCP_TRANSPORT` | `stdio`                                | MCP transport to serve clients: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST`    | `127.0.0.1`                              | Bind address for the `http`/`sse` transports |
 | `WHATSAPP_MCP_PORT`    | `8000`                                   | Port for the `http`/`sse` transports |
+| `WHATSAPP_MCP_ALLOWED_HOSTS` | loopback only                      | Comma-separated extra `Host` header values accepted by the `http`/`sse` transports (e.g. a Tailscale or container hostname); `*` disables the check |
+| `WHATSAPP_MCP_ALLOWED_ORIGINS` | derived from allowed hosts       | Comma-separated extra `Origin` header values accepted by the `http`/`sse` transports (browser-based clients only) |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30`                              | Stdio parent-liveness poll interval (seconds); exits on parent reparent only |
 
 ### MCP transport (stdio vs http/sse)
@@ -422,6 +424,31 @@ recommended choice for remote connections; `sse` is kept for older clients.
 > authentication, and the underlying bridge can read and send WhatsApp messages
 > on your account. Only bind to a non-loopback address (e.g. `0.0.0.0`) if you
 > place an authenticating reverse proxy or tunnel in front of it.
+
+#### Reaching the server by a non-loopback hostname
+
+The MCP SDK ships DNS-rebinding protection: it checks the HTTP `Host` header
+against an allow-list and answers `421 Misdirected Request` for anything else.
+Out of the box that allow-list is loopback only, so a client that reaches the
+server through a Tailscale hostname, a Docker service name, or a reverse proxy
+gets a 421 even when `WHATSAPP_MCP_HOST=0.0.0.0`. The server logs it as
+`Invalid Host header: ...`.
+
+Add the hostnames clients will use to `WHATSAPP_MCP_ALLOWED_HOSTS`:
+
+```bash
+WHATSAPP_MCP_TRANSPORT=http WHATSAPP_MCP_HOST=0.0.0.0 WHATSAPP_MCP_ALLOWED_HOSTS=myserver.tail1234.ts.net,whatsapp-mcp uv run main.py
+```
+
+- A bare hostname matches with or without a port (`myserver.tail1234.ts.net`
+  and `myserver.tail1234.ts.net:8000`). Use `host:8000` to pin a port or the
+  SDK's `host:*` form explicitly.
+- Loopback spellings (`127.0.0.1`, `localhost`, `[::1]`) always stay allowed.
+- `WHATSAPP_MCP_ALLOWED_ORIGINS` adds `Origin` values for browser-based
+  clients; `http(s)://<host>` is derived automatically for each allowed host.
+- Setting `WHATSAPP_MCP_ALLOWED_HOSTS=*` disables the check. Binding to a
+  non-loopback address **without** an allow-list also disables it (with a
+  warning on stderr) so the server stays reachable; prefer listing the hosts.
 
 ### Bridge authentication and media paths
 
