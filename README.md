@@ -507,6 +507,13 @@ alerts when the bridge LaunchAgent is unloaded, the token is missing, the health
 endpoint is unreachable, WhatsApp is disconnected, or recent logs indicate that
 QR relinking is needed.
 
+If `store/.bridge-token` lives inside a macOS TCC-protected location (for example
+`~/Documents` or `~/Desktop`), the sandboxed monitor can be denied read access to
+it. The installer avoids this by copying the resolved token into the mode-`600`
+`launchd.env` so the monitor reads it from the environment; if you ever see the
+monitor exit without alerting, re-run the installer, or set `WHATSAPP_BRIDGE_TOKEN`
+explicitly before running it.
+
 Uninstall the generated LaunchAgents and support files with:
 
 ```bash
