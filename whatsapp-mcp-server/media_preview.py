@@ -18,9 +18,6 @@ from pathlib import Path
 # Voice notes are handled by transcription, not by rendering.
 AUDIO_SUFFIXES = frozenset({".ogg", ".opus", ".m4a", ".mp3", ".wav", ".aac", ".amr"})
 
-# Formats a client can display without any re-encoding.
-PASSTHROUGH_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif"})
-
 # Cap for handing a file back untouched when ffmpeg is unavailable. Above this
 # an image is large enough that returning it unscaled is the wrong answer.
 MAX_PASSTHROUGH_BYTES = 4_000_000
@@ -42,6 +39,19 @@ def is_audio(path: str | Path) -> bool:
 
 def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
+
+
+def image_format_from_bytes(data: bytes) -> str | None:
+    """Return the display format for a supported image signature, if any."""
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "webp"
+    return None
 
 
 def validate_max_dimension(max_dimension: int) -> None:
@@ -103,13 +113,14 @@ def render_preview(
     if not source.is_file():
         raise PreviewError(f"Media file not found: {source}")
 
-    suffix = source.suffix.lower()
-
     if not ffmpeg_available():
-        if suffix in PASSTHROUGH_SUFFIXES and source.stat().st_size <= MAX_PASSTHROUGH_BYTES:
-            image_format = "jpeg" if suffix in {".jpg", ".jpeg"} else suffix.lstrip(".")
-            return source.read_bytes(), image_format
-        raise PreviewError("ffmpeg is required to render this media at a size worth returning")
+        # The bridge gives images generated .jpg names, even when their bytes
+        # are PNG, GIF, or WebP. Bound the read before trusting the magic bytes.
+        if source.stat().st_size <= MAX_PASSTHROUGH_BYTES:
+            data = source.read_bytes()
+            if image_format := image_format_from_bytes(data):
+                return data, image_format
+        raise PreviewError("ffmpeg is required to render media that is not a supported image at a size worth returning")
 
     destination = Path(work_dir or source.parent) / f"{source.stem}.preview.jpg"
     try:

@@ -33,17 +33,37 @@ def test_missing_file_is_reported(tmp_path):
 
 def test_small_image_passes_through_without_ffmpeg(tmp_path, monkeypatch):
     monkeypatch.setattr(media_preview.shutil, "which", lambda _: None)
-    image = _write(tmp_path / "image_1.png", b"png-bytes")
+    image = _write(tmp_path / "image_1.png", b"\x89PNG\r\n\x1a\npng-bytes")
     data, image_format = media_preview.render_preview(image)
-    assert data == b"png-bytes"
+    assert data == b"\x89PNG\r\n\x1a\npng-bytes"
     assert image_format == "png"
 
 
 def test_jpg_suffix_is_normalised_to_jpeg(tmp_path, monkeypatch):
     monkeypatch.setattr(media_preview.shutil, "which", lambda _: None)
-    image = _write(tmp_path / "image_1.jpg", b"jpeg-bytes")
+    image = _write(tmp_path / "image_1.jpg", b"\xff\xd8\xffjpeg-bytes")
     _, image_format = media_preview.render_preview(image)
     assert image_format == "jpeg"
+
+
+@pytest.mark.parametrize(
+    ("data", "expected_format"),
+    [
+        (b"\xff\xd8\xffjpeg", "jpeg"),
+        (b"\x89PNG\r\n\x1a\npng", "png"),
+        (b"GIF89agif", "gif"),
+        (b"RIFF\x00\x00\x00\x00WEBPwebp", "webp"),
+    ],
+)
+def test_image_format_from_bytes_recognises_supported_formats(data, expected_format):
+    assert media_preview.image_format_from_bytes(data) == expected_format
+
+
+def test_unknown_jpg_bytes_without_ffmpeg_are_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(media_preview.shutil, "which", lambda _: None)
+    image = _write(tmp_path / "generated.jpg", b"not an image")
+    with pytest.raises(media_preview.PreviewError, match="not a supported image"):
+        media_preview.render_preview(image)
 
 
 def test_large_file_without_ffmpeg_fails_loudly(tmp_path, monkeypatch):

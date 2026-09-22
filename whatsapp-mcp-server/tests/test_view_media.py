@@ -36,6 +36,23 @@ def test_view_media_rejects_invalid_dimension_before_download(monkeypatch):
     }
 
 
+@pytest.mark.asyncio
+async def test_view_media_mcp_uses_png_mime_for_png_bytes_in_generated_jpg(tmp_path, monkeypatch):
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR42mNk+M/wHwAF/gL+9qMyAAAAAElFTkSuQmCC"
+    )
+    source = tmp_path / "generated.jpg"
+    source.write_bytes(png_bytes)
+    monkeypatch.setattr(main, "whatsapp_download_media", lambda *_args: str(source))
+    monkeypatch.setattr(media_preview.shutil, "which", lambda _: None)
+
+    content = (await main.mcp.call_tool("view_media", {"message_id": "message-1", "chat_jid": "chat@g.us"}))[0]
+
+    assert content.type == "image"
+    assert content.mimeType == "image/png"
+    assert base64.b64decode(content.data) == png_bytes
+
+
 @pytest.mark.parametrize("max_dimension", [True, "1024", 1.5])
 async def test_view_media_mcp_rejects_coerced_dimensions_before_download(monkeypatch, max_dimension):
     download_calls = 0
