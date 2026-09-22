@@ -126,7 +126,7 @@ When adding a new env var: document it here, in `README.md`, and in `.env.exampl
 2. **Media files** live under `store/{chat_jid}/` with timestamp + message-ID filenames. Don't hand-construct these paths in client code; use the bridge's `/api/download` endpoint.
 3. **Audio.** WhatsApp voice messages must be Opus `.ogg`. The MCP server's `send_audio_message` tool auto-converts via FFmpeg if installed.
 4. **History sync** is controlled by the *primary* device (the phone). The bridge can request more at pair time (see the `--full-history-pair` flag) or for a single chat at runtime (`POST /api/history`, see `history_ondemand.go`), but the phone has the final word.
-5. **`messages.db` is the source of truth for the MCP server.** Don't make the MCP server dependent on the bridge being up for *read* operations.
+5. **`messages.db` is the source of truth for the MCP server.** Don't make the MCP server dependent on the bridge being up for *read* operations. The server opens it read-only via `_connect_messages_db()` and raises `FileNotFoundError` if it is missing rather than letting `sqlite3.connect` create an empty one; keep new read paths on that helper.
 6. **Outgoing calls are not visible to linked devices.** Don't promise features that depend on them.
 
 ## Where to make changes
