@@ -98,6 +98,28 @@ func TestSendWebhookEnabledByDefault(t *testing.T) {
 	}
 }
 
+// TestSendWebhookWithMessageIDSerializesID verifies text-only inbound messages
+// preserve their WhatsApp message ID so downstream webhook idempotency can
+// discard duplicate WhatsApp event deliveries.
+func TestSendWebhookWithMessageIDSerializesID(t *testing.T) {
+	var payload WebhookPayload
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() { _ = r.Body.Close() }()
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode webhook payload: %v", err)
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	t.Setenv("WEBHOOK_URL", srv.URL)
+	SendWebhookWithMessageID("123@s.whatsapp.net", "hi", "123@s.whatsapp.net", false, "", "", "", nil, nil, "3EB0F00D")
+
+	if payload.MessageID != "3EB0F00D" {
+		t.Fatalf("messageId = %q, want %q", payload.MessageID, "3EB0F00D")
+	}
+}
+
 func TestSendWebhookWithMediaDisabledSkipsMediaIO(t *testing.T) {
 	var received bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
