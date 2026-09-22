@@ -117,9 +117,11 @@ def render_preview(
         # The bridge gives images generated .jpg names, even when their bytes
         # are PNG, GIF, or WebP. Bound the read before trusting the magic bytes.
         if source.stat().st_size <= MAX_PASSTHROUGH_BYTES:
-            data = source.read_bytes()
-            if image_format := image_format_from_bytes(data):
-                return data, image_format
+            with source.open("rb") as media_file:
+                data = media_file.read(MAX_PASSTHROUGH_BYTES + 1)
+            if len(data) <= MAX_PASSTHROUGH_BYTES:
+                if image_format := image_format_from_bytes(data):
+                    return data, image_format
         raise PreviewError("ffmpeg is required to render media that is not a supported image at a size worth returning")
 
     destination = Path(work_dir or source.parent) / f"{source.stem}.preview.jpg"

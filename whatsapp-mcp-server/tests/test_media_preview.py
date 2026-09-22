@@ -66,6 +66,27 @@ def test_unknown_jpg_bytes_without_ffmpeg_are_rejected(tmp_path, monkeypatch):
         media_preview.render_preview(image)
 
 
+def test_file_that_grows_after_size_check_is_not_returned_without_ffmpeg(tmp_path, monkeypatch):
+    monkeypatch.setattr(media_preview.shutil, "which", lambda _: None)
+    image = _write(tmp_path / "generated.jpg", b"\x89PNG\r\n\x1a\nsmall")
+    original_stat = media_preview.Path.stat
+    size_checks = 0
+
+    def grow_before_read(path, *args, **kwargs):
+        nonlocal size_checks
+        result = original_stat(path, *args, **kwargs)
+        if path == image:
+            size_checks += 1
+            if size_checks == 2:
+                with open(image, "ab") as media_file:
+                    media_file.write(b"0" * media_preview.MAX_PASSTHROUGH_BYTES)
+        return result
+
+    monkeypatch.setattr(media_preview.Path, "stat", grow_before_read)
+    with pytest.raises(media_preview.PreviewError, match="size worth returning"):
+        media_preview.render_preview(image)
+
+
 def test_large_file_without_ffmpeg_fails_loudly(tmp_path, monkeypatch):
     monkeypatch.setattr(media_preview.shutil, "which", lambda _: None)
     image = _write(tmp_path / "image_1.jpg", b"0" * (media_preview.MAX_PASSTHROUGH_BYTES + 1))
