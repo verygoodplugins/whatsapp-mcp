@@ -315,6 +315,11 @@ def _resolve_name_from_whatsmeow(jid: str) -> str | None:
             conn.close()
 
 
+def _like_escape(value: str) -> str:
+    """Escape SQL LIKE wildcards so user input is matched literally (pair with ESCAPE '\\\\')."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def get_sender_name(sender_jid: str) -> str:
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
@@ -341,14 +346,16 @@ def get_sender_name(sender_jid: str) -> str:
             else:
                 phone_part = sender_jid
 
+            # Anchor on the user part so a short number cannot match a longer
+            # unrelated JID by substring (e.g. 5551234 inside 15551234567@...).
             cursor.execute(
                 """
                 SELECT name
                 FROM chats
-                WHERE jid LIKE ?
+                WHERE jid LIKE ? ESCAPE '\\'
                 LIMIT 1
             """,
-                (f"%{phone_part}%",),
+                (f"{_like_escape(phone_part)}@%",),
             )
 
             result = cursor.fetchone()
@@ -1008,10 +1015,10 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
                 {_last_read_time_select(cursor, "c")}
             FROM chats c
             {_last_message_join("c", "m")}
-            WHERE c.jid LIKE ? AND c.jid NOT LIKE '%@g.us'
+            WHERE c.jid LIKE ? ESCAPE '\\' AND c.jid NOT LIKE '%@g.us'
             LIMIT 1
         """,
-            (f"%{sender_phone_number}%",),
+            (f"{_like_escape(sender_phone_number.split('@')[0])}@%",),
         )
 
         chat_data = cursor.fetchone()
