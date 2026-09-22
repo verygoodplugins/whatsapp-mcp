@@ -633,6 +633,13 @@ func (store *MessageStore) Close() error {
 // names set by inbound handling or history sync. last_message_time is
 // merged monotonically so out-of-order delivery (history sync, backfill)
 // can't move it backwards.
+// Timestamps are stored as go-sqlite3 renders time.Time: local wall clock plus
+// UTC offset ("2026-10-25 01:30:00+01:00"). Comparing two of them as strings is
+// only chronological while the offset never changes; across a DST switch or a
+// host timezone change "01:15:00+00:00" sorts before "01:30:00+01:00" although
+// it is the later instant. Every "is this newer" decision therefore goes
+// through julianday(), which SQLite evaluates on the instant.
+
 func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time) error {
 	_, err := store.db.Exec(
 		`INSERT INTO chats (jid, name, last_message_time)
@@ -642,7 +649,7 @@ func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time
 			last_message_time = CASE
 				WHEN chats.last_message_time IS NULL THEN excluded.last_message_time
 				WHEN excluded.last_message_time IS NULL THEN chats.last_message_time
-				WHEN excluded.last_message_time > chats.last_message_time THEN excluded.last_message_time
+				WHEN julianday(excluded.last_message_time) > julianday(chats.last_message_time) THEN excluded.last_message_time
 				ELSE chats.last_message_time
 			END`,
 		jid, name, lastMessageTime,
@@ -693,7 +700,7 @@ func (store *MessageStore) MarkChatRead(jid string, readAt time.Time) error {
 			last_read_time = CASE
 				WHEN chats.last_read_time IS NULL THEN excluded.last_read_time
 				WHEN excluded.last_read_time IS NULL THEN chats.last_read_time
-				WHEN excluded.last_read_time > chats.last_read_time THEN excluded.last_read_time
+				WHEN julianday(excluded.last_read_time) > julianday(chats.last_read_time) THEN excluded.last_read_time
 				ELSE chats.last_read_time
 			END`,
 		jid, readAt,
@@ -791,11 +798,17 @@ func (store *MessageStore) MaxMessageTimestamp(chatJID string, ids []string) (ti
 		placeholders[i] = "?"
 		args = append(args, id)
 	}
+	// MAX() would pick the lexicographically largest string, which is not the
+	// latest instant once offsets differ; order on the instant instead.
 	var raw any
 	err := store.db.QueryRow(
-		`SELECT MAX(timestamp) FROM messages WHERE chat_jid = ? AND id IN (`+strings.Join(placeholders, ",")+`)`,
+		`SELECT timestamp FROM messages WHERE chat_jid = ? AND id IN (`+strings.Join(placeholders, ",")+`)
+		 ORDER BY julianday(timestamp) DESC LIMIT 1`,
 		args...,
 	).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return time.Time{}, false, nil
+	}
 	if err != nil {
 		return time.Time{}, false, err
 	}
