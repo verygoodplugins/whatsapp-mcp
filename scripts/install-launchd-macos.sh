@@ -181,7 +181,6 @@ if [[ -z "\$TOKEN" ]]; then
   alert_once "token" "WhatsApp Bridge Token Missing" "Could not read a bridge token. macOS may be blocking access to \$TOKEN_FILE; set WHATSAPP_BRIDGE_TOKEN or re-run scripts/install-launchd-macos.sh to store it in launchd.env."
   exit 0
 fi
-clear_alert "token"
 
 API_URL="\${WHATSAPP_API_URL%/}"
 response="\$(curl -sS -m 5 -H "Authorization: Bearer \$TOKEN" -w \$'\n%{http_code}' "\$API_URL/health" 2>/dev/null || true)"
@@ -199,6 +198,7 @@ if [[ "\$http_code" != "200" && "\$http_code" != "503" ]]; then
   alert_once "api" "WhatsApp Bridge API Unreachable" "Unexpected HTTP \$http_code from \$API_URL/health."
   exit 0
 fi
+clear_alert "token"
 clear_alert "api"
 
 connected=false
