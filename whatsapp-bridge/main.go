@@ -2122,7 +2122,8 @@ func (d *MediaDownloader) GetMediaType() whatsmeow.MediaType {
 // Function to download media from a message
 func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, messageID, chatJID string) (bool, string, string, string, error) {
 	// Query the database for the message including timestamp
-	var mediaType, url string
+	var mediaType, url, sender string
+	var fromMe bool
 	var mediaKey, fileSHA256, fileEncSHA256 []byte
 	var fileLength uint64
 	var timestamp time.Time
@@ -2130,9 +2131,9 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 
 	// Get media info AND timestamp from the database
 	err = messageStore.db.QueryRow(
-		"SELECT media_type, url, media_key, file_sha256, file_enc_sha256, file_length, timestamp FROM messages WHERE id = ? AND chat_jid = ?",
+		"SELECT media_type, url, media_key, file_sha256, file_enc_sha256, file_length, timestamp, sender, is_from_me FROM messages WHERE id = ? AND chat_jid = ?",
 		messageID, chatJID,
-	).Scan(&mediaType, &url, &mediaKey, &fileSHA256, &fileEncSHA256, &fileLength, &timestamp)
+	).Scan(&mediaType, &url, &mediaKey, &fileSHA256, &fileEncSHA256, &fileLength, &timestamp, &sender, &fromMe)
 
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to find message: %v", err)
@@ -2226,7 +2227,29 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	}
 
 	// Download the media using whatsmeow client
-	mediaData, err := client.Download(context.Background(), downloader)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
+	defer cancel()
+	mediaData, err := downloadWithRefresh(ctx, downloader,
+		func(ctx context.Context, media *MediaDownloader) ([]byte, error) { return client.Download(ctx, media) },
+		func(ctx context.Context) (string, error) {
+			chat, parseErr := types.ParseJID(chatJID)
+			if parseErr != nil {
+				return "", parseErr
+			}
+			if !strings.Contains(sender, "@") {
+				sender += "@s.whatsapp.net"
+			}
+			participant, parseErr := types.ParseJID(sender)
+			if parseErr != nil {
+				return "", parseErr
+			}
+			info := &types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: participant, IsFromMe: fromMe, IsGroup: chat.Server == types.GroupServer}, ID: messageID, Timestamp: timestamp}
+			return mediaRefresh.request(ctx, info, mediaKey, client.SendMediaRetryReceipt)
+		},
+		func(path string) error {
+			_, saveErr := messageStore.db.ExecContext(ctx, "UPDATE messages SET url = ? WHERE id = ? AND chat_jid = ?", path, messageID, chatJID)
+			return saveErr
+		})
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
 	}
@@ -2831,6 +2854,11 @@ func main() {
 		logger.Errorf("Failed to create WhatsApp client")
 		return
 	}
+	// Phone replies can use LIDs even when the stored chat uses a phone JID.
+	mediaRefresh.normalizeChat = func(chat types.JID) types.JID {
+		return resolveUserJID(client, chat, types.EmptyJID)
+	}
+	client.AddEventHandler(mediaRefresh.handleEvent)
 
 	// Initialize message store
 	messageStore, err := NewMessageStore()
