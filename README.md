@@ -541,6 +541,144 @@ outbox is `~/.local/share/whatsapp-mcp/outbox`, created on bridge startup. Move
 files there before calling `send_file` or `send_audio_message`, or set
 `WHATSAPP_MEDIA_ROOTS` to a colon-separated list of absolute directories.
 
+### Where runtime data is stored
+
+The bridge keeps its runtime state in `store/`, resolved **relative to its
+working directory**. `WHATSAPP_DB_PATH` and `WHATSMEOW_DB_PATH` configure the
+MCP server's reads; they do not change the bridge's store location. That
+store contains:
+
+| Path | Contents |
+| --- | --- |
+| `whatsapp.db` | whatsmeow session state, including linked-device credentials |
+| `messages.db` | locally synced chat and message history |
+| `<chat_jid>/` | downloaded images, voice notes, documents, and other media |
+| `.bridge-token` | the generated REST API bearer token, unless supplied through the environment |
+
+The application does not encrypt these files at rest. Anyone who can read
+`whatsapp.db` can obtain the linked-device credentials. Moving the store does
+not automatically tighten permissions on existing files; check the destination's
+access permissions as part of the move. An encrypted volume adds protection
+when the machine or a backup is lost.
+
+> **Cloud-synced folders:** a checkout inside Google Drive, Dropbox, iCloud
+> Drive, or OneDrive puts the default store within that service's sync scope.
+> Keep the checkout or its runtime store outside synced folders. Relocating
+> prevents future sync of that store; it does not remove copies or version
+> history already uploaded to a provider.
+
+#### Relocate an existing installation
+
+1. **Stop the bridge and every MCP server before copying or moving any files.**
+   Quit clients that launch the stdio server (such as Claude Desktop or Cursor),
+   stop any standalone HTTP/SSE MCP server, and disable automatic restarts while
+   migrating. The macOS jobs only manage the bridge and its monitor, so stopping
+   them does not stop MCP clients. If installed, unload both jobs:
+
+   ```bash
+   launchctl bootout "gui/$(id -u)/com.whatsapp-mcp.bridge-monitor"
+   launchctl bootout "gui/$(id -u)/com.whatsapp-mcp.bridge"
+   ```
+
+   For a manually started bridge, stop it in its terminal. Confirm all bridge
+   and MCP server processes have exited. Never copy live SQLite databases.
+
+2. Build the binary and move the **entire existing store**, including hidden
+   files and any SQLite `-wal`, `-shm`, or journal files, to an unsynced directory.
+   Replace the checkout path below, and use the same terminal for later examples.
+   If you already run the bridge from another working directory, use that
+   directory's `store/` as the source instead.
+
+   ```bash
+   repo_dir="/absolute/path/to/whatsapp-mcp"
+   runtime_dir="$HOME/.local/share/whatsapp-mcp/runtime"
+   (
+     set -eu
+     cd "$repo_dir/whatsapp-bridge"
+     go build -o whatsapp-bridge .
+     mkdir -p "$runtime_dir"
+     chmod 700 "$runtime_dir"
+     if [ -e "$runtime_dir/store" ] || [ -L "$runtime_dir/store" ]; then
+       echo "Destination store already exists; stop and inspect it before migrating." >&2
+       exit 1
+     fi
+     mv "$repo_dir/whatsapp-bridge/store" "$runtime_dir/store"
+   )
+   ```
+
+   Continue only if the move succeeds. Do not merge two stores or start with an
+   empty store to relocate an existing session: that creates a new session and
+   loses access to the existing local history.
+
+3. In **every MCP client or server configuration**, set both database paths to
+   the moved files, using absolute paths (JSON does not expand `$HOME` or `~`):
+
+   ```json
+   "env": {
+     "WHATSAPP_DB_PATH": "/Users/you/.local/share/whatsapp-mcp/runtime/store/messages.db",
+     "WHATSMEOW_DB_PATH": "/Users/you/.local/share/whatsapp-mcp/runtime/store/whatsapp.db"
+   }
+   ```
+
+   The MCP server reads `.bridge-token` beside `WHATSMEOW_DB_PATH` when
+   `WHATSAPP_BRIDGE_TOKEN` is unset. An explicit token takes precedence: preserve
+   the same value in the bridge, MCP clients, and any authenticated webhook
+   receiver. Keep token values private.
+
+4. Choose how to restart the bridge, then restart the MCP servers and clients
+   with their updated configuration:
+
+   **Manual:** launch the built binary from the new runtime directory:
+
+   ```bash
+   cd "$runtime_dir"
+   "$repo_dir/whatsapp-bridge/whatsapp-bridge"
+   ```
+
+   **macOS launchd:** before reloading either job, edit
+   `~/Library/Application Support/whatsapp-mcp/launchd.env` to set
+   `WHATSAPP_BRIDGE_DIR` to the absolute runtime directory. Keep
+   `WHATSAPP_BRIDGE_BINARY` pointing to the built binary in the checkout.
+   The runner explicitly executes `cd "$WHATSAPP_BRIDGE_DIR"`; changing only
+   the plist's `WorkingDirectory` does not relocate the store. Update that
+   plist value too so both directory settings agree:
+
+   ```bash
+   /usr/libexec/PlistBuddy -c "Set :WorkingDirectory $runtime_dir" \
+     "$HOME/Library/LaunchAgents/com.whatsapp-mcp.bridge.plist"
+   ```
+
+   Recent installers also capture `WHATSAPP_BRIDGE_TOKEN` in `launchd.env`,
+   which both the runner and monitor source. For a generated file token, ensure
+   that cached value matches the moved `store/.bridge-token`; update a stale
+   cached value privately before restarting. For an explicitly configured
+   token, retain the same override in all consumers. Changing
+   `WHATSAPP_BRIDGE_DIR` alone does not update the cached token. Keep
+   `launchd.env` owner-readable/writable only (`chmod 600`).
+
+   ```bash
+   launchctl bootstrap "gui/$(id -u)" \
+     "$HOME/Library/LaunchAgents/com.whatsapp-mcp.bridge.plist"
+   launchctl bootstrap "gui/$(id -u)" \
+     "$HOME/Library/LaunchAgents/com.whatsapp-mcp.bridge-monitor.plist"
+   ```
+
+   Check that the bridge reconnects with the existing session and that the MCP
+   client can read known history. An unexpected QR pairing prompt or empty
+   history is a reason to stop and recheck paths before proceeding.
+
+**Installer caveat:** rerunning `scripts/install-launchd-macos.sh` rewrites
+`launchd.env` and both plists, restores the checkout's bridge directory, and
+starts the jobs immediately. It does not preserve this custom runtime location.
+After a reinstall, stop both jobs again and reapply the directory and token
+settings above before restarting them. Review any newly created checkout store;
+do not replace the relocated store with it.
+
+**Fresh manual installation:** only when there is no session or history to
+preserve, omit the `mv` step, create the runtime directory, and launch the built
+binary there. Pair the new device, then point the MCP server at the new databases
+and token as above. This is separate from migrating an existing installation.
+
 ### Run automatically on macOS
 
 macOS users can install optional per-user `launchd` jobs that start the Go
