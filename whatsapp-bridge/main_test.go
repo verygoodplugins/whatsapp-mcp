@@ -1592,6 +1592,7 @@ func TestHandleMessage_ImageWithCaption_WebhookForwarded(t *testing.T) {
 // webhook opt-out does not make incoming image processing wait on a download
 // solely used for the vision webhook payload.
 func TestHandleMessage_WebhookDisabledDownloadsImageAsynchronously(t *testing.T) {
+	t.Setenv("WHATSAPP_AUTO_DOWNLOAD_MEDIA", "true")
 	t.Setenv("WEBHOOK_ENABLED", "false")
 
 	client := newTestClient(&mockLIDStore{})
