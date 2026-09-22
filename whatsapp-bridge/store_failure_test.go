@@ -40,7 +40,8 @@ func TestHandleMessage_StoreFailureSkipsMediaDownloadsButForwardsWebhook(t *test
 				}}
 				return msg
 			},
-			wantContent: "invoice attached",
+			wantMessageID: "test-img-001",
+			wantContent:   "invoice attached",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
