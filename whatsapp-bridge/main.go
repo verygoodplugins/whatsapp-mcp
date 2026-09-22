@@ -3365,6 +3365,44 @@ func handleCallOffer(client *whatsmeow.Client, messageStore *MessageStore, meta 
 		kind, direction, meta.CallID, callType, fromJID, chatJID)
 }
 
+// historyMessageIsStorable mirrors the skip rule in handleHistorySync's store
+// loop: only text (Conversation / ExtendedTextMessage) or media produces a
+// messages row, so anything else must not influence chat ordering.
+func historyMessageIsStorable(msg *waProto.HistorySyncMsg) bool {
+	if msg == nil || msg.Message == nil || msg.Message.Message == nil {
+		return false
+	}
+	m := msg.Message.Message
+	if m.GetConversation() != "" || m.GetExtendedTextMessage().GetText() != "" {
+		return true
+	}
+	mediaType, _, _, _, _, _, _ := extractMediaInfo(m, time.Time{}, "")
+	return mediaType != ""
+}
+
+// newestStorableHistoryTimestamp returns the timestamp of the newest message in
+// a history-sync conversation that will actually be stored, and false when
+// none will. It is the history-sync twin of the live-message rule in
+// handleMessage: chats.last_message_time only moves for a stored row.
+func newestStorableHistoryTimestamp(messages []*waProto.HistorySyncMsg) (time.Time, bool) {
+	var newest time.Time
+	found := false
+	for _, msg := range messages {
+		if !historyMessageIsStorable(msg) {
+			continue
+		}
+		ts := msg.Message.GetMessageTimestamp()
+		if ts == 0 {
+			continue
+		}
+		t := time.Unix(int64(ts), 0)
+		if !found || t.After(newest) {
+			newest, found = t, true
+		}
+	}
+	return newest, found
+}
+
 func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, historySync *events.HistorySync, logger waLog.Logger) {
 	// Log every history sync event with its shape. Different sync types
 	// carry different payloads; logging type/chunk/progress makes it easy
@@ -3417,7 +3455,14 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 			}
 			timestamp := time.Unix(int64(ts), 0)
 
-			_ = messageStore.StoreChat(chatJID, name, timestamp)
+			// Advance last_message_time only to the newest message that will
+			// actually be stored. The conversation's first entry is often a
+			// protocol message (revoke, ephemeral-setting change) that the
+			// store loop below skips; using its timestamp floated the chat to
+			// the top of list_chats with no row behind it.
+			if newest, ok := newestStorableHistoryTimestamp(messages); ok {
+				_ = messageStore.StoreChat(chatJID, name, newest)
+			}
 			// Backfill read state only when WhatsApp explicitly reports unread
 			// metadata. Sparse history-sync chunks omit UnreadCount; the
 			// generated getter then returns 0 and would permanently mark the
