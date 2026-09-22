@@ -135,12 +135,18 @@ func mediaDownloadStorePaths(chatJID, mediaType, messageID string, timestamp tim
 	if err := validateStorePathComponent("media type", mediaType); err != nil {
 		return "", "", "", err
 	}
-	// Keep filesystem inputs as explicit single components after rejecting malformed
-	// values above. filepath.Base is deliberately repeated here so the component
-	// boundary remains intrinsic at the filesystem construction site.
-	chatComponent = filepath.Base(chatComponent)
-	messageID = filepath.Base(messageID)
-	mediaType = filepath.Base(mediaType)
+	// Recheck locality at the filesystem boundary. The checks above enforce the
+	// stricter single-component contract, while IsLocal also rejects paths that
+	// would escape a relative store path after cleaning.
+	if !filepath.IsLocal(chatComponent) {
+		return "", "", "", fmt.Errorf("invalid chat JID for media store path")
+	}
+	if !filepath.IsLocal(messageID) {
+		return "", "", "", fmt.Errorf("invalid message ID for media store path")
+	}
+	if !filepath.IsLocal(mediaType) {
+		return "", "", "", fmt.Errorf("invalid media type for media store path")
+	}
 
 	var ext string
 	switch mediaType {
