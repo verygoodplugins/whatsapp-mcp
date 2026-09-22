@@ -23,7 +23,8 @@ dependencies = [
     "httpx>=0.28.1",
     "mcp[cli]>=1.28.1,<2",
     "requests>=2.34.2",
-    "anyio<4.14",
+    # Require the patched release for installs that do not use uv.lock.
+    "anyio>=4.14.2,<4.15",
 ]
 
 [project.optional-dependencies]
