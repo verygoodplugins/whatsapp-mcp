@@ -2,10 +2,12 @@ import os
 import signal
 import sys
 import tempfile
-from typing import Any
+from typing import Annotated, Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
+from pydantic import Field
 
+import media_preview
 import transcription
 from mcp_config import resolve_host, resolve_port, resolve_transport
 from parent_watchdog import install_stdio_parent_watchdog
@@ -62,6 +64,16 @@ from whatsapp import (
 # Initialize FastMCP server. Env-var handling is deferred to the __main__ block
 # so importing this module never parses env vars or exits the process.
 mcp = FastMCP("whatsapp")
+
+PreviewDimension = Annotated[
+    int,
+    Field(
+        strict=True,
+        ge=media_preview.MIN_MAX_DIMENSION,
+        le=media_preview.MAX_MAX_DIMENSION,
+        description="Longest preview edge in pixels; must be an integer from 1 to 2048.",
+    ),
+]
 
 
 @mcp.tool()
@@ -465,6 +477,47 @@ def download_media(message_id: str, chat_jid: str) -> dict[str, Any]:
         return {"success": True, "message": "Media downloaded successfully", "file_path": file_path}
     else:
         return {"success": False, "message": "Failed to download media"}
+
+
+@mcp.tool()
+def view_media(
+    message_id: str,
+    chat_jid: str,
+    max_dimension: PreviewDimension = media_preview.DEFAULT_MAX_DIMENSION,
+) -> Any:
+    """View the media of a WhatsApp message as an image.
+
+    download_media only returns a local file path, which a client without
+    filesystem access cannot open. This returns the picture itself instead.
+    Videos return their first frame, which is enough to tell what was sent.
+    Both are downscaled so a single photo cannot flood the context. Voice notes
+    are not images — use transcribe_audio or read the transcript from the
+    message content with list_messages.
+
+    Args:
+        message_id: The ID of the message containing the media
+        chat_jid: The JID of the chat containing the message
+        max_dimension: Longest edge of the returned image in pixels (default 1024)
+
+    Returns:
+        Image content on success, otherwise a dictionary explaining why not
+    """
+    try:
+        media_preview.validate_max_dimension(max_dimension)
+    except media_preview.PreviewError as exc:
+        return {"success": False, "message": str(exc)}
+
+    file_path = whatsapp_download_media(message_id, chat_jid)
+    if not file_path:
+        return {"success": False, "message": "Failed to download media"}
+
+    with tempfile.TemporaryDirectory() as work_dir:
+        try:
+            data, image_format = media_preview.render_preview(file_path, max_dimension=max_dimension, work_dir=work_dir)
+        except media_preview.PreviewError as exc:
+            return {"success": False, "message": str(exc), "file_path": file_path}
+
+    return Image(data=data, format=image_format)
 
 
 @mcp.tool()

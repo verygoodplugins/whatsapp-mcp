@@ -286,12 +286,33 @@ Converted audio is sent through the same media-path confinement as
 
 #### `download_media`
 
-Download media from a received message.
+Download media from a received message. Returns the **local file path**, which
+only helps a client that can read the filesystem — use `view_media` otherwise.
 
 **Parameters:**
 
 - `message_id` (required): ID of the message with media
 - `chat_jid` (required): JID of the chat containing the message
+
+#### `view_media`
+
+View the media of a message as an image, for clients with no filesystem access
+(Claude Desktop, a claude.ai chat). Images are returned as image content;
+a video returns its first frame as a still. Both are downscaled first so one
+photo cannot flood the context. Audio is rejected with a pointer to its
+transcript.
+
+Uses FFmpeg when available (already an optional dependency); without it, images
+below 4 MB are returned unchanged and anything else reports what is missing.
+
+**Parameters:**
+
+- `message_id` (required): ID of the message with media
+- `chat_jid` (required): JID of the chat containing the message
+- `max_dimension` (optional): longest edge in pixels, default `1024`
+
+`max_dimension` must be an integer from `1` to `2048`. Invalid values are
+rejected before the server downloads or renders any media.
 
 #### `transcribe_audio`
 
