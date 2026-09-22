@@ -198,7 +198,8 @@ def list_messages(
         sort_by: "newest" (default, most recent first) or "oldest" (chronological)
     """
     # Cap limit at 500 to prevent excessive queries
-    limit = min(limit, 500)
+    limit = max(1, min(limit, 500))
+    page = max(0, page)
     messages = whatsapp_list_messages(
         after=after,
         before=before,
@@ -240,7 +241,8 @@ def list_chats(
         already read on the phone are not reported as unread.
     """
     # Cap limit at 200 to prevent excessive queries
-    limit = min(limit, 200)
+    limit = max(1, min(limit, 200))
+    page = max(0, page)
     chats = whatsapp_list_chats(
         query=query, limit=limit, page=page, include_last_message=include_last_message, sort_by=sort_by
     )
@@ -282,6 +284,8 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
     """
+    limit = max(1, min(limit, 200))
+    page = max(0, page)
     chats = whatsapp_get_contact_chats(jid, limit, page)
     return chats
 
