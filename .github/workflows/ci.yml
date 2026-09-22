@@ -48,11 +48,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          go-version: '1.26'
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.7.1
+          version: v2.12.2
           working-directory: whatsapp-bridge
 
   go-build:
@@ -62,7 +62,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.25'
+          go-version: '1.26'
       - name: Build
         run: |
           cd whatsapp-bridge
