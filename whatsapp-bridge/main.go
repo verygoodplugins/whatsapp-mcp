@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
 	"mime"
@@ -833,7 +834,12 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id, chat_jid) DO UPDATE SET
 			sender = excluded.sender,
-			content = excluded.content,
+			content = CASE
+				WHEN excluded.media_type = 'audio' AND excluded.content = ''
+					AND messages.media_type = 'audio' AND messages.content LIKE '[transcript (%'
+				THEN messages.content
+				ELSE excluded.content
+			END,
 			timestamp = excluded.timestamp,
 			is_from_me = excluded.is_from_me,
 			media_type = excluded.media_type,
@@ -2697,6 +2703,52 @@ func webhookStartupMessage(forwardSelf bool) string {
 	return "FORWARD_SELF disabled: self messages will NOT be forwarded"
 }
 
+// pairingQROutcome reports how a pairing QR channel ended.
+type pairingQROutcome int
+
+const (
+	// pairingQRChannelClosed means the channel drained without a verdict.
+	pairingQRChannelClosed pairingQROutcome = iota
+	// pairingQRSucceeded means the phone completed the handshake.
+	pairingQRSucceeded
+	// pairingQRTimedOut means the server ran out of codes to offer.
+	pairingQRTimedOut
+)
+
+// renderPairingQRCodes drains a pairing QR channel and writes every code the
+// server offers to w, delegating the actual rendering to renderQR.
+//
+// Every code has to be rendered, not just the first one. Since WhatsApp's 2026
+// companion-registration change the server answers a scan with a
+// companion_reg_refresh notification; whatsmeow then rotates the ADV secret
+// and emits a fresh code, and only that rotated code can still complete the
+// handshake. Showing just the first code leaves a stale one on screen, so
+// every later scan is validated against a secret the server has already
+// dropped and the phone reports "check your connection" while pairing never
+// completes.
+func renderPairingQRCodes(qrChan <-chan whatsmeow.QRChannelItem, w io.Writer, renderQR func(code string, w io.Writer)) pairingQROutcome {
+	codes := 0
+	for evt := range qrChan {
+		switch evt.Event {
+		case "code":
+			codes++
+			// Terminal output is best-effort; keep draining pairing events if a write fails.
+			if codes == 1 {
+				_, _ = fmt.Fprintln(w, "\nScan this QR code with your WhatsApp app:")
+			} else {
+				_, _ = fmt.Fprintf(w, "\nQR code refreshed (#%d) - scan this one instead:\n", codes)
+			}
+			renderQR(evt.Code, w)
+			_, _ = fmt.Fprintln(w, "\nWaiting for QR code scan...")
+		case "success":
+			return pairingQRSucceeded
+		case "timeout":
+			return pairingQRTimedOut
+		}
+	}
+	return pairingQRChannelClosed
+}
+
 func main() {
 	flag.Parse()
 
@@ -3016,23 +3068,15 @@ func main() {
 				continue
 			}
 
-			// Print QR code for pairing with phone
-			qrCodeShown := false
-			for evt := range qrChan {
-				if evt.Event == "code" {
-					if !qrCodeShown {
-						fmt.Println("\nScan this QR code with your WhatsApp app:")
-						qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-						fmt.Println("\nWaiting for QR code scan...")
-						qrCodeShown = true
-					}
-				} else if evt.Event == "success" {
-					connected <- true
-					break
-				} else if evt.Event == "timeout" {
-					logger.Warnf("QR code timed out")
-					break
-				}
+			// Print QR codes for pairing with the phone.
+			switch renderPairingQRCodes(qrChan, os.Stdout, func(code string, w io.Writer) {
+				qrterminal.GenerateHalfBlock(code, qrterminal.L, w)
+			}) {
+			case pairingQRSucceeded:
+				connected <- true
+			case pairingQRTimedOut:
+				logger.Warnf("QR code timed out")
+			case pairingQRChannelClosed:
 			}
 
 			// Wait for connection with timeout

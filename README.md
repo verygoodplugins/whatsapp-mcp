@@ -3,7 +3,7 @@
 [![CI](https://github.com/verygoodplugins/whatsapp-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/verygoodplugins/whatsapp-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Go 1.25+](https://img.shields.io/badge/go-1.25+-00ADD8.svg)](https://go.dev/)
+[![Go 1.26+](https://img.shields.io/badge/go-1.26+-00ADD8.svg)](https://go.dev/)
 
 A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and send WhatsApp messages.
 
@@ -32,7 +32,7 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 
 ### Prerequisites
 
-- Go 1.25+
+- Go 1.26+
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) package manager
 - Claude Desktop or Cursor
@@ -289,6 +289,55 @@ Download media from a received message.
 
 - `message_id` (required): ID of the message with media
 - `chat_jid` (required): JID of the chat containing the message
+
+#### `transcribe_audio`
+
+Transcribe a voice note with whisper.cpp (the default) or an OpenAI-compatible
+endpoint and return its text. The transcript is also written into the message's
+empty `content` field, so afterwards it is readable through `list_messages`
+by any client — including one with no filesystem access — without transcribing
+again. whisper.cpp runs entirely on this machine; the HTTP provider sends audio
+to the endpoint you configure. Use a loopback URL to keep transcription local.
+
+A stored transcript is returned immediately; a fresh one took about 2 s for a
+30-second note with `large-v3-turbo` on an M-series Mac. Transcripts are
+prefixed with `[transcript (whisper <model>)]` or
+`[transcript (openai_compatible <model>)]` so they cannot be mistaken for
+text a human typed, and a real message is never overwritten.
+
+**Requirements:** [whisper.cpp](https://github.com/ggerganov/whisper.cpp)
+(`whisper-cli` on `PATH`), FFmpeg, and `WHISPER_MODEL` pointing at a model
+file. Optionally `WHISPER_LANGUAGE` (default `auto`).
+
+To reuse an existing service, such as a local Parakeet server, configure:
+
+```env
+WHATSAPP_TRANSCRIPTION_PROVIDER=openai_compatible
+WHATSAPP_TRANSCRIPTION_URL=http://127.0.0.1:8178/v1/audio/transcriptions
+WHATSAPP_TRANSCRIPTION_MODEL=parakeet
+```
+
+`WHATSAPP_TRANSCRIPTION_PROVIDER` defaults to `whisper_cpp`. For
+`openai_compatible`, URL and MODEL are required. URL is the **full endpoint**;
+no path is appended. Optional `WHATSAPP_TRANSCRIPTION_API_KEY` supplies a bearer
+token, and `WHATSAPP_TRANSCRIPTION_LANGUAGE` supplies a language code (`auto`
+by default, omitted from the HTTP request). This provider uploads the original
+audio using multipart `file`, `model`, and `response_format=json`; the server
+must decode it (including WhatsApp Opus/OGG) and return `{"text": "..."}`.
+It requires no local whisper.cpp, model file, or FFmpeg. Remote URLs send audio
+off the machine; redirects, environment proxies, `.netrc` credentials, and
+automatic provider fallbacks are disabled.
+HTTP connections time out after 10 seconds, HTTP reads and Whisper inference
+after 300 seconds, and local FFmpeg decoding after 60 seconds.
+
+Stored transcripts are reused across provider changes unless `force=true`.
+Cache reads and writes use both message ID and chat JID.
+
+**Parameters:**
+
+- `message_id` (required): ID of the message with the voice note
+- `chat_jid` (required): JID of the chat containing the message
+- `force` (optional): transcribe again even when a transcript is stored
 
 ### Chat Operations
 
@@ -773,6 +822,11 @@ are documented in [docs/RELEASING.md](docs/RELEASING.md).
   supported linked-device client version, which can make older whatsmeow builds
   fail before pairing completes.
 - **QR Code Not Displaying**: Restart the bridge. Check terminal QR code support.
+- **Phone says "check your connection" after scanning**: WhatsApp answers a scan
+  with a `companion_reg_refresh` notification, whatsmeow rotates the pairing
+  secret, and the bridge prints a **new** QR code marked `QR code refreshed`.
+  Scan that one — the earlier code is dead at that point. Needs a whatsmeow
+  build from 2026-09-15 or later; older ones never emit the rotated code.
 - **Device Limit Reached**: Remove a linked device from WhatsApp Settings > Linked Devices.
 - **No Messages Loading**: Initial sync can take several minutes for large chat histories.
 - **Out of Sync**: Back up `whatsapp-bridge/store`, then move
