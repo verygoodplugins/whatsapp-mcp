@@ -2885,7 +2885,7 @@ func TestDownloadMediaCreatesOwnerOnlyMediaPath(t *testing.T) {
 	}
 
 	originalDownload := downloadMediaData
-	downloadMediaData = func(_ *whatsmeow.Client, _ *MediaDownloader) ([]byte, error) {
+	downloadMediaData = func(_ context.Context, _ *whatsmeow.Client, _ *MediaDownloader) ([]byte, error) {
 		return []byte("private media"), nil
 	}
 	t.Cleanup(func() { downloadMediaData = originalDownload })
