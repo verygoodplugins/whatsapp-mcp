@@ -259,6 +259,12 @@ When webhook forwarding is enabled, inbound reactions are also posted to `WEBHOO
 
 Send a media file (image, video, document).
 
+Successfully sent attachments retain their download metadata in local history.
+Use their message ID and chat JID with `download_media` to retrieve the uploaded
+bytes again while WhatsApp still serves the attachment. This also applies to
+voice messages sent with `send_audio_message`. It does not backfill metadata for
+attachments sent by older bridge versions or prevent WhatsApp media expiry.
+
 **Parameters:**
 
 - `recipient` (required): Phone number or group JID
