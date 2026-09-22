@@ -2790,6 +2790,7 @@ func TestNewMessageStoreCreatesMessagesChatJIDIndex(t *testing.T) {
 		t.Fatalf("NewMessageStore() failed: %v", err)
 	}
 	defer func() { _ = ms.Close() }()
+	assertPermissionBits(t, "store", 0o700)
 
 	var count int
 	if err := ms.db.QueryRow(
@@ -2799,6 +2800,67 @@ func TestNewMessageStoreCreatesMessagesChatJIDIndex(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected idx_messages_chat_jid to exist, found %d", count)
+	}
+}
+
+func TestEnsureOwnerOnlyDirectoryLeavesExistingPermissionsUntouched(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "existing")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("create existing directory: %v", err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatalf("set existing directory permissions: %v", err)
+	}
+
+	if err := ensureOwnerOnlyDirectory(path); err != nil {
+		t.Fatalf("ensureOwnerOnlyDirectory(%q): %v", path, err)
+	}
+	assertPermissionBits(t, path, 0o755)
+}
+
+func TestDownloadMediaCreatesOwnerOnlyMediaPath(t *testing.T) {
+	t.Chdir(t.TempDir())
+	messageStore := newTestMessageStore(t)
+	chatJID := "15551234567@s.whatsapp.net"
+	messageID := "media-message"
+	timestamp := time.Date(2026, time.September, 23, 12, 0, 0, 0, time.UTC)
+	if err := messageStore.StoreChat(chatJID, "", timestamp); err != nil {
+		t.Fatalf("store chat: %v", err)
+	}
+	if err := messageStore.StoreMessage(
+		messageID, chatJID, "15557654321@s.whatsapp.net", "", timestamp, false,
+		"image", "", "https://example.invalid/media", []byte("media-key"),
+		make([]byte, 32), make([]byte, 32), 1, "",
+	); err != nil {
+		t.Fatalf("store media message: %v", err)
+	}
+
+	originalDownload := downloadMediaData
+	downloadMediaData = func(_ *whatsmeow.Client, _ *MediaDownloader) ([]byte, error) {
+		return []byte("private media"), nil
+	}
+	t.Cleanup(func() { downloadMediaData = originalDownload })
+
+	success, _, _, mediaPath, err := downloadMedia(nil, messageStore, messageID, chatJID)
+	if err != nil {
+		t.Fatalf("downloadMedia() failed: %v", err)
+	}
+	if !success {
+		t.Fatal("downloadMedia() returned success=false")
+	}
+
+	assertPermissionBits(t, filepath.Join("store", chatJID), 0o700)
+	assertPermissionBits(t, mediaPath, 0o600)
+}
+
+func assertPermissionBits(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %q: %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("permissions for %q = %04o, want %04o", path, got, want)
 	}
 }
 

@@ -894,6 +894,13 @@ go run .
 
 > **Caution**: As with many MCP servers, this is subject to [the lethal trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/). Prompt injection could lead to private data exfiltration. Use with awareness.
 
+On Unix-like systems, newly created bridge `store/` and per-chat media
+directories request owner-only permissions (`0700`), and newly downloaded media
+files request `0600`. This is local filesystem defense-in-depth; it does not
+encrypt data or protect it from privileged users, backups, or sync services.
+Existing directories and files retain their permissions: the bridge does not
+recursively change an existing store tree.
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
