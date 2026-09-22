@@ -1050,7 +1050,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = "<4.15" },
+    { name = "anyio", specifier = ">=4.14.2,<4.15" },
     { name = "cryptography", specifier = ">=48.0.1,<49" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.28.1,<2" },
