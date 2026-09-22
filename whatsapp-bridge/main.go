@@ -104,6 +104,57 @@ func writeOwnerOnlyFile(path string, data []byte) error {
 	return os.WriteFile(path, data, 0o600)
 }
 
+func validateStorePathComponent(name, value string) error {
+	if value == "" || value == "." || value == ".." || filepath.IsAbs(value) ||
+		filepath.Base(value) != value || strings.ContainsAny(value, `/\\`) {
+		return fmt.Errorf("invalid %s for media store path", name)
+	}
+	return nil
+}
+
+func pathWithin(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+func mediaDownloadStorePaths(chatJID, mediaType, messageID string, timestamp time.Time) (string, string, string, error) {
+	chatComponent := strings.ReplaceAll(chatJID, ":", "_")
+	if err := validateStorePathComponent("chat JID", chatComponent); err != nil {
+		return "", "", "", err
+	}
+	if err := validateStorePathComponent("message ID", messageID); err != nil {
+		return "", "", "", err
+	}
+	if err := validateStorePathComponent("media type", mediaType); err != nil {
+		return "", "", "", err
+	}
+
+	var ext string
+	switch mediaType {
+	case "image":
+		ext = ".jpg"
+	case "video":
+		ext = ".mp4"
+	case "audio":
+		ext = ".ogg"
+	case "sticker":
+		ext = ".webp"
+	}
+	filename := fmt.Sprintf("%s_%s_%s%s", mediaType, timestamp.Format("20060102_150405"), messageID, ext)
+
+	storeRoot, err := filepath.Abs("store")
+	if err != nil {
+		return "", "", "", fmt.Errorf("resolve media store path: %w", err)
+	}
+	chatDir := filepath.Join(storeRoot, chatComponent)
+	localPath := filepath.Join(chatDir, filename)
+	if !pathWithin(storeRoot, chatDir) || !pathWithin(storeRoot, localPath) {
+		return "", "", "", errors.New("media store path escapes store directory")
+	}
+
+	return chatDir, localPath, filename, nil
+}
+
 // Initialize message store
 func NewMessageStore() (*MessageStore, error) {
 	// Create directory for database if it doesn't exist. Owner-only (0700):
@@ -2198,27 +2249,12 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		return false, "", "", "", fmt.Errorf("not a media message")
 	}
 
-	// Rebuild filename from (timestamp, messageID) — must match extractMediaInfo.
-	// The message ID disambiguates two messages that arrive in the same second.
-	var ext string
-	switch mediaType {
-	case "image":
-		ext = ".jpg"
-	case "video":
-		ext = ".mp4"
-	case "audio":
-		ext = ".ogg"
-	case "sticker":
-		ext = ".webp"
-	case "document":
-		ext = ""
-	default:
-		ext = ""
+	// Rebuild the path from (timestamp, messageID) — it must match
+	// extractMediaInfo and remain inside store/ even for malformed IDs.
+	chatDir, localPath, filename, err := mediaDownloadStorePaths(chatJID, mediaType, messageID, timestamp)
+	if err != nil {
+		return false, "", "", "", err
 	}
-	filename := fmt.Sprintf("%s_%s_%s%s", mediaType, timestamp.Format("20060102_150405"), messageID, ext)
-
-	// First, check if we already have this file
-	chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
 
 	// Create directory for the chat if it doesn't exist. Owner-only (0700):
 	// downloaded media can include private images/documents/voice notes.
@@ -2226,14 +2262,8 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		return false, "", "", "", fmt.Errorf("failed to create chat directory: %v", err)
 	}
 
-	// Generate a local path for the file
-	localPath := fmt.Sprintf("%s/%s", chatDir, filename)
-
-	// Get absolute path
-	absPath, err := filepath.Abs(localPath)
-	if err != nil {
-		return false, "", "", "", fmt.Errorf("failed to get absolute path: %v", err)
-	}
+	// mediaDownloadStorePaths returns an absolute, store-confined path.
+	absPath := localPath
 
 	// Check if file already exists
 	if _, err := os.Stat(localPath); err == nil {

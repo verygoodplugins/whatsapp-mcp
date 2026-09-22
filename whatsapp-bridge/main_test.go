@@ -2819,6 +2819,54 @@ func TestEnsureOwnerOnlyDirectoryLeavesExistingPermissionsUntouched(t *testing.T
 	assertPermissionBits(t, path, 0o755)
 }
 
+func TestMediaDownloadStorePathsPreserveStandardJIDs(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	timestamp := time.Date(2026, time.September, 23, 12, 0, 0, 0, time.UTC)
+
+	for _, chatJID := range []string{
+		"15551234567@s.whatsapp.net",
+		"123456789@lid",
+		"120363000000000000@g.us",
+	} {
+		t.Run(chatJID, func(t *testing.T) {
+			chatDir, mediaPath, filename, err := mediaDownloadStorePaths(chatJID, "image", "media-message", timestamp)
+			if err != nil {
+				t.Fatalf("mediaDownloadStorePaths() error: %v", err)
+			}
+			if want := filepath.Join(root, "store", chatJID); chatDir != want {
+				t.Fatalf("chat directory = %q, want %q", chatDir, want)
+			}
+			if want := filepath.Join(chatDir, "image_20260923_120000_media-message.jpg"); mediaPath != want || filename != filepath.Base(want) {
+				t.Fatalf("media path = (%q, %q), want (%q, %q)", mediaPath, filename, want, filepath.Base(want))
+			}
+		})
+	}
+}
+
+func TestMediaDownloadStorePathsRejectTraversalIdentifiers(t *testing.T) {
+	t.Chdir(t.TempDir())
+	timestamp := time.Date(2026, time.September, 23, 12, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name      string
+		chatJID   string
+		messageID string
+	}{
+		{name: "chat parent traversal", chatJID: "../outside", messageID: "media-message"},
+		{name: "chat absolute path", chatJID: "/tmp/outside", messageID: "media-message"},
+		{name: "message parent traversal", chatJID: "15551234567@s.whatsapp.net", messageID: "../outside"},
+		{name: "message nested traversal", chatJID: "15551234567@s.whatsapp.net", messageID: "nested/../../outside"},
+		{name: "message windows traversal", chatJID: "15551234567@s.whatsapp.net", messageID: `..\\outside`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, _, err := mediaDownloadStorePaths(tc.chatJID, "image", tc.messageID, timestamp); err == nil {
+				t.Fatal("expected traversal identifier to be rejected")
+			}
+		})
+	}
+}
+
 func TestDownloadMediaCreatesOwnerOnlyMediaPath(t *testing.T) {
 	t.Chdir(t.TempDir())
 	messageStore := newTestMessageStore(t)
