@@ -774,15 +774,6 @@ Caveats:
 - **Only effective on a fresh pair.** With `whatsapp.db` already present, no new pair handshake fires and the flag is a no-op.
 - **Messages the phone has deleted are not recoverable** — auto-expire, low-storage cleanup, and manual delete all leave no trace for the phone to share.
 
-### Expired attachment downloads
-
-When a stored attachment link returns HTTP 403, 404, or 410, the bridge asks
-your primary phone to refresh that attachment, saves the renewed download path,
-and retries once. Keep the phone online with WhatsApp available. The request
-has a 50-second total timeout; a phone that no longer has the attachment may
-report it unavailable. This recovery uses the existing linked-device session
-and does not send a chat message or require re-pairing.
-
 ### Requesting history for a single chat (on-demand)
 
 `--full-history-pair` only applies to a fresh pair, so recovering a gap in one
