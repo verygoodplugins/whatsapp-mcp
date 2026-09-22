@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -104,7 +105,7 @@ func TestMediaRefreshUnavailableAndTimeout(t *testing.T) {
 }
 
 func TestMediaRefreshRetryBoundAndInvalidPath(t *testing.T) {
-	for _, path := range []string{"/fresh?token=example", "", "https://example.com", "//example.com"} {
+	for _, path := range []string{"/fresh?token=example", "", "https://example.com", "//example.com", "/bad%zz", "/bad\npath", "/bad#fragment", "/\\example.com"} {
 		calls, saves := 0, 0
 		_, err := downloadWithRefresh(context.Background(), &MediaDownloader{}, func(context.Context, *MediaDownloader) ([]byte, error) {
 			calls++
@@ -152,5 +153,157 @@ func TestMediaRefreshMatchesPhoneAndLIDAliases(t *testing.T) {
 	}
 	if len(manager.waiters) != 0 {
 		t.Fatal("waiter leaked")
+	}
+}
+
+func encryptedMediaResponse(t *testing.T, info *types.MessageInfo, key []byte, result waMmsRetry.MediaRetryNotification_ResultType) *events.MediaRetry {
+	t.Helper()
+	plain, err := proto.Marshal(&waMmsRetry.MediaRetryNotification{Result: result.Enum(), DirectPath: proto.String("/fresh?oe=valid")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	iv := make([]byte, 12)
+	ciphertext, err := gcmutil.Encrypt(hkdfutil.SHA256(key, nil, []byte("WhatsApp Media Retry Notification"), 32), iv, plain, []byte(info.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &events.MediaRetry{MessageID: info.ID, ChatID: info.Chat, FromMe: info.IsFromMe, IV: iv, Ciphertext: ciphertext}
+}
+
+func TestMediaRefreshRejectsInvalidPhoneResponse(t *testing.T) {
+	info := &types.MessageInfo{MessageSource: types.MessageSource{Chat: types.NewJID("123", types.DefaultUserServer)}, ID: "test"}
+	key := []byte("01234567890123456789012345678901")
+	for _, kind := range []string{"bad-iv", "tampered", "wrong-key", "unavailable"} {
+		t.Run(kind, func(t *testing.T) {
+			manager := &mediaRefreshManager{}
+			evt := encryptedMediaResponse(t, info, key, waMmsRetry.MediaRetryNotification_SUCCESS)
+			switch kind {
+			case "bad-iv":
+				evt.IV = []byte{1}
+			case "tampered":
+				evt.Ciphertext[0] ^= 1
+			case "wrong-key":
+				evt = encryptedMediaResponse(t, info, []byte("another key"), waMmsRetry.MediaRetryNotification_SUCCESS)
+			case "unavailable":
+				evt = encryptedMediaResponse(t, info, key, waMmsRetry.MediaRetryNotification_NOT_FOUND)
+			}
+			path, err := manager.request(context.Background(), info, key, func(context.Context, *types.MessageInfo, []byte) error {
+				manager.handleEvent(evt)
+				return nil
+			})
+			if err == nil || path != "" {
+				t.Fatal("accepted an invalid phone response")
+			}
+			if len(manager.waiters) != 0 {
+				t.Fatal("waiter leaked")
+			}
+		})
+	}
+}
+
+func TestMediaRefreshConcurrentWaiters(t *testing.T) {
+	manager := &mediaRefreshManager{}
+	info := &types.MessageInfo{MessageSource: types.MessageSource{Chat: types.NewJID("123", types.DefaultUserServer)}, ID: "shared"}
+	key := []byte("01234567890123456789012345678901")
+	evt := encryptedMediaResponse(t, info, key, waMmsRetry.MediaRetryNotification_SUCCESS)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	canceled, cancelOne := context.WithCancel(ctx)
+	defer cancelOne()
+	const callers = 8
+	ready := make(chan struct{}, callers)
+	canceledDone := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Go(func() {
+			requestCtx := ctx
+			if i == 0 {
+				requestCtx = canceled
+				defer close(canceledDone)
+			}
+			path, err := manager.request(requestCtx, info, key, func(context.Context, *types.MessageInfo, []byte) error {
+				ready <- struct{}{}
+				return nil
+			})
+			if i == 0 {
+				if !errors.Is(err, context.Canceled) {
+					t.Errorf("canceled request returned %v", err)
+				}
+			} else if err != nil || path != "/fresh?oe=valid" {
+				t.Errorf("shared response was not delivered: %v", err)
+			}
+		})
+	}
+	for range callers {
+		select {
+		case <-ready:
+		case <-ctx.Done():
+			t.Fatal("requests did not subscribe")
+		}
+	}
+	cancelOne()
+	<-canceledDone
+	manager.handleEvent(evt)
+	manager.handleEvent(evt)
+	wg.Wait()
+	if len(manager.waiters) != 0 {
+		t.Fatal("waiter leaked")
+	}
+	manager.handleEvent(evt) // Late replies after cleanup are harmless.
+}
+
+func TestMediaRefreshSendFailureAndDeadline(t *testing.T) {
+	info := &types.MessageInfo{MessageSource: types.MessageSource{Chat: types.NewJID("123", types.DefaultUserServer)}, ID: "test"}
+	for _, sendFailure := range []bool{false, true} {
+		manager := &mediaRefreshManager{}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		want := context.DeadlineExceeded
+		if sendFailure {
+			want = errors.New("send failed")
+		}
+		_, err := manager.request(ctx, info, nil, func(context.Context, *types.MessageInfo, []byte) error {
+			if sendFailure {
+				return want
+			}
+			return nil
+		})
+		cancel()
+		if !errors.Is(err, want) || len(manager.waiters) != 0 {
+			t.Fatalf("request error=%v waiters=%d", err, len(manager.waiters))
+		}
+	}
+}
+
+func TestMediaRefreshSharedDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	calls := 0
+	_, err := downloadWithRefresh(ctx, &MediaDownloader{}, func(got context.Context, _ *MediaDownloader) ([]byte, error) {
+		if got != ctx {
+			t.Fatal("download replaced the request deadline")
+		}
+		calls++
+		return nil, whatsmeow.ErrMediaDownloadFailedWith410
+	}, func(got context.Context) (string, error) {
+		if got != ctx {
+			t.Fatal("refresh replaced the request deadline")
+		}
+		cancel()
+		return "/fresh?oe=valid", nil
+	}, func(string) error { t.Fatal("persisted after cancellation"); return nil })
+	if !errors.Is(err, context.Canceled) || calls != 1 {
+		t.Fatalf("error=%v downloads=%d", err, calls)
+	}
+}
+
+func TestMediaRefreshPersistFailure(t *testing.T) {
+	want := errors.New("write failed")
+	calls := 0
+	_, err := downloadWithRefresh(context.Background(), &MediaDownloader{}, func(context.Context, *MediaDownloader) ([]byte, error) {
+		calls++
+		return nil, whatsmeow.ErrMediaDownloadFailedWith404
+	}, func(context.Context) (string, error) { return "/fresh?oe=valid", nil }, func(string) error { return want })
+	if !errors.Is(err, want) || calls != 1 {
+		t.Fatalf("error=%v downloads=%d", err, calls)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -15,20 +16,33 @@ import (
 
 // Retry expired CDN links once using a path reissued by the primary phone.
 func downloadWithRefresh(ctx context.Context, media *MediaDownloader, download func(context.Context, *MediaDownloader) ([]byte, error), refresh func(context.Context) (string, error), persist func(string) error) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	data, err := download(ctx, media)
 	if !errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith403) && !errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith404) && !errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith410) {
 		return data, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	path, err := refresh(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("refresh expired media: %w", err)
 	}
-	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	_, pathErr := url.ParseRequestURI(path)
+	if pathErr != nil || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.ContainsAny(path, "\\#") {
 		return nil, errors.New("phone returned an invalid media path")
 	}
-	// Save the refreshed path even if this particular download is interrupted.
+	// Preserve the renewed path even if the subsequent download fails.
 	if err = persist(path); err != nil {
 		return nil, fmt.Errorf("save refreshed media path: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	media.DirectPath, media.URL = path, ""
 	return download(ctx, media)
@@ -58,7 +72,7 @@ func (m *mediaRefreshManager) chatKey(chat types.JID) string {
 
 func (m *mediaRefreshManager) handleEvent(raw any) {
 	evt, ok := raw.(*events.MediaRetry)
-	if !ok {
+	if !ok || evt == nil {
 		return
 	}
 	key := mediaRefreshKey{m.chatKey(evt.ChatID), evt.MessageID, evt.FromMe}
@@ -73,6 +87,9 @@ func (m *mediaRefreshManager) handleEvent(raw any) {
 }
 
 func (m *mediaRefreshManager) request(ctx context.Context, info *types.MessageInfo, mediaKey []byte, send func(context.Context, *types.MessageInfo, []byte) error) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	key := mediaRefreshKey{m.chatKey(info.Chat), info.ID, info.IsFromMe}
 	ch := make(chan *events.MediaRetry, 1)
 	m.mu.Lock()
@@ -100,6 +117,14 @@ func (m *mediaRefreshManager) request(ctx context.Context, info *types.MessageIn
 	case <-ctx.Done():
 		return "", fmt.Errorf("phone did not refresh the attachment in time; keep WhatsApp online and retry: %w", ctx.Err())
 	case evt := <-ch:
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		// whatsmeow delegates to GCM.Open, which panics on a malformed nonce.
+		// Unencrypted error responses have no IV and remain valid failures.
+		if (evt.Error == nil || evt.Ciphertext != nil) && len(evt.IV) != 12 {
+			return "", errors.New("phone returned an invalid media retry notification")
+		}
 		notif, err := whatsmeow.DecryptMediaRetryNotification(evt, mediaKey)
 		if err != nil {
 			return "", err
