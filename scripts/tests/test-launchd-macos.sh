@@ -109,6 +109,17 @@ printf 'launchctl %s\n' "$*" >> "$FAKE_CMD_LOG"
 if [ "${1:-}" = "print" ] && [ "${FAKE_LAUNCHCTL_PRINT_FAIL:-0}" = "1" ]; then
   exit 1
 fi
+# Simulate the bridge writing its auth token on first start (kickstart of the
+# bridge label, not the -monitor label) so the installer can capture it.
+if [ "${1:-}" = "kickstart" ]; then
+  case "$*" in
+    *com.whatsapp-mcp.bridge)
+      if [ -d "whatsapp-bridge/store" ] && [ ! -e "whatsapp-bridge/store/.bridge-token" ]; then
+        printf 'faketoken1234567890\n' > "whatsapp-bridge/store/.bridge-token"
+      fi
+      ;;
+  esac
+fi
 exit 0
 EOF
 
@@ -158,11 +169,13 @@ run_uninstaller() {
 run_monitor() {
   local tmp="$1"
   local response="$2"
+  local http_status="${3:-200}"
   HOME="$tmp/home" \
   PATH="$tmp/fakebin:/usr/bin:/bin" \
   FAKE_CMD_LOG="$tmp/cmd.log" \
   FAKE_NOTIFY_LOG="$tmp/notify.log" \
   FAKE_CURL_RESPONSE="$response" \
+  FAKE_CURL_STATUS="$http_status" \
   "$tmp/home/Library/Application Support/whatsapp-mcp/monitor-whatsapp-bridge.sh"
 }
 
@@ -215,7 +228,7 @@ test_install_preserves_optional_env_values() {
     WEBHOOK_URL="http://127.0.0.1:8769/whatsapp/webhook" \
     WEBHOOK_ENABLED="false" \
     FORWARD_SELF="true" \
-    WHATSAPP_BRIDGE_TOKEN="test token with spaces" \
+    WHATSAPP_BRIDGE_TOKEN="test token with spaces and 'quotes'" \
     WHATSAPP_MEDIA_ROOTS="/tmp/outbox:/tmp/other outbox" \
     ./scripts/install-launchd-macos.sh
   )
@@ -226,7 +239,8 @@ test_install_preserves_optional_env_values() {
   assert_contains "$support/launchd.env" "export WEBHOOK_URL='http://127.0.0.1:8769/whatsapp/webhook'"
   assert_contains "$support/launchd.env" "export WEBHOOK_ENABLED='false'"
   assert_contains "$support/launchd.env" "export FORWARD_SELF='true'"
-  assert_contains "$support/launchd.env" "export WHATSAPP_BRIDGE_TOKEN='test token with spaces'"
+  run_monitor "$tmp" '{"status":"ok","connected":true}'
+  assert_contains "$tmp/cmd.log" "Authorization: Bearer test token with spaces and 'quotes'"
   assert_contains "$support/launchd.env" "export WHATSAPP_MEDIA_ROOTS='/tmp/outbox:/tmp/other outbox'"
 }
 
@@ -270,11 +284,97 @@ test_monitor_alerts_once_and_clears_on_recovery() {
   assert_not_exists "$state/relink.alerted"
 }
 
+test_install_persists_token_to_env() {
+  local tmp support mode
+  tmp="$(make_fixture)"
+  run_installer "$tmp"
+  support="$tmp/home/Library/Application Support/whatsapp-mcp"
+
+  # The fake launchctl writes a token on bridge kickstart; the installer must
+  # capture it into launchd.env so the monitor never needs the token file (#249).
+  assert_contains "$support/launchd.env" "export WHATSAPP_BRIDGE_TOKEN="
+  # launchd.env must stay owner-only (0600).
+  mode="$(stat -f '%Lp' "$support/launchd.env" 2>/dev/null || stat -c '%a' "$support/launchd.env")"
+  [[ "$mode" == "600" ]] || fail "launchd.env mode is $mode, expected 600"
+}
+
+test_monitor_survives_denied_token_read() {
+  local tmp support state token_file rc
+  tmp="$(make_fixture)"
+  run_installer "$tmp"
+  support="$tmp/home/Library/Application Support/whatsapp-mcp"
+  state="$support/state"
+
+  # Force the monitor down the token-file path by dropping the captured env token.
+  "$GREP_BIN" -v 'WHATSAPP_BRIDGE_TOKEN' "$support/launchd.env" > "$support/launchd.env.new"
+  mv "$support/launchd.env.new" "$support/launchd.env"
+
+  # A readable token file whose *read* is denied at runtime: the [[ -r ]] test
+  # passes but the open()/read fails. Stub `tr` to exit non-zero to reproduce
+  # the failing command substitution that previously aborted the monitor (#249).
+  token_file="$tmp/repo/whatsapp-bridge/store/.bridge-token"
+  print -r -- "token-abcdefghijklmnop" > "$token_file"
+  cat > "$tmp/fakebin/tr" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+  chmod +x "$tmp/fakebin/tr"
+
+  rc=0
+  run_monitor "$tmp" '{"status":"ok","connected":true}' || rc=$?
+  [[ "$rc" == 0 ]] || fail "monitor aborted (exit $rc) on a denied token read"
+  assert_file "$state/token.alerted"
+}
+
+test_monitor_alerts_once_for_missing_token_and_clears_on_recovery() {
+  local tmp support state token_file
+  tmp="$(make_fixture)"
+  run_installer "$tmp"
+  support="$tmp/home/Library/Application Support/whatsapp-mcp"
+  state="$support/state"
+  token_file="$tmp/repo/whatsapp-bridge/store/.bridge-token"
+
+  "$GREP_BIN" -v 'WHATSAPP_BRIDGE_TOKEN' "$support/launchd.env" > "$support/launchd.env.new"
+  mv "$support/launchd.env.new" "$support/launchd.env"
+  rm -f "$token_file"
+
+  run_monitor "$tmp" '{"status":"ok","connected":true}'
+  run_monitor "$tmp" '{"status":"ok","connected":true}'
+  assert_line_count "$tmp/notify.log" 1
+  assert_file "$state/token.alerted"
+
+  print -r -- "token-abcdefghijklmnop" > "$token_file"
+  run_monitor "$tmp" '{"status":"ok","connected":true}'
+  assert_line_count "$tmp/notify.log" 1
+  assert_not_exists "$state/token.alerted"
+}
+
+test_monitor_alerts_once_for_invalid_token_and_clears_on_recovery() {
+  local tmp support state
+  tmp="$(make_fixture)"
+  run_installer "$tmp"
+  support="$tmp/home/Library/Application Support/whatsapp-mcp"
+  state="$support/state"
+
+  run_monitor "$tmp" '{"error":"unauthorized"}' 401
+  run_monitor "$tmp" '{"error":"unauthorized"}' 401
+  assert_line_count "$tmp/notify.log" 1
+  assert_file "$state/token.alerted"
+
+  run_monitor "$tmp" '{"status":"ok","connected":true}'
+  assert_line_count "$tmp/notify.log" 1
+  assert_not_exists "$state/token.alerted"
+}
+
 for test_name in \
   test_install_generates_launchd_files \
   test_install_preserves_optional_env_values \
+  test_install_persists_token_to_env \
   test_uninstall_removes_generated_files_only \
-  test_monitor_alerts_once_and_clears_on_recovery
+  test_monitor_alerts_once_and_clears_on_recovery \
+  test_monitor_survives_denied_token_read \
+  test_monitor_alerts_once_for_missing_token_and_clears_on_recovery \
+  test_monitor_alerts_once_for_invalid_token_and_clears_on_recovery
 do
   print -r -- "Running $test_name"
   "$test_name"

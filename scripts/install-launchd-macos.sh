@@ -171,14 +171,16 @@ clear_alert "down"
 
 TOKEN="\${WHATSAPP_BRIDGE_TOKEN:-}"
 if [[ -z "\$TOKEN" && -r "\$TOKEN_FILE" ]]; then
-  TOKEN="\$(tr -d '[:space:]' < "\$TOKEN_FILE")"
+  # A denied read (e.g. macOS TCC/sandbox blocking this LaunchAgent's open())
+  # must not abort the monitor under 'set -e'; '|| TOKEN=""' keeps the failing
+  # assignment out of set -e's reach so the alert below still fires (#249).
+  TOKEN="\$(tr -d '[:space:]' < "\$TOKEN_FILE" 2>/dev/null)" || TOKEN=""
 fi
 
 if [[ -z "\$TOKEN" ]]; then
-  alert_once "token" "WhatsApp Bridge Token Missing" "No WHATSAPP_BRIDGE_TOKEN is configured and \$TOKEN_FILE is unreadable."
+  alert_once "token" "WhatsApp Bridge Token Missing" "Could not read a bridge token. macOS may be blocking access to \$TOKEN_FILE; set WHATSAPP_BRIDGE_TOKEN or re-run scripts/install-launchd-macos.sh to store it in launchd.env."
   exit 0
 fi
-clear_alert "token"
 
 API_URL="\${WHATSAPP_API_URL%/}"
 response="\$(curl -sS -m 5 -H "Authorization: Bearer \$TOKEN" -w \$'\n%{http_code}' "\$API_URL/health" 2>/dev/null || true)"
@@ -196,6 +198,7 @@ if [[ "\$http_code" != "200" && "\$http_code" != "503" ]]; then
   alert_once "api" "WhatsApp Bridge API Unreachable" "Unexpected HTTP \$http_code from \$API_URL/health."
   exit 0
 fi
+clear_alert "token"
 clear_alert "api"
 
 connected=false
@@ -261,6 +264,36 @@ print -r -- "Loading whatsapp-mcp LaunchAgents..."
 launchctl bootstrap "$LAUNCHD_DOMAIN" "$BRIDGE_PLIST"
 launchctl enable "$LAUNCHD_DOMAIN/$BRIDGE_LABEL"
 launchctl kickstart -k "$LAUNCHD_DOMAIN/$BRIDGE_LABEL"
+
+# Persist the bridge token into launchd.env (already mode 600) so the monitor
+# reads it from the environment instead of store/.bridge-token. That file can
+# live inside a macOS TCC-protected location (e.g. ~/Documents), where a
+# per-user LaunchAgent shell may be denied the read and previously aborted the
+# monitor (#249). launchd.env lives under ~/Library/Application Support and is
+# not subject to that boundary. Skip when an explicit token was already
+# provided (written above). The bridge writes the token on first start, so wait
+# briefly for it to appear.
+if [[ -z "${WHATSAPP_BRIDGE_TOKEN:-}" ]]; then
+  token_src="$BRIDGE_DIR/store/.bridge-token"
+  captured=""
+  attempt=0
+  while (( attempt < 20 )); do
+    if [[ -e "$token_src" ]]; then
+      captured="$(tr -d '[:space:]' < "$token_src" 2>/dev/null || true)"
+      if [[ -n "$captured" ]]; then
+        break
+      fi
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.5
+  done
+  if [[ -n "$captured" ]]; then
+    write_export "WHATSAPP_BRIDGE_TOKEN" "$captured"
+    print -r -- "Stored bridge token in launchd.env for the monitor."
+  else
+    print -r -- "Note: no bridge token captured; the monitor will read $token_src directly (see #249 if it exits)." >&2
+  fi
+fi
 
 launchctl bootstrap "$LAUNCHD_DOMAIN" "$MONITOR_PLIST"
 launchctl enable "$LAUNCHD_DOMAIN/$MONITOR_LABEL"
