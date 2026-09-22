@@ -269,6 +269,9 @@ The bridge only reads files inside configured media roots. By default this is
 `~/.local/share/whatsapp-mcp/outbox`; set `WHATSAPP_MEDIA_ROOTS` to allow
 additional absolute directories.
 
+For documents, recipients receive only the filename portion of `file_path`;
+parent directories are not exposed.
+
 #### `send_audio_message`
 
 Send a voice message (automatically converts to Opus .ogg format).

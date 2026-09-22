@@ -171,11 +171,14 @@ func outboundFileName(mediaPath string) string {
 		name = name[i+1:]
 	}
 	// Drop a Windows drive prefix such as "C:" left behind by a bare
-	// "C:file.zip" style path, which has no separator at all.
-	if i := strings.LastIndex(name, ":"); i >= 0 {
-		name = name[i+1:]
+	// "C:file.zip" style path, which has no separator at all. Do not strip
+	// arbitrary colons: names such as "draft:v2.pdf" are valid on POSIX.
+	if len(mediaPath) >= 2 && mediaPath[1] == ':' &&
+		((mediaPath[0] >= 'A' && mediaPath[0] <= 'Z') || (mediaPath[0] >= 'a' && mediaPath[0] <= 'z')) &&
+		len(name) >= 2 && name[1] == ':' &&
+		((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z')) {
+		name = name[2:]
 	}
-	name = strings.TrimSpace(name)
 	if name == "" {
 		return "file"
 	}

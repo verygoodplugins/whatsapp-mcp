@@ -129,7 +129,7 @@ func TestResolveMediaRootsAcceptsEnvList(t *testing.T) {
 	}
 }
 
-func TestOutboundFileNameNeverLeaksThePath(t *testing.T) {
+func TestOutboundFileName(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
@@ -151,6 +151,21 @@ func TestOutboundFileNameNeverLeaksThePath(t *testing.T) {
 			want: "brief.zip",
 		},
 		{
+			name: "posix filename preserves colon",
+			in:   "/home/someone/outbox/draft:v2.pdf",
+			want: "draft:v2.pdf",
+		},
+		{
+			name: "posix filename resembling a drive prefix is preserved",
+			in:   "/home/someone/outbox/C:notes.pdf",
+			want: "C:notes.pdf",
+		},
+		{
+			name: "posix filename preserves surrounding spaces",
+			in:   "/home/someone/outbox/ draft v2.pdf ",
+			want: " draft v2.pdf ",
+		},
+		{
 			name: "mixed separators, as a hand-written path often is",
 			in:   `C:/Users/someone\outbox/brief.zip`,
 			want: "brief.zip",
@@ -159,6 +174,11 @@ func TestOutboundFileNameNeverLeaksThePath(t *testing.T) {
 			name: "bare name, already safe",
 			in:   "brief.zip",
 			want: "brief.zip",
+		},
+		{
+			name: "bare posix filename preserves colon",
+			in:   "draft:v2.pdf",
+			want: "draft:v2.pdf",
 		},
 		{
 			name: "drive-relative path with no separator at all",
@@ -179,8 +199,8 @@ func TestOutboundFileNameNeverLeaksThePath(t *testing.T) {
 				t.Fatalf("outboundFileName(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 			// The real invariant: nothing that identifies the machine or the
-			// user survives into the name, on any platform.
-			for _, leak := range []string{"Users", "home", "someone", ":", `\`, "/"} {
+			// user survives into the name, while valid filename characters stay intact.
+			for _, leak := range []string{"Users", "home", "someone", `\`, "/"} {
 				if strings.Contains(got, leak) {
 					t.Fatalf("outboundFileName(%q) = %q, leaks %q", tc.in, got, leak)
 				}
