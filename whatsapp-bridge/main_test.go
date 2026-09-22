@@ -1494,6 +1494,31 @@ func captureRawWebhook(t *testing.T) (*httptest.Server, <-chan map[string]any) {
 	return srv, ch
 }
 
+// TestHandleMessage_TextWebhookPreservesIncomingMessageID verifies the text
+// message handler forwards the native incoming ID for receiver-side
+// idempotency, rather than only testing the lower-level webhook serializer.
+func TestHandleMessage_TextWebhookPreservesIncomingMessageID(t *testing.T) {
+	srv, webhookCh := captureWebhook(t)
+	t.Setenv("WEBHOOK_URL", srv.URL)
+
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+	msg := buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "text webhook")
+	msg.Info.ID = "text-webhook-msg-220"
+
+	handleMessage(client, ms, msg, logger)
+
+	select {
+	case payload := <-webhookCh:
+		if payload.MessageID != msg.Info.ID {
+			t.Errorf("messageId = %q, want incoming ID %q", payload.MessageID, msg.Info.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for text webhook call")
+	}
+}
+
 // TestHandleMessage_ImageOnly_WebhookForwarded verifies that an image message
 // with no text caption is forwarded to the webhook endpoint (not silently
 // dropped), and that the webhook payload contains the expected media fields.
