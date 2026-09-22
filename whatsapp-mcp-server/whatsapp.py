@@ -1132,23 +1132,34 @@ def send_audio_message(recipient: str, media_path: str) -> tuple[bool, str]:
         if not os.path.isfile(media_path):
             return False, f"Media file not found: {media_path}"
 
+        converted_path: str | None = None
         if not media_path.endswith(".ogg"):
             try:
                 media_path = audio.convert_to_opus_ogg_temp(media_path)
+                converted_path = media_path
             except Exception as e:
                 return False, f"Error converting file to opus ogg. You likely need to install ffmpeg: {str(e)}"
 
-        url = f"{WHATSAPP_API_BASE_URL}/send"
-        payload = {"recipient": recipient, "media_path": media_path}
+        try:
+            url = f"{WHATSAPP_API_BASE_URL}/send"
+            payload = {"recipient": recipient, "media_path": media_path}
 
-        response = requests.post(url, json=payload, headers=_bridge_headers())
+            response = requests.post(url, json=payload, headers=_bridge_headers())
 
-        # Check if the request was successful
-        if response.status_code == 200:
-            result = response.json()
-            return result.get("success", False), result.get("message", "Unknown response")
-        else:
-            return False, f"Error: HTTP {response.status_code} - {response.text}"
+            # Check if the request was successful
+            if response.status_code == 200:
+                result = response.json()
+                return result.get("success", False), result.get("message", "Unknown response")
+            else:
+                return False, f"Error: HTTP {response.status_code} - {response.text}"
+        finally:
+            # The converted file is a NamedTemporaryFile(delete=False); remove it
+            # once the bridge has read it so every audio send doesn't leak an .ogg.
+            if converted_path:
+                try:
+                    os.unlink(converted_path)
+                except OSError:
+                    pass
 
     except requests.RequestException as e:
         return False, f"Request error: {str(e)}"
