@@ -135,6 +135,12 @@ func mediaDownloadStorePaths(chatJID, mediaType, messageID string, timestamp tim
 	if err := validateStorePathComponent("media type", mediaType); err != nil {
 		return "", "", "", err
 	}
+	// Keep filesystem inputs as explicit single components after rejecting malformed
+	// values above. filepath.Base is deliberately repeated here so the component
+	// boundary remains intrinsic at the filesystem construction site.
+	chatComponent = filepath.Base(chatComponent)
+	messageID = filepath.Base(messageID)
+	mediaType = filepath.Base(mediaType)
 
 	var ext string
 	switch mediaType {
