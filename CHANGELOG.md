@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0](https://github.com/verygoodplugins/whatsapp-mcp/compare/v0.6.0...v0.7.0) (2026-09-23)
+
+
+### Features
+
+* **bridge:** skip status media and add WHATSAPP_AUTO_DOWNLOAD_MEDIA opt-out ([#237](https://github.com/verygoodplugins/whatsapp-mcp/issues/237)) ([23a6cf9](https://github.com/verygoodplugins/whatsapp-mcp/commit/23a6cf9c3f77f5b51d445a56c5c21070d444921b))
+* **mcp:** add view_media so media is reachable without a filesystem ([#246](https://github.com/verygoodplugins/whatsapp-mcp/issues/246)) ([bfa2c08](https://github.com/verygoodplugins/whatsapp-mcp/commit/bfa2c08185d910cf11f457266fbbdbb2465994dc))
+* **mcp:** transcribe voice notes with configurable providers ([#247](https://github.com/verygoodplugins/whatsapp-mcp/issues/247)) ([b1c45b4](https://github.com/verygoodplugins/whatsapp-mcp/commit/b1c45b4dd79e5a756a0cc19174ec59aa81f860c0))
+
+
+### Bug Fixes
+
+* **bridge:** document filename leaked the sender's absolute path ([#218](https://github.com/verygoodplugins/whatsapp-mcp/issues/218)) ([143d7a7](https://github.com/verygoodplugins/whatsapp-mcp/commit/143d7a760c12a95b40e4e8f3c588a0d6cfe1f5f3))
+* **bridge:** guard resolveLIDChat against a client without a LID store ([#230](https://github.com/verygoodplugins/whatsapp-mcp/issues/230)) ([88ba809](https://github.com/verygoodplugins/whatsapp-mcp/commit/88ba8097c382bfe129add60377a8e5a242d00c9f))
+* **bridge:** keep launchd monitor alive when the token file read is denied ([#250](https://github.com/verygoodplugins/whatsapp-mcp/issues/250)) ([4e10737](https://github.com/verygoodplugins/whatsapp-mcp/commit/4e107371bb7b3b9bb304fa9db88f41cbec45d5af))
+* **bridge:** persist upload metadata for outbound media ([#221](https://github.com/verygoodplugins/whatsapp-mcp/issues/221)) ([9b82499](https://github.com/verygoodplugins/whatsapp-mcp/commit/9b824994e682b86457c5615c56c79919e1192dd0))
+* **bridge:** preserve message ID in text webhooks ([#220](https://github.com/verygoodplugins/whatsapp-mcp/issues/220)) ([e207fd3](https://github.com/verygoodplugins/whatsapp-mcp/commit/e207fd3f422914aeb55c1e905790ee730ca731bf))
+* **bridge:** render every rotated pairing QR code ([#243](https://github.com/verygoodplugins/whatsapp-mcp/issues/243)) ([0076aa4](https://github.com/verygoodplugins/whatsapp-mcp/commit/0076aa4cd87e152e76e9a39de52254e69c2f3007))
+* **bridge:** skip media downloads when the message row failed to store ([#231](https://github.com/verygoodplugins/whatsapp-mcp/issues/231)) ([8ee9cb6](https://github.com/verygoodplugins/whatsapp-mcp/commit/8ee9cb6f83e86f0f8ebcba4cb44c2cee4f38e6e2))
+* **bridge:** tighten store and media permissions to owner-only ([#241](https://github.com/verygoodplugins/whatsapp-mcp/issues/241)) ([a269163](https://github.com/verygoodplugins/whatsapp-mcp/commit/a2691635f0279bc82e23ae430fb33b3c2fa3857c))
+* **deps:** bump whatsmeow for companion registration ([#244](https://github.com/verygoodplugins/whatsapp-mcp/issues/244)) ([2de9d0a](https://github.com/verygoodplugins/whatsapp-mcp/commit/2de9d0a59793516aa45478be4e12932353aa1c56))
+* **mcp:** remove the converted audio temp file after send ([#227](https://github.com/verygoodplugins/whatsapp-mcp/issues/227)) ([5fc9df2](https://github.com/verygoodplugins/whatsapp-mcp/commit/5fc9df2eef6a17e4c7219dd3b74aaab51eee82a7))
+
+
+### Documentation
+
+* explain where runtime data is stored and how to relocate it ([#240](https://github.com/verygoodplugins/whatsapp-mcp/issues/240)) ([ce06368](https://github.com/verygoodplugins/whatsapp-mcp/commit/ce0636884732b3270ed18f285b5d15d72b4dd413))
+
 ## [0.6.0](https://github.com/verygoodplugins/whatsapp-mcp/compare/v0.5.1...v0.6.0) (2026-08-11)
 
 
