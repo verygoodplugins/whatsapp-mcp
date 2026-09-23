@@ -83,3 +83,130 @@ jobs:
         run: |
           cd whatsapp-mcp-server
           uv run pytest -v
+
+  release-artifact-verification:
+    name: Verify v0.7.0 release artifacts
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      RELEASE_SHA: c73d1851b064ee1c6937f39987d45be16dedd267
+      CGO_ENABLED: '1'
+      GOOS: linux
+      GOARCH: amd64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: c73d1851b064ee1c6937f39987d45be16dedd267
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          check-latest: true
+          cache-dependency-path: whatsapp-bridge/go.sum
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Verify immutable source and release versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test -z "$(git status --porcelain)"
+          mkdir -p verification/dist
+          printf '%s\n' "$RELEASE_SHA" > verification/source-sha.txt
+          python .github/scripts/check_versions.py --tag v0.7.0
+          python - <<'PY'
+          import json
+          import pathlib
+          import tomllib
+
+          root = pathlib.Path.cwd()
+          pyproject = tomllib.loads((root / "whatsapp-mcp-server/pyproject.toml").read_text())
+          manifest = json.loads((root / ".release-please-manifest.json").read_text())
+          server = json.loads((root / "server.json").read_text())
+          packages = [p for p in server["packages"] if p["identifier"] == "whatsapp-mcp-server"]
+          assert len(packages) == 1
+          versions = {"pyproject": pyproject["project"]["version"], "manifest": manifest["."], "server": server["version"], "package": packages[0]["version"]}
+          assert set(versions.values()) == {"0.7.0"}, versions
+          (root / "verification/versions.json").write_text(json.dumps(versions, indent=2) + "\n")
+          PY
+          uv lock --check --project whatsapp-mcp-server
+
+      - name: Verify Go toolchain and run Linux race tests
+        shell: bash
+        working-directory: whatsapp-bridge
+        run: |
+          set -euo pipefail
+          go version | tee ../verification/go-version.txt
+          python - <<'PY'
+          import pathlib
+          import re
+
+          version = pathlib.Path("../verification/go-version.txt").read_text()
+          match = re.search(r"go(\d+)\.(\d+)\.(\d+)\b", version)
+          assert match and tuple(map(int, match.groups())) >= (1, 26, 6), version
+          PY
+          go test -race ./... 2>&1 | tee ../verification/go-race.txt
+
+      - name: Build and inspect Linux bridge and Python distributions
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd whatsapp-bridge
+            go build -o ../verification/dist/whatsapp-bridge-linux-amd64 .
+          )
+          uv build --project whatsapp-mcp-server --out-dir "$PWD/verification/dist"
+          go version -m verification/dist/whatsapp-bridge-linux-amd64 > verification/go-binary-info.txt
+          file verification/dist/* > verification/file-formats.txt
+          python - <<'PY'
+          import email
+          import pathlib
+          import tarfile
+          import zipfile
+
+          root = pathlib.Path("verification")
+          dist = root / "dist"
+          info = (root / "go-binary-info.txt").read_text()
+          assert all(value in info for value in ("CGO_ENABLED=1", "GOOS=linux", "GOARCH=amd64")), info
+          with (dist / "whatsapp-bridge-linux-amd64").open("rb") as binary:
+              header = binary.read(20)
+          assert header[:6] == b"\x7fELF\x02\x01" and int.from_bytes(header[18:20], "little") == 62
+          wheels, sdists = list(dist.glob("*.whl")), list(dist.glob("*.tar.gz"))
+          assert len(wheels) == len(sdists) == 1
+          modules = ("main", "whatsapp", "audio", "media_preview", "transcription", "mcp_config", "parent_watchdog")
+          with zipfile.ZipFile(wheels[0]) as wheel:
+              names = wheel.namelist()
+              assert all(f"{module}.py" in names for module in modules)
+              metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
+              assert email.message_from_bytes(wheel.read(metadata_name))["Version"] == "0.7.0"
+              (root / "wheel-contents.txt").write_text("\n".join(names) + "\n")
+          with tarfile.open(sdists[0]) as sdist:
+              names = sdist.getnames()
+              assert all(any(name.endswith(f"/{module}.py") for name in names) for module in modules)
+              pkg_info = next(item for item in sdist.getmembers() if item.name.count("/") == 1 and item.name.endswith("/PKG-INFO"))
+              assert email.message_from_bytes(sdist.extractfile(pkg_info).read())["Version"] == "0.7.0"
+              (root / "sdist-contents.txt").write_text("\n".join(names) + "\n")
+          PY
+          (
+            cd verification/dist
+            sha256sum whatsapp-bridge-linux-amd64 *.whl *.tar.gz > SHA256SUMS.txt
+            sha256sum --check SHA256SUMS.txt
+          )
+
+      - name: Upload verification evidence and artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: whatsapp-v0.7.0-verification-${{ env.RELEASE_SHA }}
+          path: verification/
+          if-no-files-found: error
+          retention-days: 14
