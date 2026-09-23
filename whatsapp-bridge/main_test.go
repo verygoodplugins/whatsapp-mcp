@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -547,6 +549,36 @@ func TestApplyChatEphemeralSettingsConvertsConversation(t *testing.T) {
 	}
 	if got := msg.GetExtendedTextMessage().GetContextInfo().GetDisappearingMode().GetTrigger(); got != waProto.DisappearingMode_CHAT_SETTING {
 		t.Fatalf("expected disappearing mode trigger CHAT_SETTING, got %v", got)
+	}
+}
+
+// TestApplyChatEphemeralSettingsAppliesToStickerMessage guards against a
+// regression found in review: StickerMessage was missing from
+// applyChatEphemeralSettings' switch, so a sticker sent into a
+// disappearing-messages chat never expired — a silent privacy bug, and an
+// inconsistency with extractChatEphemeralFromMessage, which already
+// handles StickerMessage on the inbound side.
+func TestApplyChatEphemeralSettingsAppliesToStickerMessage(t *testing.T) {
+	msg := &waProto.Message{
+		StickerMessage: &waProto.StickerMessage{
+			URL: proto.String("https://example.invalid/sticker"),
+		},
+	}
+
+	applyChatEphemeralSettings(msg, ChatEphemeralSettings{
+		Expiration:       604800,
+		SettingTimestamp: 1710000000,
+	})
+
+	ctx := msg.GetStickerMessage().GetContextInfo()
+	if ctx == nil {
+		t.Fatal("expected StickerMessage.ContextInfo to be set")
+	}
+	if ctx.GetExpiration() != 604800 {
+		t.Errorf("expected expiration 604800, got %d", ctx.GetExpiration())
+	}
+	if ctx.GetEphemeralSettingTimestamp() != 1710000000 {
+		t.Errorf("expected setting timestamp 1710000000, got %d", ctx.GetEphemeralSettingTimestamp())
 	}
 }
 
@@ -3269,5 +3301,320 @@ func TestRenderPairingQRCodes_Outcomes(t *testing.T) {
 		if got != c.want {
 			t.Errorf("%s: outcome = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// postSend is a small helper for driving /api/send through the real
+// handler in the sticker-validation tests below.
+func postSend(t *testing.T, handler http.Handler, token, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/send", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	return resp
+}
+
+// TestSendHandler_AsStickerWrongExtension_Returns400 and its sibling below
+// cover the round-2 review finding that only the wrong-extension case got
+// promoted to a proper 400 — a right-extension-wrong-content file (a
+// renamed .jpg) fell through to sendWhatsAppMessage's generic 500 mapping.
+// Both cases must now be rejected by the handler before any send is
+// attempted.
+func TestSendHandler_AsStickerWrongExtension_Returns400(t *testing.T) {
+	const token = "supersecrettoken1234567890abcdef"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "photo.jpg")
+	if err := os.WriteFile(path, []byte("not relevant"), 0o600); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, []string{dir})
+
+	body := fmt.Sprintf(`{"recipient":"12025551234","media_path":%q,"as_sticker":true}`, path)
+	resp := postSend(t, handler, token, body)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for as_sticker with a .jpg file, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "requires a .webp file") {
+		t.Errorf("expected a clear extension error, got %s", resp.Body.String())
+	}
+}
+
+func TestSendHandler_AsStickerFakeWebpContent_Returns400(t *testing.T) {
+	const token = "supersecrettoken1234567890abcdef"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "renamed.webp")
+	// JPEG magic bytes under a .webp name — the case validateStickerRequest
+	// alone can't catch, since it only ever sees the path string.
+	jpegBytes := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46}
+	if err := os.WriteFile(path, jpegBytes, 0o600); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, []string{dir})
+
+	body := fmt.Sprintf(`{"recipient":"12025551234","media_path":%q,"as_sticker":true}`, path)
+	resp := postSend(t, handler, token, body)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a .jpg renamed to .webp, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "real webp file data") {
+		t.Errorf("expected the real-content error, got %s", resp.Body.String())
+	}
+}
+
+func TestSendHandler_AsStickerRealWebp_PassesValidation(t *testing.T) {
+	const token = "supersecrettoken1234567890abcdef"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sticker.webp")
+	if err := os.WriteFile(path, buildVP8XWebP(0x00), 0o600); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, []string{dir})
+
+	body := fmt.Sprintf(`{"recipient":"12025551234","media_path":%q,"as_sticker":true}`, path)
+	resp := postSend(t, handler, token, body)
+
+	// A real webp must clear the as_sticker validation entirely — the test
+	// client isn't actually connected to WhatsApp, so the request still
+	// fails, but it must fail *past* validation (inside
+	// sendWhatsAppMessage), not be rejected as a bad sticker request.
+	if resp.Code == http.StatusBadRequest {
+		t.Fatalf("expected a real .webp to pass as_sticker validation, got 400: %s", resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "Not connected to WhatsApp") {
+		t.Errorf("expected to fail only at the connectivity check, got %s", resp.Body.String())
+	}
+}
+
+// --- Sticker sending validation ---
+//
+// validateStickerRequest, isRealWebP and isAnimatedWebP are the testable
+// surfaces of the as_sticker feature. All three matter because WhatsApp
+// doesn't reject a malformed sticker request at send time — it acks a
+// StickerMessage built from any image upload and then just never renders
+// it, so the bridge has to catch the mistake itself.
+
+// buildVP8XWebP returns a minimal but structurally real webp file with a
+// VP8X extended-header chunk carrying the given flags byte — enough for
+// isRealWebP and isAnimatedWebP to parse, without a real image payload.
+// The RIFF size field is set correctly so isRealWebP's size check passes.
+func buildVP8XWebP(flags byte) []byte {
+	data := make([]byte, 30)
+	copy(data[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(data[4:8], uint32(len(data)-8))
+	copy(data[8:12], "WEBP")
+	copy(data[12:16], "VP8X")
+	data[20] = flags
+	return data
+}
+
+// setRIFFSize rewrites data's RIFF size field to match its actual length,
+// for tests that append bytes to a fixture built by buildVP8XWebP.
+func setRIFFSize(data []byte) []byte {
+	binary.LittleEndian.PutUint32(data[4:8], uint32(len(data)-8))
+	return data
+}
+
+func TestValidateStickerRequest_NonWebpWithFlag_ReturnsError(t *testing.T) {
+	err := validateStickerRequest(true, "/outbox/photo.jpg")
+	if err == nil {
+		t.Fatal("expected an error for a non-webp file with as_sticker set, got nil")
+	}
+}
+
+func TestValidateStickerRequest_WebpWithFlag_ReturnsNil(t *testing.T) {
+	if err := validateStickerRequest(true, "/outbox/reaction.webp"); err != nil {
+		t.Fatalf("expected no error for a .webp file with as_sticker set, got %v", err)
+	}
+}
+
+func TestValidateStickerRequest_FlagUnset_AllowsAnyExtension(t *testing.T) {
+	if err := validateStickerRequest(false, "/outbox/photo.jpg"); err != nil {
+		t.Fatalf("expected no error when as_sticker is unset, got %v", err)
+	}
+}
+
+func TestValidateStickerRequest_EmptyMediaPath_ReturnsClearError(t *testing.T) {
+	err := validateStickerRequest(true, "")
+	if err == nil {
+		t.Fatal("expected an error for as_sticker with no media_path, got nil")
+	}
+	if strings.Contains(err.Error(), "got .") {
+		t.Errorf("expected a clear message for an empty media_path, got the garbled %q", err.Error())
+	}
+}
+
+func TestStoredContentForSend_Sticker_ReturnsEmpty(t *testing.T) {
+	if got := storedContentForSend("hello", "sticker"); got != "" {
+		t.Errorf("expected empty stored content for a sticker send, got %q", got)
+	}
+}
+
+func TestStoredContentForSend_NonSticker_ReturnsMessage(t *testing.T) {
+	if got := storedContentForSend("hello", "image"); got != "hello" {
+		t.Errorf("expected message text to be preserved for a non-sticker send, got %q", got)
+	}
+}
+
+func TestStoredContentForSend_NoMedia_ReturnsMessage(t *testing.T) {
+	// mediaType is "" when mediaPath == "" — must never be confused with
+	// asSticker being true, or a plain text message sent with the flag set
+	// (ignored, since there's no media to make a sticker from) would have
+	// its content wiped from the local DB despite going out on the wire.
+	if got := storedContentForSend("hello", ""); got != "hello" {
+		t.Errorf("expected message text to be preserved when there's no media, got %q", got)
+	}
+}
+
+func TestIsRealWebP_RealSignature_ReturnsTrue(t *testing.T) {
+	if !isRealWebP(buildVP8XWebP(0x00)) {
+		t.Fatal("expected isRealWebP to accept a RIFF/WEBP signature")
+	}
+}
+
+func TestIsRealWebP_JpegRenamedToWebp_ReturnsFalse(t *testing.T) {
+	// A .jpg's actual magic bytes (FF D8 FF), regardless of what the file
+	// is named — this is the exact case validateStickerRequest can't catch
+	// on its own, since it only ever sees the path string.
+	data := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01}
+	if isRealWebP(data) {
+		t.Fatal("expected isRealWebP to reject JPEG bytes even if named .webp")
+	}
+}
+
+func TestIsRealWebP_TooShort_ReturnsFalse(t *testing.T) {
+	if isRealWebP([]byte("RIFF")) {
+		t.Fatal("expected isRealWebP to reject data shorter than the WEBP signature")
+	}
+}
+
+// TestIsRealWebP_TruncatedRiffSize_ReturnsFalse and
+// TestIsRealWebP_GarbageAfterMagicBytes_ReturnsFalse are regression tests
+// for a gap found in external review (Codex, PR #224): the original
+// isRealWebP checked only the 12-byte RIFF/WEBP magic prefix, so a
+// truncated header or arbitrary data sharing that prefix still passed —
+// uploaded fine, acked by WhatsApp, never rendered. The same silent
+// failure the whole check exists to prevent, one layer deeper.
+func TestIsRealWebP_TruncatedRiffSize_ReturnsFalse(t *testing.T) {
+	data := buildVP8XWebP(0x00)
+	// Declare a RIFF size far larger than the actual data — a truncated
+	// or corrupted download, not a well-formed file.
+	binary.LittleEndian.PutUint32(data[4:8], 9999)
+	if isRealWebP(data) {
+		t.Fatal("expected isRealWebP to reject a RIFF size that doesn't match the actual data length")
+	}
+}
+
+func TestIsRealWebP_GarbageAfterMagicBytes_ReturnsFalse(t *testing.T) {
+	// Correct RIFF/WEBP magic bytes and a correct declared size, but the
+	// chunk after "WEBP" isn't one of the three real image sub-chunks —
+	// the exact shape of "arbitrary non-image data with that prefix"
+	// Codex's review called out.
+	data := make([]byte, 20)
+	copy(data[0:4], "RIFF")
+	copy(data[8:12], "WEBP")
+	copy(data[12:16], "JUNK")
+	setRIFFSize(data)
+	if isRealWebP(data) {
+		t.Fatal("expected isRealWebP to reject a file with no real WebP image sub-chunk")
+	}
+}
+
+func TestIsAnimatedWebP_StaticVP8X_ReturnsFalse(t *testing.T) {
+	if isAnimatedWebP(buildVP8XWebP(0x00)) {
+		t.Fatal("expected isAnimatedWebP to return false when the ANIMATION flag bit is unset")
+	}
+}
+
+func TestIsAnimatedWebP_AnimatedVP8X_ReturnsTrue(t *testing.T) {
+	// 0x02 = ANIMATION bit; 0x30 (ICC + Alpha) set alongside it to prove
+	// the check masks the right bit rather than checking for an exact
+	// byte value.
+	if !isAnimatedWebP(buildVP8XWebP(0x32)) {
+		t.Fatal("expected isAnimatedWebP to return true when the ANIMATION flag bit is set")
+	}
+}
+
+func TestIsAnimatedWebP_PlainVP8NoExtendedHeader_ReturnsFalse(t *testing.T) {
+	// Simple-format webp (VP8 / VP8L): no VP8X chunk at all means it can't
+	// be animated, regardless of what bytes follow.
+	data := make([]byte, 30)
+	copy(data[0:4], "RIFF")
+	copy(data[8:12], "WEBP")
+	copy(data[12:16], "VP8 ")
+	setRIFFSize(data)
+	if isAnimatedWebP(data) {
+		t.Fatal("expected isAnimatedWebP to return false for a plain VP8 file with no VP8X chunk")
+	}
+}
+
+// Regression test for a false positive found in review: an earlier version
+// of isAnimatedWebP did a raw bytes.Contains(data, []byte("ANIM")) search
+// over the whole file, which matched an "ANIME" sticker-pack tag sitting in
+// ordinary metadata on an otherwise static file.
+func TestIsAnimatedWebP_StaticFileWithAnimTextInMetadata_ReturnsFalse(t *testing.T) {
+	data := buildVP8XWebP(0x00) // ANIMATION bit unset
+	data = append(data, []byte("some ANIME sticker pack metadata")...)
+	setRIFFSize(data)
+	if isAnimatedWebP(data) {
+		t.Fatal("expected isAnimatedWebP to ignore the literal text \"ANIME\" outside the VP8X flags byte")
+	}
+}
+
+// TestAttachImageOrSticker_AsStickerTrue_SetsStickerMessageNotImageMessage
+// is the test that actually proves the feature does something: it fails
+// if the as_sticker branch is ever disabled or short-circuited, which the
+// pure-function tests above (which only cover the two helper predicates)
+// would not catch.
+func TestAttachImageOrSticker_AsStickerTrue_SetsStickerMessageNotImageMessage(t *testing.T) {
+	msg := &waProto.Message{}
+	resp := whatsmeow.UploadResponse{
+		URL:           "https://example.invalid/sticker",
+		DirectPath:    "/direct/path",
+		MediaKey:      []byte{0x01, 0x02},
+		FileEncSHA256: []byte{0x03, 0x04},
+		FileSHA256:    []byte{0x05, 0x06},
+		FileLength:    123,
+	}
+	mediaData := buildVP8XWebP(0x02) // animated
+
+	attachImageOrSticker(msg, true, "image/webp", mediaData, "ignored caption", resp)
+
+	if msg.ImageMessage != nil {
+		t.Fatal("expected ImageMessage to stay unset when as_sticker is true")
+	}
+	sticker := msg.GetStickerMessage()
+	if sticker == nil {
+		t.Fatal("expected StickerMessage to be set when as_sticker is true")
+	}
+	if !sticker.GetIsAnimated() {
+		t.Error("expected IsAnimated to be true for animated webp data")
+	}
+	if sticker.GetMimetype() != "image/webp" {
+		t.Errorf("expected mimetype image/webp, got %q", sticker.GetMimetype())
+	}
+	if sticker.GetURL() != resp.URL {
+		t.Errorf("expected URL %q, got %q", resp.URL, sticker.GetURL())
+	}
+}
+
+func TestAttachImageOrSticker_AsStickerFalse_SetsImageMessageWithCaption(t *testing.T) {
+	msg := &waProto.Message{}
+	resp := whatsmeow.UploadResponse{URL: "https://example.invalid/photo"}
+
+	attachImageOrSticker(msg, false, "image/jpeg", []byte("not webp"), "hello", resp)
+
+	if msg.StickerMessage != nil {
+		t.Fatal("expected StickerMessage to stay unset when as_sticker is false")
+	}
+	image := msg.GetImageMessage()
+	if image == nil {
+		t.Fatal("expected ImageMessage to be set when as_sticker is false")
+	}
+	if image.GetCaption() != "hello" {
+		t.Errorf("expected caption %q to be preserved on a plain image, got %q", "hello", image.GetCaption())
 	}
 }

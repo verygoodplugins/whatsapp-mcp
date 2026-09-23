@@ -115,16 +115,31 @@ func validateMediaPath(mediaPath string, allowedRoots []string) (string, error) 
 		return "", fmt.Errorf("media_path is not a regular file: %q", resolved)
 	}
 
-	for _, root := range allowedRoots {
-		if pathHasPrefix(resolved, root) {
-			return resolved, nil
+	if !isPathWithinRoots(resolved, allowedRoots) {
+		return "", fmt.Errorf(
+			"media_path %q is outside the configured media roots; "+
+				"set WHATSAPP_MEDIA_ROOTS to allow additional directories",
+			resolved,
+		)
+	}
+	return resolved, nil
+}
+
+// isPathWithinRoots reports whether path is the same as, or a strict
+// descendant of, one of roots. Exported as its own function (rather than
+// inlined in validateMediaPath) so call sites that read a file some time
+// after validation — e.g. the as_sticker content check in /api/send — can
+// re-assert containment right next to the read. That keeps the guard
+// visible to static analysis at the actual sink, and keeps a future
+// refactor that drops the earlier validateMediaPath call from silently
+// regressing into a path-traversal read.
+func isPathWithinRoots(path string, roots []string) bool {
+	for _, root := range roots {
+		if pathHasPrefix(path, root) {
+			return true
 		}
 	}
-	return "", fmt.Errorf(
-		"media_path %q is outside the configured media roots; "+
-			"set WHATSAPP_MEDIA_ROOTS to allow additional directories",
-		resolved,
-	)
+	return false
 }
 
 // pathHasPrefix returns true when child is the same path as parent, or a
