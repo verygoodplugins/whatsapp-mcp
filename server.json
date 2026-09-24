@@ -57,20 +57,16 @@
       "description": "Get messages around a specific message"
     },
     {
-      "name": "send_message",
-      "description": "Send text message to contact or group"
-    },
-    {
-      "name": "send_file",
-      "description": "Send media file (image, video, document)"
-    },
-    {
-      "name": "send_audio_message",
-      "description": "Send voice message (auto-converts to Opus)"
-    },
-    {
       "name": "download_media",
       "description": "Download media from a received message"
+    },
+    {
+      "name": "view_media",
+      "description": "View a received image, or a video's first frame"
+    },
+    {
+      "name": "transcribe_audio",
+      "description": "Transcribe a received voice note with local whisper.cpp"
     }
   ]
 }

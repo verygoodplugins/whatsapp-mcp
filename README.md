@@ -5,9 +5,15 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Go 1.26+](https://img.shields.io/badge/go-1.26+-00ADD8.svg)](https://go.dev/)
 
-A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and send WhatsApp messages.
+A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to **read**
+your personal WhatsApp messages. This is a read-only fork: every tool and every
+bridge endpoint that could change something on WhatsApp has been removed, so
+nothing here can send a message, react, mark a chat as read, or show a typing
+indicator. See [Read-only guarantee](#read-only-guarantee).
 
-> Originally created by [Luke Harries](https://github.com/lharries/whatsapp-mcp). Maintained by [Very Good Plugins](https://verygoodplugins.com/?utm_source=github).
+> Originally created by [Luke Harries](https://github.com/lharries/whatsapp-mcp),
+> maintained upstream by [Very Good Plugins](https://verygoodplugins.com/?utm_source=github).
+> This fork adds the read-only restriction and the `whatsapp-video` skill.
 
 <p align="center">
   <a href="https://github.com/user-attachments/assets/9475af1d-2369-4315-9ccc-823dba2c5c32"><strong>Watch the WhatsApp MCP demo video</strong></a>
@@ -21,9 +27,10 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 
 - **Message Management**: Search and read personal WhatsApp messages (text, images, videos, documents, audio)
 - **Contact Search**: Search contacts by name or phone number with `sender_display` format ("Name (phone)")
-- **Send Messages**: Send text messages to individuals or groups
-- **Read Receipts**: Explicitly mark selected messages as read across linked devices
-- **Media Support**: Send and download images, videos, documents, and voice messages
+- **Read-only**: No tool can send, react, mark as read, or type — the capability is gone, not merely discouraged
+- **Media Support**: Download and view images, videos, documents, and voice messages
+- **Voice Notes**: Transcribed locally with whisper.cpp, into the message itself
+- **Video**: The `whatsapp-video` skill downloads a video and hands it to `viewvideo` for keyframes and a transcript
 - **Call History**: Capture incoming voice/video calls into a local SQLite table (live, 1:1 and group)
 - **Webhook Integration**: Forward incoming messages to external services
 - **Local Storage**: All messages stored locally in SQLite - only sent to Claude when you allow it
@@ -125,6 +132,48 @@ Add to your Cursor MCP settings (`~/.cursor/mcp.json`):
 }
 ```
 
+## Read-only guarantee
+
+An MCP client decides what it can do from the tool list the server advertises.
+A prompt telling it not to send messages is a request; a tool that isn't there
+is a guarantee. So this fork removes the capability rather than discouraging it.
+
+Removed from the Python MCP server: `send_message`, `send_file`,
+`send_audio_message`, `send_reaction`, `mark_messages_read` — and the helper
+functions behind them in `whatsapp.py`, so the code to send is not in the
+repository at all.
+
+Removed from the Go bridge: the `/api/send`, `/api/react`, `/api/mark-read` and
+`/api/typing` routes. What remains is `/api/download`, `/api/history` and
+`/api/health`.
+
+Reactions, read receipts and typing indicators are removed along with sending.
+None of them is a message, but each one is visible to the other person, and
+"read-only" that silently turns your blue ticks on is not read-only.
+
+Two tests hold the line, and fail if any of it comes back:
+
+- `whatsapp-bridge/readonly_test.go` — the write routes 404, the read routes don't
+- `whatsapp-mcp-server/tests/test_read_only.py` — no write tool is advertised, and the helpers are gone from the module
+
+**What this does not protect against.** The bridge still authenticates to
+WhatsApp as your account with full privileges; it simply never asks it to write.
+Anyone who can run code on the machine, or restore the deleted code, has an
+authenticated session. The read-only property is a property of this build, not
+of the WhatsApp link.
+
+## Watching videos
+
+`view_media` returns the first frame of a video, which tells you what was sent
+but not what happens in it. The `whatsapp-video` skill in
+`.claude/skills/whatsapp-video/` closes that gap: it downloads the video with
+`download_media` and hands the local file to the `viewvideo` skill, which
+extracts scene keyframes and an audio transcript for Claude to read.
+
+It triggers on its own when a question is about the content of a WhatsApp video.
+`viewvideo` must be available in the client; it installs the third-party
+`claude-real-video` CLI on first use.
+
 ## Tools
 
 Messages include `sender_display` showing "Name (phone)" format for easy identification by agents.
@@ -179,116 +228,6 @@ Get messages with filters, date ranges, and sorting.
 - "Show me the last 100 messages from today"
 - "Get messages from the family group chat"
 - "Find messages from last week"
-
-#### `send_message`
-
-Send a text message to a contact or group, optionally as a quoted reply.
-
-**Parameters:**
-
-- `recipient` (required): Phone number or group JID
-- `message` (required): Text content to send
-- `quoted_message_id` (optional): ID of the message to reply to. When provided, the sent message appears as a quoted reply in WhatsApp.
-- `quoted_sender_jid` (optional): Full JID of the author of the quoted message. Required for group replies so WhatsApp renders the correct attribution header.
-- `quoted_content` (optional): Text content of the quoted message, used for the reply preview. Only plain text is supported.
-- `mentions` (optional): List of users to @-mention, as phone numbers with country code (e.g. `["12025551234"]`) or JIDs. For each entry the message text must contain a matching `@<number>` token (e.g. `"thanks @12025551234!"`), which recipients' devices render as a highlighted, tappable mention that also notifies the user. Only meaningful in group chats.
-
-Inbound quoted replies are stored automatically. The `quoted_message_id` field in each message returned by `list_messages` indicates which message it is replying to (or `null` for non-replies).
-
-**Natural Language Examples:**
-
-- "Send 'Hello!' to +1234567890"
-- "Message the team group saying 'Meeting at 3pm'"
-- "Reply to that message saying 'Sounds good'"
-
-#### `mark_messages_read`
-
-Mark one or more messages from the same chat and sender as read. This explicitly
-sends WhatsApp read receipts; reading or searching messages never does so
-automatically.
-
-**Parameters:**
-
-- `message_ids` (required): IDs of messages from the same chat and sender
-- `chat_jid` (required): JID of the chat containing the messages
-- `sender_jid` (required for groups): Full JID or bare phone number of the original message sender
-- `timestamp` (optional): RFC 3339 read timestamp; defaults to the current time
-
-**Natural Language Examples:**
-
-- "Mark those messages as read"
-- "Mark the last three messages from Alice in the team group as read"
-
-#### `send_reaction`
-
-Send (or remove) an emoji reaction to a message.
-
-**Parameters:**
-
-- `recipient` (required): Chat JID the message belongs to (phone JID or group JID)
-- `message_id` (required): ID of the message to react to
-- `emoji` (required): Reaction emoji (e.g. `"👍"`). Pass an empty string `""` to remove an existing reaction.
-- `from_me` (optional, default `false`): Whether the original message was sent by the current user
-- `sender_jid` (optional): Full JID of the original message sender — required for group messages when `from_me` is `false` so the correct WhatsApp key is built
-
-Inbound reactions received from others are stored automatically as messages with `media_type = "reaction"`. The `reaction_to_message_id` field in each reaction message indicates which message was reacted to.
-
-When webhook forwarding is enabled, inbound reactions are also posted to `WEBHOOK_URL` as typed events. Reaction removals use an empty `content`/`reactionEmoji` and `reactionRemoved: true`.
-
-```json
-{
-  "eventType": "reaction",
-  "sender": "15551234567",
-  "chatJID": "15551234567@s.whatsapp.net",
-  "isFromMe": true,
-  "content": "👍",
-  "messageId": "reaction-stanza-id",
-  "mediaType": "reaction",
-  "reactionToMessageId": "target-message-id",
-  "reactionEmoji": "👍",
-  "reactionRemoved": false
-}
-```
-
-**Natural Language Examples:**
-
-- "React to that message with a thumbs up"
-- "Remove my reaction from the last message in the group chat"
-
-#### `send_file`
-
-Send a media file (image, video, document).
-
-Successfully sent attachments retain their download metadata in local history.
-Use their message ID and chat JID with `download_media` to retrieve the uploaded
-bytes again while WhatsApp still serves the attachment. This also applies to
-voice messages sent with `send_audio_message`. It does not backfill metadata for
-attachments sent by older bridge versions or prevent WhatsApp media expiry.
-
-**Parameters:**
-
-- `recipient` (required): Phone number or group JID
-- `file_path` (required): Path to the file
-- `caption` (optional): Caption for the media
-
-The bridge only reads files inside configured media roots. By default this is
-`~/.local/share/whatsapp-mcp/outbox`; set `WHATSAPP_MEDIA_ROOTS` to allow
-additional absolute directories.
-
-For documents, recipients receive only the filename portion of `file_path`;
-parent directories are not exposed.
-
-#### `send_audio_message`
-
-Send a voice message (automatically converts to Opus .ogg format).
-
-**Parameters:**
-
-- `recipient` (required): Phone number or group JID
-- `file_path` (required): Path to audio file
-
-Converted audio is sent through the same media-path confinement as
-`send_file`.
 
 #### `download_media`
 
@@ -473,7 +412,6 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSMEOW_DB_PATH`    | `../whatsapp-bridge/store/whatsapp.db`   | whatsmeow DB used for LID ↔ phone resolution |
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token for bridge REST calls; also signed onto outbound webhook POSTs |
-| `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default)          | Label shown for this connection under WhatsApp > Linked Devices. Set to a recognisable name. Applies at pair time only (re-pair to change) |
 | `WHATSAPP_MCP_TRANSPORT` | `stdio`                                | MCP transport to serve clients: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST`    | `127.0.0.1`                              | Bind address for the `http`/`sse` transports |
@@ -524,7 +462,7 @@ Authorization-based auth (e.g. HTTP Basic auth embedded in `WEBHOOK_URL` as
 `http://user:pass@host/...`, which `net/http` applies automatically as long as
 the bridge doesn't set its own `Authorization` header). The header is attached only when a token is configured **and** `WEBHOOK_URL` was
 explicitly set — never to the built-in local default. The bridge token also
-authorizes `/api/*` calls like sending messages, and nothing has vetted the
+authorizes `/api/*` calls, and nothing has vetted the
 implicit default address, so it must never be handed to whatever process
 happens to be listening there. Upgrades that predate the token rollout, or
 that never set `WEBHOOK_URL`, keep working unchanged. The webhook client also
@@ -537,10 +475,9 @@ the AutoHub hub's `WHATSAPP_BRIDGE_TOKEN` must equal this bridge's token (from
 rejects unauthenticated forwards only once its `WHATSAPP_BRIDGE_TOKEN` is set
 to the matching value.
 
-Outbound `media_path` values are confined to `WHATSAPP_MEDIA_ROOTS`. The default
-outbox is `~/.local/share/whatsapp-mcp/outbox`, created on bridge startup. Move
-files there before calling `send_file` or `send_audio_message`, or set
-`WHATSAPP_MEDIA_ROOTS` to a colon-separated list of absolute directories.
+`WHATSAPP_MEDIA_ROOTS` is gone. It confined the paths outbound media could be
+read from, and this build has no outbound media. The bridge writes downloaded
+media under `store/{chat_jid}/` and reads nothing else from disk.
 
 ### Where runtime data is stored
 
@@ -707,7 +644,6 @@ Re-run the installer after changing them.
 export WHATSAPP_BRIDGE_PORT=8080
 export WEBHOOK_URL=http://localhost:8769/whatsapp/webhook
 export FORWARD_SELF=false
-export WHATSAPP_MEDIA_ROOTS="$HOME/.local/share/whatsapp-mcp/outbox"
 scripts/install-launchd-macos.sh
 ```
 
@@ -889,21 +825,17 @@ flowchart TB
 flowchart LR
     subgraph GoAPI["Go Bridge REST API"]
         direction TB
-        SEND["/api/send"]
-        READ["/api/mark-read"]
         DOWN["/api/download"]
-        REACT["/api/react"]
-        TYPE["/api/typing"]
         HIST["/api/history"]
         HEALTH["/api/health"]
     end
 
-    subgraph MCPTools["MCP Tools (15 total)"]
+    subgraph MCPTools["MCP Tools (12 total, all read-only)"]
         direction TB
         CONT["Contact Tools<br/>search_contacts, get_contact"]
-        MSG["Message Tools<br/>list_messages, send_message, etc."]
+        MSG["Message Tools<br/>list_messages, get_message_context, etc."]
         CHAT["Chat Tools<br/>list_chats, get_chat, etc."]
-        MEDIA["Media Tools<br/>send_file, download_media, etc."]
+        MEDIA["Media Tools<br/>download_media, view_media, transcribe_audio"]
     end
 
     MCPTools -->|HTTP Requests| GoAPI
@@ -911,22 +843,29 @@ flowchart LR
 
 ### Data Flow
 
+Reads are served from the local SQLite database the bridge fills; only media
+downloads reach WhatsApp at request time. Nothing in this flow writes.
+
 ```mermaid
 sequenceDiagram
     participant User as User
     participant Claude as Claude Desktop
     participant MCP as Python MCP Server
     participant Bridge as Go Bridge
+    participant DB as SQLite
     participant WA as WhatsApp
 
-    User->>Claude: "Send 'Hello' to Mom"
-    Claude->>MCP: send_message(recipient, message)
-    MCP->>Bridge: POST /api/send
-    Bridge->>WA: Send via WebSocket
-    WA-->>Bridge: Delivery confirmation
-    Bridge-->>MCP: Success response
-    MCP-->>Claude: Message sent
-    Claude-->>User: "Message sent to Mom"
+    User->>Claude: "What did Mom send me?"
+    Claude->>MCP: list_messages(chat_jid)
+    MCP->>DB: Query messages
+    DB-->>MCP: Rows
+    MCP-->>Claude: Messages
+    Claude->>MCP: download_media(message_id, chat_jid)
+    MCP->>Bridge: POST /api/download
+    Bridge->>WA: Fetch + decrypt media
+    Bridge-->>MCP: Local file path
+    MCP-->>Claude: Path
+    Claude-->>User: "She sent a photo of…"
 ```
 
 ### Incoming Message Flow
@@ -1015,9 +954,6 @@ are documented in [docs/RELEASING.md](docs/RELEASING.md).
 - **Bridge returns 403 Forbidden for Host**: Use `WHATSAPP_API_URL` with
   `http://127.0.0.1:<port>/api`, `http://localhost:<port>/api`, or
   `http://[::1]:<port>/api`; custom hostnames and missing ports are rejected.
-- **Bridge returns 403 Forbidden for media_path**: Move the file into
-  `~/.local/share/whatsapp-mcp/outbox` or add its absolute parent directory to
-  `WHATSAPP_MEDIA_ROOTS`.
 
 ### App State / LTHash Conflicts
 
@@ -1086,6 +1022,10 @@ MIT License - see [LICENSE](LICENSE) for details.
 This project is a maintained fork of [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp), originally created by [Luke Harries](https://github.com/lharries).
 
 **Why we forked:** The original repository hasn't been updated since April 2025. We needed continued maintenance, bug fixes, and new features for production use.
+
+**This fork** sits on top of that one and makes the server read-only: the
+sending, reaction, read-receipt and typing capabilities listed below as upstream
+highlights are removed here. It also adds the `whatsapp-video` skill.
 
 **Highlights since the fork:**
 

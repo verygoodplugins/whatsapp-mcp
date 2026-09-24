@@ -205,49 +205,6 @@ func TestExtractDirectPathFromURL(t *testing.T) {
 	}
 }
 
-func TestSendHandlerLogsCallerBeforeDecode(t *testing.T) {
-	const token = "supersecrettoken1234567890abcdef"
-
-	readPipe, writePipe, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("failed to create stdout pipe: %v", err)
-	}
-	oldStdout := os.Stdout
-	os.Stdout = writePipe
-	t.Cleanup(func() {
-		os.Stdout = oldStdout
-		_ = writePipe.Close()
-		_ = readPipe.Close()
-	})
-
-	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
-	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/send", strings.NewReader("{"))
-	req.RemoteAddr = "127.0.0.1:54321"
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("User-Agent", "unit-test-fingerprint")
-	resp := httptest.NewRecorder()
-	handler.ServeHTTP(resp, req)
-
-	os.Stdout = oldStdout
-	_ = writePipe.Close()
-	outputBytes, readErr := io.ReadAll(readPipe)
-	_ = readPipe.Close()
-	if readErr != nil {
-		t.Fatalf("failed to read captured stdout: %v", readErr)
-	}
-	if resp.Code != http.StatusBadRequest {
-		t.Fatalf("expected malformed body to return 400, got %d", resp.Code)
-	}
-
-	output := string(outputBytes)
-	if !strings.Contains(output, "→ /api/send from=") {
-		t.Fatalf("expected caller fingerprint log, got output %q", output)
-	}
-	if !strings.Contains(output, `user_agent="unit-test-fingerprint"`) {
-		t.Fatalf("expected user agent in caller fingerprint log, got output %q", output)
-	}
-}
-
 func TestStoreChatPreservesEphemeralSettings(t *testing.T) {
 	ms := newTestMessageStore(t)
 
@@ -2290,166 +2247,6 @@ func TestHandleMessage_ReactionWithoutKey_NotStored(t *testing.T) {
 	}
 }
 
-// TestReactHandler_MissingFields_Returns400 verifies that the /api/react
-// handler returns 400 when recipient or message_id is absent.
-func TestReactHandler_MissingFields_Returns400(t *testing.T) {
-	const token = "supersecrettoken1234567890abcdef"
-	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
-
-	cases := []struct {
-		name string
-		body string
-	}{
-		{"empty body", "{}"},
-		{"missing message_id", `{"recipient":"15551234567@s.whatsapp.net"}`},
-		{"missing recipient", `{"message_id":"3AABCDEF01234567","emoji":"👍"}`},
-		{"missing emoji", `{"recipient":"15551234567@s.whatsapp.net","message_id":"3AABCDEF01234567"}`},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/react", strings.NewReader(tc.body))
-			req.Header.Set("Authorization", "Bearer "+token)
-			req.Header.Set("Content-Type", "application/json")
-			resp := httptest.NewRecorder()
-			handler.ServeHTTP(resp, req)
-			if resp.Code != http.StatusBadRequest {
-				t.Errorf("body=%q: expected 400, got %d", tc.body, resp.Code)
-			}
-		})
-	}
-}
-
-func TestReactHandler_GroupReactionMissingSenderJID_Returns400(t *testing.T) {
-	const token = "supersecrettoken1234567890abcdef"
-	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
-
-	body := `{"recipient":"120363012345678901@g.us","message_id":"3AABCDEF01234567","emoji":"👍","from_me":false}`
-	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/react", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	resp := httptest.NewRecorder()
-
-	handler.ServeHTTP(resp, req)
-
-	if resp.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for missing sender_jid on group reaction, got %d", resp.Code)
-	}
-}
-
-func TestReactHandler_GroupReactionInvalidSenderJID_Returns400(t *testing.T) {
-	const token = "supersecrettoken1234567890abcdef"
-	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
-
-	body := `{"recipient":"120363012345678901@g.us","message_id":"3AABCDEF01234567","emoji":"👍","from_me":false,"sender_jid":"@s.whatsapp.net"}`
-	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/react", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	resp := httptest.NewRecorder()
-
-	handler.ServeHTTP(resp, req)
-
-	if resp.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for invalid sender_jid on group reaction, got %d", resp.Code)
-	}
-}
-
-// TestReactHandler_NoAuth_Returns401 verifies that the /api/react handler
-// rejects requests that do not carry a valid bearer token.
-func TestReactHandler_NoAuth_Returns401(t *testing.T) {
-	const token = "supersecrettoken1234567890abcdef"
-	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
-
-	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/react",
-		strings.NewReader(`{"recipient":"15551234567@s.whatsapp.net","message_id":"3AABCDEF01234567","emoji":"👍"}`))
-	req.Header.Set("Content-Type", "application/json")
-	// Deliberately omit Authorization header.
-	resp := httptest.NewRecorder()
-	handler.ServeHTTP(resp, req)
-
-	if resp.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 without auth, got %d", resp.Code)
-	}
-}
-
-func TestMarkReadHandler_InvalidRequests_Return400(t *testing.T) {
-	const token = "supersecrettoken1234567890abcdef"
-	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
-
-	cases := []struct {
-		name string
-		body string
-	}{
-		{"empty body", `{}`},
-		{"missing message_ids", `{"chat_jid":"15551234567@s.whatsapp.net"}`},
-		{"missing chat_jid", `{"message_ids":["3AABCDEF01234567"]}`},
-		{"empty message_id", `{"message_ids":["3AABCDEF01234567",""],"chat_jid":"15551234567@s.whatsapp.net"}`},
-		{"invalid chat_jid", `{"message_ids":["3AABCDEF01234567"],"chat_jid":"@s.whatsapp.net"}`},
-		{"invalid sender_jid", `{"message_ids":["3AABCDEF01234567"],"chat_jid":"15551234567@s.whatsapp.net","sender_jid":"@s.whatsapp.net"}`},
-		{"group missing sender_jid", `{"message_ids":["3AABCDEF01234567"],"chat_jid":"120363012345678901@g.us"}`},
-		{"invalid timestamp", `{"message_ids":["3AABCDEF01234567"],"chat_jid":"15551234567@s.whatsapp.net","timestamp":"yesterday"}`},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/mark-read", strings.NewReader(tc.body))
-			req.Header.Set("Authorization", "Bearer "+token)
-			req.Header.Set("Content-Type", "application/json")
-			resp := httptest.NewRecorder()
-
-			handler.ServeHTTP(resp, req)
-
-			if resp.Code != http.StatusBadRequest {
-				t.Errorf("body=%q: expected 400, got %d", tc.body, resp.Code)
-			}
-		})
-	}
-}
-
-func TestMarkReadHandler_Disconnected_Returns503(t *testing.T) {
-	const token = "supersecrettoken1234567890abcdef"
-	ms := newTestMessageStore(t)
-	chatJID := "120363012345678901@g.us"
-	sender := "15551234567"
-	msgID := "3AABCDEF01234567"
-	if _, err := ms.db.Exec(
-		`INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me)
-		 VALUES (?, ?, ?, 'hi', ?, 0)`,
-		msgID, chatJID, sender, time.Unix(1710000000, 0),
-	); err != nil {
-		t.Fatalf("seed message: %v", err)
-	}
-	handler := newRESTMux(newTestClient(&mockLIDStore{}), ms, 8080, token, nil)
-
-	body := `{"message_ids":["3AABCDEF01234567"],"chat_jid":"120363012345678901@g.us","sender_jid":"15551234567","timestamp":"2026-08-11T18:30:00Z"}`
-	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/mark-read", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	resp := httptest.NewRecorder()
-
-	handler.ServeHTTP(resp, req)
-
-	if resp.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503 for disconnected client, got %d body=%s", resp.Code, resp.Body.String())
-	}
-}
-
-func TestMarkReadHandler_NoAuth_Returns401(t *testing.T) {
-	const token = "supersecrettoken1234567890abcdef"
-	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
-
-	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/mark-read",
-		strings.NewReader(`{"message_ids":["3AABCDEF01234567"],"chat_jid":"15551234567@s.whatsapp.net"}`))
-	req.Header.Set("Content-Type", "application/json")
-	resp := httptest.NewRecorder()
-
-	handler.ServeHTTP(resp, req)
-
-	if resp.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 without auth, got %d", resp.Code)
-	}
-}
-
 // TestResolveRecipientJID_ForMarkReadTargets locks the PN -> LID rewrite used
 // by /api/mark-read: MCP returns phone-form JIDs from messages.db, but
 // MarkRead must address migrated DMs (and group participants) by LID.
@@ -2674,27 +2471,6 @@ func TestHandleMessage_PlainMessage_QuotedIDIsNull(t *testing.T) {
 	_, valid := queryQuotedMessageID(ms, chatJID, msgID)
 	if valid {
 		t.Fatalf("plain message must have NULL quoted_message_id")
-	}
-}
-
-// TestSendHandler_MissingRecipient_Returns400 covers the /api/send validation
-// path when recipient is empty — complements the quoted-reply handler path.
-func TestSendHandler_QuotedReplyFields_PassedThrough(t *testing.T) {
-	const token = "supersecrettoken1234567890abcdef"
-	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
-
-	// POST with quoted_message_id but no recipient — should 400 before
-	// any send attempt, proving the new fields are parsed.
-	body := `{"recipient":"","message":"hi","quoted_message_id":"3AORIGINAL","quoted_sender_jid":"1234@s.whatsapp.net","quoted_content":"original"}`
-	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/send", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	resp := httptest.NewRecorder()
-	handler.ServeHTTP(resp, req)
-
-	// Empty recipient → 400
-	if resp.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for empty recipient with quoted fields, got %d", resp.Code)
 	}
 }
 
@@ -2996,26 +2772,6 @@ func TestResolveMentionJIDs(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestSendHandler_MentionsField_PassedThrough proves the mentions JSON field
-// is parsed by /api/send — mirrors the quoted-reply field test above.
-func TestSendHandler_MentionsField_PassedThrough(t *testing.T) {
-	const token = "supersecrettoken1234567890abcdef"
-	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, nil)
-
-	// POST with mentions but no recipient — should 400 before any send
-	// attempt, proving the new field parses without error.
-	body := `{"recipient":"","message":"hi @12025551234","mentions":["12025551234"]}`
-	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/send", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	resp := httptest.NewRecorder()
-	handler.ServeHTTP(resp, req)
-
-	if resp.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for empty recipient with mentions field, got %d", resp.Code)
 	}
 }
 
