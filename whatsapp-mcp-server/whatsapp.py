@@ -315,6 +315,36 @@ def _resolve_name_from_whatsmeow(jid: str) -> str | None:
             conn.close()
 
 
+def _is_placeholder_chat_name(jid: str, name: str | None) -> bool:
+    """Report whether a stored chat name is one of the bridge's own fallbacks.
+
+    When the bridge cannot resolve a display name it writes the bare numeric
+    user-part of the JID (or "Group <id>") into chats.name. Those are stand-ins,
+    not names anyone chose, so they may be replaced by anything better we find.
+    """
+    if not name:
+        return True
+    bare = jid.split("@")[0]
+    return name == bare or name == f"Group {bare}"
+
+
+def _display_chat_name(jid: str, stored_name: str | None) -> str | None:
+    """Return the best display name for a chat.
+
+    messages.db is the source of truth and is used as-is whenever it holds a
+    real name. Only when it holds a placeholder do we consult whatsmeow's
+    contact store, which is where names live after a contact sync — the same
+    lookup get_sender_name already does for message senders. The placeholder is
+    kept when nothing better exists.
+
+    The lookup opens its own short-lived connection, so it is deliberately
+    gated on the placeholder check rather than run for every row.
+    """
+    if not _is_placeholder_chat_name(jid, stored_name):
+        return stored_name
+    return _resolve_name_from_whatsmeow(jid) or stored_name
+
+
 def _like_escape(value: str) -> str:
     """Escape SQL LIKE wildcards so user input is matched literally (pair with ESCAPE '\\\\')."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -726,7 +756,7 @@ def list_chats(
         for chat_data in chats:
             chat = Chat(
                 jid=chat_data[0],
-                name=chat_data[1],
+                name=_display_chat_name(chat_data[0], chat_data[1]),
                 last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
                 last_message=chat_data[3],
                 last_sender=chat_data[4],
@@ -862,7 +892,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
         for chat_data in chats:
             chat = Chat(
                 jid=chat_data[0],
-                name=chat_data[1],
+                name=_display_chat_name(chat_data[0], chat_data[1]),
                 last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
                 last_message=chat_data[3],
                 last_sender=chat_data[4],
@@ -980,7 +1010,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
 
         chat = Chat(
             jid=chat_data[0],
-            name=chat_data[1],
+            name=_display_chat_name(chat_data[0], chat_data[1]),
             last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
             last_message=chat_data[3],
             last_sender=chat_data[4],
@@ -1028,7 +1058,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
 
         chat = Chat(
             jid=chat_data[0],
-            name=chat_data[1],
+            name=_display_chat_name(chat_data[0], chat_data[1]),
             last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
             last_message=chat_data[3],
             last_sender=chat_data[4],
