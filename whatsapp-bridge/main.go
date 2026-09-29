@@ -1362,6 +1362,21 @@ func handleMessageRevoke(messageStore *MessageStore, msg *waProto.Message, chatJ
 	}
 }
 
+// registeredJID asks WhatsApp which JID a phone number is registered under.
+// ok is false only when the server says the number is not on WhatsApp; a
+// failed query reports the JID unchanged, leaving the send to decide.
+func registeredJID(ctx context.Context, client *whatsmeow.Client, jid types.JID) (types.JID, bool) {
+	resp, err := client.IsOnWhatsApp(ctx, []string{"+" + jid.User})
+	if err != nil || len(resp) == 0 {
+		fmt.Printf("Warning: IsOnWhatsApp failed for %s: %v\n", jid, err)
+		return jid, true
+	}
+	if !resp[0].IsIn {
+		return jid, false
+	}
+	return resp[0].JID, true
+}
+
 // resolveRecipientJID parses a phone number or JID string and resolves PN -> LID
 // for personal chats before sending.
 func resolveRecipientJID(client *whatsmeow.Client, recipient string) (types.JID, error) {
@@ -1400,6 +1415,16 @@ func resolveRecipientJID(client *whatsmeow.Client, recipient string) (types.JID,
 			} else if userInfo, ok := info[recipientJID]; ok && !userInfo.LID.IsEmpty() {
 				fmt.Printf("Resolved %s -> %s (LID via server)\n", recipientJID, userInfo.LID)
 				recipientJID = userInfo.LID
+			} else if registered, ok := registeredJID(ctx, client, recipientJID); ok && registered != recipientJID {
+				// The number is registered under another form of itself, e.g. a
+				// Mexican mobile under 521 + 10 digits rather than 52 + 10.
+				fmt.Printf("Resolved %s -> %s (registered JID)\n", recipientJID, registered)
+				recipientJID = registered
+				if info, err := client.GetUserInfo(ctx, []types.JID{registered}); err == nil && !info[registered].LID.IsEmpty() {
+					recipientJID = info[registered].LID
+				}
+			} else if !ok {
+				return types.JID{}, fmt.Errorf("%s is not on WhatsApp", recipientJID.User)
 			}
 		}
 	}
