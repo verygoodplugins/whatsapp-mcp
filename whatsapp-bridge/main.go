@@ -3310,12 +3310,32 @@ connectionSuccess:
 	client.Disconnect()
 }
 
+// isPlaceholderChatName reports whether name is one of the fallbacks GetChatName
+// stores when no real display name could be resolved: the bare numeric user-part
+// of the JID, or "Group <id>" for groups. Such a value must not be treated as a
+// resolved name, otherwise it can never be upgraded once a better one exists.
+func isPlaceholderChatName(name string, jid types.JID) bool {
+	if name == "" {
+		return true
+	}
+	return name == jid.User || name == fmt.Sprintf("Group %s", jid.User)
+}
+
 // GetChatName determines the appropriate name for a chat based on JID and other info
 func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types.JID, chatJID string, conversation interface{}, sender string, logger waLog.Logger) string {
-	// First, check if chat already exists in database with a name
+	// First, check if chat already exists in database with a real name.
+	//
+	// A stored name that is merely the numeric JID user-part (or "Group <id>")
+	// is one of the fallbacks further down this function, not a name anyone
+	// chose. Returning it here would make that fallback permanent: the first
+	// message from an unknown peer pins the number, and the chat keeps it even
+	// after the contact shows up in whatsmeow's store — which is exactly what
+	// happens after a re-pair, when the contact sync repopulates
+	// whatsmeow_contacts but nothing ever re-reads it. Treat those as "no name
+	// yet" and fall through to resolution instead.
 	var existingName string
 	err := messageStore.db.QueryRow("SELECT name FROM chats WHERE jid = ?", chatJID).Scan(&existingName)
-	if err == nil && existingName != "" {
+	if err == nil && existingName != "" && !isPlaceholderChatName(existingName, jid) {
 		// Chat exists with a name, use that
 		logger.Infof("Using existing chat name for %s: %s", chatJID, existingName)
 		return existingName
