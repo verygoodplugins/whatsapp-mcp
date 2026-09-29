@@ -3360,3 +3360,47 @@ func TestRenderPairingQRCodes_Outcomes(t *testing.T) {
 		}
 	}
 }
+
+func TestGetChatName_SenderFallbackNeverUsesOwnNumber(t *testing.T) {
+	client := newTestClientWithSelf(&mockLIDStore{}, selfPhone)
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	// No contact known for the peer, and the triggering message was outgoing,
+	// so handleMessage passes our own user-part as sender.
+	got := GetChatName(client, ms, phonePN, phonePN.String(), nil, selfPhone.User, logger)
+	if got == selfPhone.User {
+		t.Fatalf("GetChatName() = %q, want the peer JID rather than our own number", got)
+	}
+	if got != phonePN.User {
+		t.Fatalf("GetChatName() = %q, want %q", got, phonePN.User)
+	}
+}
+
+func TestGetChatName_SenderFallbackStillUsedForOtherSender(t *testing.T) {
+	client := newTestClientWithSelf(&mockLIDStore{}, selfPhone)
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	got := GetChatName(client, ms, phonePN, phonePN.String(), nil, "Sender Fallback", logger)
+	if got != "Sender Fallback" {
+		t.Fatalf("GetChatName() = %q, want the sender fallback to be kept", got)
+	}
+}
+
+func TestIsSelfUser(t *testing.T) {
+	client := newTestClientWithSelf(&mockLIDStore{}, selfPhone)
+
+	if !isSelfUser(client, selfPhone.User) {
+		t.Fatalf("isSelfUser(%q) = false, want true for our own phone user-part", selfPhone.User)
+	}
+	if isSelfUser(client, phonePN.User) {
+		t.Fatalf("isSelfUser(%q) = true, want false for a peer", phonePN.User)
+	}
+	if isSelfUser(client, "") {
+		t.Fatal("isSelfUser(\"\") = true, want false")
+	}
+	if isSelfUser(nil, selfPhone.User) {
+		t.Fatal("isSelfUser(nil, ...) = true, want false")
+	}
+}

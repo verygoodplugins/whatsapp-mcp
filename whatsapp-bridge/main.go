@@ -3321,6 +3321,22 @@ func isPlaceholderChatName(name string, jid types.JID) bool {
 	return name == jid.User || name == fmt.Sprintf("Group %s", jid.User)
 }
 
+// isSelfUser reports whether user is the user-part of our own account, in
+// either its phone or its LID form. Used to keep our own identity out of
+// peer-facing display names.
+func isSelfUser(client *whatsmeow.Client, user string) bool {
+	if user == "" || client == nil || client.Store == nil {
+		return false
+	}
+	if client.Store.ID != nil && user == client.Store.ID.ToNonAD().User {
+		return true
+	}
+	if !client.Store.LID.IsEmpty() && user == client.Store.LID.ToNonAD().User {
+		return true
+	}
+	return false
+}
+
 // GetChatName determines the appropriate name for a chat based on JID and other info
 func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types.JID, chatJID string, conversation interface{}, sender string, logger waLog.Logger) string {
 	// First, check if chat already exists in database with a real name.
@@ -3403,7 +3419,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 			name = lookupLocalContactName(client, messageStore, chatJID, logger)
 
 			if name == "" {
-				if sender != "" {
+				if sender != "" && !isSelfUser(client, sender) {
 					name = sender
 				} else {
 					name = jid.User
