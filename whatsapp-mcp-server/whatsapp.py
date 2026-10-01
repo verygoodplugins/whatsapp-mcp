@@ -9,6 +9,7 @@ from typing import Any
 import requests
 
 import audio
+from phone import looks_like_phone, phone_matches
 
 # Configuration via environment variables with sensible defaults
 _DEFAULT_BRIDGE_STORE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store")
@@ -105,9 +106,10 @@ class Chat:
 
 @dataclass
 class Contact:
-    phone_number: str
+    phone_number: str | None
     name: str | None
     jid: str
+    lid: str | None = None
 
 
 @dataclass
@@ -172,7 +174,10 @@ def chat_to_dict(chat: "Chat") -> dict[str, Any]:
 
 def contact_to_dict(contact: "Contact") -> dict[str, Any]:
     """Convert a Contact dataclass to a dictionary for JSON serialization."""
-    return {"phone_number": contact.phone_number, "name": contact.name, "jid": contact.jid}
+    data = {"phone_number": contact.phone_number, "name": contact.name, "jid": contact.jid}
+    if contact.lid:
+        data["lid"] = contact.lid
+    return data
 
 
 def _last_read_time_select(cursor: sqlite3.Cursor, table_alias: str) -> str:
@@ -738,14 +743,73 @@ def list_chats(
             conn.close()
 
 
+def _lid_to_phone_map() -> dict[str, str]:
+    if not os.path.exists(WHATSMEOW_DB_PATH):
+        return {}
+    try:
+        conn = sqlite3.connect(WHATSMEOW_DB_PATH)
+        try:
+            return dict(conn.execute("SELECT lid, pn FROM whatsmeow_lid_map").fetchall())
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        print(f"Database error (lid map): {e}")
+        return {}
+
+
+def _direct_chat_contacts() -> list[Contact]:
+    """Every direct chat with its real phone number, most recently active first.
+
+    Chats addressed by an opaque "@lid" get their phone from whatsmeow's
+    lid<->phone map and keep the lid so results can be disambiguated.
+    """
+    try:
+        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        try:
+            rows = conn.execute(
+                "SELECT jid, name FROM chats WHERE jid NOT LIKE '%@g.us' ORDER BY last_message_time DESC"
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        print(f"Database error (direct chats): {e}")
+        return []
+
+    lid_to_phone = _lid_to_phone_map()
+    contacts = []
+    for jid, name in rows:
+        user, _, server = jid.partition("@")
+        if server == "lid":
+            contacts.append(Contact(phone_number=lid_to_phone.get(user), name=name, jid=jid, lid=user))
+        else:
+            contacts.append(Contact(phone_number=user, name=name, jid=jid))
+    return contacts
+
+
+def _contacts_matching_phone(query: str) -> list[Contact]:
+    """Direct-chat contacts whose phone matches query, most recently active first."""
+    if not looks_like_phone(query):
+        return []
+    matches = [c for c in _direct_chat_contacts() if c.phone_number and phone_matches(query, c.phone_number)]
+    for contact in matches:
+        contact.name = _resolve_name_from_whatsmeow(contact.jid) or contact.name
+    return matches
+
+
 def search_contacts(query: str) -> list[dict[str, Any]]:
     """Search contacts by name or phone number.
 
     Searches both the messages.db chats table and whatsmeow's contact store
-    (whatsapp.db) to find contacts. Results are deduplicated by JID.
+    (whatsapp.db) to find contacts. Results are deduplicated by JID. Phone
+    queries match regardless of formatting, country/area code and the extra
+    Brazilian "9" (see phone.py).
     """
     seen_jids: set[str] = set()
     result: list[dict[str, Any]] = []
+    # Phone matches go first because they carry the resolved phone of @lid contacts.
+    for contact in _contacts_matching_phone(query):
+        seen_jids.add(contact.jid)
+        result.append(contact_to_dict(contact))
     # JIDs are all ASCII so LIKE is safe; names use instr() because SQLite's
     # LOWER() only folds case for ASCII and would drop Unicode matches.
     jid_pattern = "%" + query + "%"
@@ -991,51 +1055,31 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
 
 
 def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | None:
-    """Get chat metadata by sender phone number."""
+    """Get the direct chat with a contact, found by phone number.
+
+    The number may be typed in any common form (see phone.py); when it matches
+    several chats the most recently active one wins.
+    """
+    matches = _contacts_matching_phone(sender_phone_number)
+    if matches:
+        return get_chat(matches[0].jid)
+    return _get_direct_chat_by_jid_fragment(sender_phone_number)
+
+
+def _get_direct_chat_by_jid_fragment(fragment: str) -> dict[str, Any] | None:
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
-        cursor = conn.cursor()
-
-        cursor.execute(
-            f"""
-            SELECT
-                c.jid,
-                c.name,
-                c.last_message_time,
-                m.content as last_message,
-                m.sender as last_sender,
-                m.is_from_me as last_is_from_me,
-                {_last_read_time_select(cursor, "c")}
-            FROM chats c
-            {_last_message_join("c", "m")}
-            WHERE c.jid LIKE ? AND c.jid NOT LIKE '%@g.us'
-            LIMIT 1
-        """,
-            (f"%{sender_phone_number}%",),
-        )
-
-        chat_data = cursor.fetchone()
-
-        if not chat_data:
-            return None
-
-        chat = Chat(
-            jid=chat_data[0],
-            name=chat_data[1],
-            last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-            last_message=chat_data[3],
-            last_sender=chat_data[4],
-            last_is_from_me=chat_data[5],
-            last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
-        )
-        return chat_to_dict(chat)
-
+        try:
+            row = conn.execute(
+                "SELECT jid FROM chats WHERE jid LIKE ? AND jid NOT LIKE '%@g.us' LIMIT 1",
+                (f"%{fragment}%",),
+            ).fetchone()
+        finally:
+            conn.close()
     except sqlite3.Error as e:
         print(f"Database error: {e}")
         return None
-    finally:
-        if "conn" in locals():
-            conn.close()
+    return get_chat(row[0]) if row else None
 
 
 def send_message(

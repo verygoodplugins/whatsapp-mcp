@@ -295,6 +295,9 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "quoted_message_id", "TEXT"); err != nil {
 		return fmt.Errorf("failed to ensure messages.quoted_message_id column: %w", err)
 	}
+	if err := ensureScheduledMessagesTable(db); err != nil {
+		return fmt.Errorf("failed to ensure scheduled_messages table: %w", err)
+	}
 	return nil
 }
 
@@ -2395,6 +2398,7 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 
 	// On-demand history sync endpoint (see history_ondemand.go)
 	registerHistoryEndpoint(mux, auth, client, messageStore)
+	registerScheduleEndpoints(mux, auth, newScheduler(client, messageStore))
 
 	// Health check endpoint
 	mux.HandleFunc("/api/health", auth(func(w http.ResponseWriter, r *http.Request) {
@@ -3251,6 +3255,12 @@ connectionSuccess:
 	logger.Infof("Allowed media roots: %v", allowedMediaRoots)
 
 	startRESTServer(client, messageStore, port, bridgeToken, allowedMediaRoots)
+
+	scheduler := newScheduler(client, messageStore)
+	if err := scheduler.RecoverInterrupted(); err != nil {
+		logger.Errorf("Failed to recover interrupted scheduled messages: %v", err)
+	}
+	go scheduler.Run(context.Background())
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)

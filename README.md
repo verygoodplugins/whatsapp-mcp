@@ -133,7 +133,9 @@ Messages include `sender_display` showing "Name (phone)" format for easy identif
 
 #### `search_contacts`
 
-Search contacts by name or phone number.
+Search contacts by name or phone number. Phone numbers match regardless of
+formatting, country code, area code, or the extra "9" of Brazilian mobiles,
+and `@lid` contacts are found by their real phone number.
 
 **Parameters:**
 
@@ -368,6 +370,34 @@ Cache reads and writes use both message ID and chat JID.
 - `message_id` (required): ID of the message with the voice note
 - `chat_jid` (required): JID of the chat containing the message
 - `force` (optional): transcribe again even when a transcript is stored
+
+### Scheduled Messages
+
+The bridge keeps one queue per chat and sends it in `send_at` order (ties keep
+scheduling order), so a message never goes out before an earlier one in the
+same chat. A send is retried up to 5 times with backoff; a message that still
+fails blocks the rest of its chat's queue until it is cancelled. A message
+interrupted mid-send by a bridge stop is marked failed rather than resent, to
+avoid duplicates. Text only.
+
+#### `schedule_message`
+
+- `recipient` (required): Phone number (any common format) or JID
+- `message` (required): Text to send
+- `send_at` (required): ISO 8601 time; without a UTC offset it is local time
+
+#### `list_scheduled_messages`
+
+- `chat` (optional): Only this chat's queue (phone number or JID)
+- `include_finished` (optional): Also include sent and cancelled messages
+
+Each active entry has `queue_position` and `blocked`.
+
+#### `cancel_scheduled_message`
+
+- `schedule_id` (required): ID from `schedule_message` or `list_scheduled_messages`
+
+Cancelling a failed message unblocks its chat's queue.
 
 ### Chat Operations
 
