@@ -1,6 +1,6 @@
 from datetime import datetime
 
-import main
+from tests import legacy_main_fixture as main
 from whatsapp import Message, MessageContext
 
 

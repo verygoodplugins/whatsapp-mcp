@@ -1,4 +1,4 @@
-import main as mcp_main
+from tests import legacy_main_fixture as mcp_main
 
 
 def test_get_contact_normalizes_phone_number(monkeypatch):

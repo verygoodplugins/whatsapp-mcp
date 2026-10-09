@@ -11,7 +11,22 @@ from mcp.server.fastmcp import FastMCP
 
 import owner_policy
 
-mcp = FastMCP("whatsapp-read-only")
+
+class StdioOnlyMCP(FastMCP):
+    def run(self, transport="stdio", mount_path=None):
+        owner_policy.load()
+        if transport != "stdio":
+            raise ValueError("This read-only profile permits stdio only")
+        return super().run(transport="stdio")
+
+    async def run_sse_async(self, mount_path=None):
+        raise ValueError("This read-only profile permits stdio only")
+
+    async def run_streamable_http_async(self):
+        raise ValueError("This read-only profile permits stdio only")
+
+
+mcp = StdioOnlyMCP("whatsapp-read-only")
 ANNOTATIONS = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}
 MAX_RESPONSE_BYTES = 65536
 

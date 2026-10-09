@@ -121,10 +121,19 @@ def test_response_bound_and_transport(reader, monkeypatch):
     monkeypatch.setenv("WHATSAPP_MCP_TRANSPORT", "http")
     with pytest.raises(ValueError, match="stdio"):
         reader.run()
+    with pytest.raises(ValueError, match="stdio"):
+        reader.mcp.run(transport="streamable-http")
 
 
 @pytest.mark.asyncio
 async def test_only_four_tools(reader):
+    import main
+
+    assert main.mcp is reader.mcp
+    with pytest.raises(ValueError, match="stdio"):
+        await main.mcp.run_sse_async()
+    with pytest.raises(ValueError, match="stdio"):
+        await main.mcp.run_streamable_http_async()
     tools = await reader.mcp.list_tools()
     assert {tool.name for tool in tools} == {"list_chats", "get_chat", "list_messages", "get_message_context"}
     for name in ["send_message", "download_media", "transcribe_audio", "get_contact", "mark_messages_read"]:

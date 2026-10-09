@@ -279,7 +279,7 @@ def test_provider_defaults_and_rejects_typos(monkeypatch):
 
 
 def test_tool_dispatches_stores_and_reuses_chat_scoped_transcript(db, http_provider, monkeypatch):
-    import main
+    from tests import legacy_main_fixture as main
 
     audio, post, _response = http_provider
     monkeypatch.setattr(main, "MESSAGES_DB_PATH", db)

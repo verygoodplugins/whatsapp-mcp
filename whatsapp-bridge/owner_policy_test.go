@@ -112,7 +112,7 @@ func TestRestrictedRoutesAndEgressDisabled(t *testing.T) {
 }
 
 func TestRestrictedStorageAndEarlyLiveFilter(t *testing.T) {
-	restrictedFixture(t)
+	path := restrictedFixture(t)
 	ms := newTestMessageStore(t)
 	for _, jid := range []string{"123-456@g.us", "999@g.us", "123@s.whatsapp.net", "status@broadcast"} {
 		if err := ms.StoreChat(jid, "fixture", time.Now()); err != nil {
@@ -141,5 +141,21 @@ func TestRestrictedStorageAndEarlyLiveFilter(t *testing.T) {
 	handleMessage(nil, ms, &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: types.NewJID("999", "g.us")}}, Message: &waProto.Message{Conversation: proto.String("forbidden")}}, testLogger())
 	if queryMessageCount(ms, "999@g.us") != 0 {
 		t.Fatal("forbidden event cached")
+	}
+	policy, err := loadOwnerPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.AccessEnabled = false
+	data, _ := json.Marshal(policy)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.MarkMessageDeleted("duplicate", "123-456@g.us", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var deletions int
+	if err := ms.db.QueryRow("SELECT COUNT(*) FROM messages WHERE deleted_at IS NOT NULL").Scan(&deletions); err != nil || deletions != 0 {
+		t.Fatal("revoked deletion modified cache")
 	}
 }

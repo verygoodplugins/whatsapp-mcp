@@ -974,6 +974,9 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 // overwrite it. Calling this for a message that does not exist (e.g.
 // the bridge missed the original) is a silent no-op, not an error.
 func (store *MessageStore) MarkMessageDeleted(messageID, chatJID string, deletedAt time.Time) error {
+	if !cacheAllowed(chatJID) {
+		return nil
+	}
 	_, err := store.db.Exec(
 		`UPDATE messages SET deleted_at = ?
 		 WHERE id = ? AND chat_jid = ? AND deleted_at IS NULL`,
