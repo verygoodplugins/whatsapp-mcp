@@ -47,7 +47,7 @@ var forwardSelfMessages = getEnvBool("FORWARD_SELF", true)
 // automatically, including images for webhooks. A false value leaves media to
 // on-demand /api/download calls. Read per call so tests can toggle it.
 func autoDownloadMediaEnabled() bool {
-	return getEnvBool("WHATSAPP_AUTO_DOWNLOAD_MEDIA", true)
+	return !restricted() && getEnvBool("WHATSAPP_AUTO_DOWNLOAD_MEDIA", true)
 }
 
 // CLI flag: request a full history sync at pair time.
@@ -104,7 +104,17 @@ type ChatEphemeralSettings struct {
 }
 
 func ensureOwnerOnlyDirectory(path string) error {
-	return os.MkdirAll(path, 0o700)
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	if restricted() {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return err
+		}
+		return privatePath(absolute, true)
+	}
+	return nil
 }
 
 func writeOwnerOnlyFile(path string, data []byte) error {
@@ -183,6 +193,11 @@ func NewMessageStore() (*MessageStore, error) {
 		return nil, fmt.Errorf("failed to create store directory: %v", err)
 	}
 
+	if restricted() {
+		if err := validateStoreFiles(); err != nil {
+			return nil, err
+		}
+	}
 	// Open SQLite database for messages
 	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on")
 	if err != nil {
@@ -714,6 +729,9 @@ func (store *MessageStore) Close() error {
 // merged monotonically so out-of-order delivery (history sync, backfill)
 // can't move it backwards.
 func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time) error {
+	if !cacheAllowed(jid) {
+		return nil
+	}
 	_, err := store.db.Exec(
 		`INSERT INTO chats (jid, name, last_message_time)
 		VALUES (?, ?, ?)
@@ -741,6 +759,9 @@ func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time
 //     (replays, late history-sync chunks, old messages flowing in) would
 //     otherwise downgrade newer state to older state.
 func (store *MessageStore) UpdateChatEphemeralSettings(jid string, expiration uint32, settingTimestamp int64) error {
+	if !cacheAllowed(jid) {
+		return nil
+	}
 	if settingTimestamp == 0 {
 		return nil
 	}
@@ -766,6 +787,9 @@ func (store *MessageStore) UpdateChatEphemeralSettings(jid string, expiration ui
 // inserts only its own column, leaving name/last_message_time NULL so a receipt
 // arriving before any StoreChat call doesn't fabricate placeholder metadata.
 func (store *MessageStore) MarkChatRead(jid string, readAt time.Time) error {
+	if !cacheAllowed(jid) {
+		return nil
+	}
 	_, err := store.db.Exec(
 		`INSERT INTO chats (jid, last_read_time)
 		VALUES (?, ?)
@@ -893,6 +917,12 @@ func (store *MessageStore) MaxMessageTimestamp(chatJID string, ids []string) (ti
 func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64,
 	quotedMessageId string) error {
+	if !cacheAllowed(chatJID) {
+		return nil
+	}
+	if restricted() {
+		filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = "", "", nil, nil, nil, 0
+	}
 	// Only store if there's actual content or media
 	if content == "" && mediaType == "" {
 		return nil
@@ -997,6 +1027,9 @@ func (store *MessageStore) GetMessages(chatJID string, limit int) ([]Message, er
 // INSERT OR IGNORE so duplicate offer events (rare but possible) don't clobber
 // a call already in a later lifecycle state.
 func (store *MessageStore) StoreCallOffer(callID, chatJID, fromJID string, timestamp time.Time, isFromMe bool, callType string, isGroup bool) error {
+	if restricted() {
+		return nil
+	}
 	_, err := store.db.Exec(
 		`INSERT OR IGNORE INTO calls
 		 (call_id, chat_jid, from_jid, timestamp, is_from_me, call_type, is_group, result)
@@ -1934,6 +1967,12 @@ func takeOriginalTimestamp(id string) (time.Time, bool) {
 }
 
 func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
+	if !cacheAllowed(msg.Info.Chat.String()) {
+		return
+	}
+	if restricted() {
+		logger = waLog.Noop
+	}
 	// Resolve LID-based chats to phone-based JIDs so that incoming
 	// and outgoing messages land in the same chat entry.
 	resolvedChat := resolveLIDChat(client, msg.Info.Chat, msg.Info.SenderAlt, msg.Info.RecipientAlt, msg.Info.IsFromMe)
@@ -2137,7 +2176,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}
 	}
 
-	if err == nil {
+	if err == nil && !restricted() {
 		// Log message reception
 		timestamp := msg.Info.Timestamp.Format("2006-01-02 15:04:05")
 		direction := "←"
@@ -2394,7 +2433,9 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 	mux := http.NewServeMux()
 
 	// On-demand history sync endpoint (see history_ondemand.go)
-	registerHistoryEndpoint(mux, auth, client, messageStore)
+	if !restricted() {
+		registerHistoryEndpoint(mux, auth, client, messageStore)
+	}
 
 	// Health check endpoint
 	mux.HandleFunc("/api/health", auth(func(w http.ResponseWriter, r *http.Request) {
@@ -2410,6 +2451,10 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 		}
 		_ = json.NewEncoder(w).Encode(status)
 	}))
+
+	if restricted() {
+		return mux
+	}
 
 	// Handler for sending messages
 	mux.HandleFunc("/api/send", auth(func(w http.ResponseWriter, r *http.Request) {
@@ -2867,15 +2912,30 @@ func renderPairingQRCodes(qrChan <-chan whatsmeow.QRChannelItem, w io.Writer, re
 
 func main() {
 	flag.Parse()
+	restrictedMode = true
+	policy, policyErr := loadOwnerPolicy()
+	if policyErr != nil {
+		fmt.Fprintln(os.Stderr, "Owner policy invalid; startup denied")
+		os.Exit(2)
+	}
+	if *checkPolicyFlag {
+		fmt.Println("Owner policy valid; no connection attempted")
+		return
+	}
+	if !policy.AccessEnabled || len(policy.AllowedGroups) == 0 || *fullHistoryPairFlag {
+		fmt.Fprintln(os.Stderr, "Access revoked or full history forbidden; startup denied")
+		os.Exit(2)
+	}
+	syscall.Umask(0o077)
 
 	// Set up logger with DEBUG level for more detailed logging
-	logger := waLog.Stdout("Client", "DEBUG", true)
+	logger := waLog.Noop
 	logger.Infof("Starting WhatsApp client...")
 
 	logger.Infof("%s", webhookStartupMessage(forwardSelfMessages))
 
 	// Create database connection for storing session data
-	dbLog := waLog.Stdout("Database", "INFO", true)
+	dbLog := waLog.Noop
 
 	// Create directory for database if it doesn't exist. Owner-only (0700),
 	// same reasoning as NewMessageStore.
@@ -2884,6 +2944,10 @@ func main() {
 		return
 	}
 
+	if err := validateStoreFiles(); err != nil {
+		fmt.Fprintln(os.Stderr, "Private store invalid; startup denied")
+		return
+	}
 	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
@@ -2899,6 +2963,18 @@ func main() {
 			logger.Infof("Created new device")
 		} else {
 			logger.Errorf("Failed to get device: %v", err)
+			return
+		}
+	}
+
+	if deviceStore.ID == nil && !*privatePairFlag {
+		fmt.Fprintln(os.Stderr, "Unpaired device; private owner pairing approval required")
+		return
+	}
+	if deviceStore.ID == nil {
+		output, err := os.Stdout.Stat()
+		if err != nil || output.Mode()&os.ModeCharDevice == 0 {
+			fmt.Fprintln(os.Stderr, "Pairing requires a private interactive terminal")
 			return
 		}
 	}
@@ -2944,6 +3020,9 @@ func main() {
 
 	// Create client instance
 	client := whatsmeow.NewClient(deviceStore, logger)
+	if client != nil && restricted() {
+		client.SetProxy(nil)
+	}
 	if client == nil {
 		logger.Errorf("Failed to create WhatsApp client")
 		return
@@ -2957,14 +3036,16 @@ func main() {
 	}
 	defer func() { _ = messageStore.Close() }()
 
-	if err := messageStore.MigrateLegacyLIDChatsToPhoneJIDs("store/whatsapp.db", logger); err != nil {
-		logger.Errorf("Failed to migrate legacy LID chat rows: %v", err)
-		return
-	}
+	if !restricted() {
+		if err := messageStore.MigrateLegacyLIDChatsToPhoneJIDs("store/whatsapp.db", logger); err != nil {
+			logger.Errorf("Failed to migrate legacy LID chat rows: %v", err)
+			return
+		}
 
-	if err := messageStore.MigrateLegacyLIDSendersToPhones("store/whatsapp.db", logger); err != nil {
-		logger.Errorf("Failed to migrate legacy LID sender rows: %v", err)
-		return
+		if err := messageStore.MigrateLegacyLIDSendersToPhones("store/whatsapp.db", logger); err != nil {
+			logger.Errorf("Failed to migrate legacy LID sender rows: %v", err)
+			return
+		}
 	}
 
 	// Resolve the REST API port. Pure env parsing with no dependency on the
@@ -3003,7 +3084,7 @@ func main() {
 	// early exit would leave a token on disk that was never shown to the
 	// user — and loadOrCreateBridgeToken() would report fresh=false on every
 	// later run, so the banner would never get a second chance to print it.
-	if fresh {
+	if fresh && !restricted() {
 		printTokenBanner(bridgeToken, port)
 	}
 
@@ -3018,6 +3099,9 @@ func main() {
 			handleMessage(client, messageStore, v, logger)
 
 		case *events.UndecryptableMessage:
+			if !cacheAllowed(v.Info.Chat.String()) {
+				return
+			}
 			// The first (failed) delivery carries the original send-time. WhatsApp
 			// re-sends after our retry receipt, but that copy's `t` is the resend
 			// time — so stash the original now and reuse it in handleMessage.
@@ -3028,6 +3112,9 @@ func main() {
 			handleHistorySync(client, messageStore, v, logger)
 
 		case *events.Receipt:
+			if !cacheAllowed(v.Chat.String()) {
+				return
+			}
 			// Persist read state so consumers can distinguish genuine unread
 			// from "latest message is inbound". Only our own reads count.
 			if isSelfReadReceipt(v) {
@@ -3051,6 +3138,9 @@ func main() {
 			}
 
 		case *events.GroupInfo:
+			if !cacheAllowed(v.JID.String()) {
+				return
+			}
 			if v.Ephemeral != nil {
 				expiration := uint32(0)
 				if v.Ephemeral.IsEphemeral {
@@ -3079,6 +3169,9 @@ func main() {
 			handleCallOffer(client, messageStore, v.BasicCallMeta, callType, isGroup, logger)
 
 		case *events.CallAccept:
+			if restricted() {
+				return
+			}
 			if err := messageStore.MarkCallAnswered(v.CallID, callChatJID(v.BasicCallMeta)); err != nil {
 				logger.Warnf("Failed to mark call answered: %v", err)
 			} else {
@@ -3086,6 +3179,9 @@ func main() {
 			}
 
 		case *events.CallReject:
+			if restricted() {
+				return
+			}
 			if err := messageStore.MarkCallRejected(v.CallID, callChatJID(v.BasicCallMeta)); err != nil {
 				logger.Warnf("Failed to mark call rejected: %v", err)
 			} else {
@@ -3093,6 +3189,9 @@ func main() {
 			}
 
 		case *events.CallTerminate:
+			if restricted() {
+				return
+			}
 			if err := messageStore.MarkCallTerminated(v.CallID, callChatJID(v.BasicCallMeta), v.Reason, v.Timestamp); err != nil {
 				logger.Warnf("Failed to mark call terminated: %v", err)
 			} else {
@@ -3243,7 +3342,11 @@ connectionSuccess:
 
 	// Resolve the allow-listed roots that media_path values in /api/send must
 	// live under. See media_path.go for the rationale.
-	allowedMediaRoots, mrErr := resolveMediaRoots()
+	var allowedMediaRoots []string
+	var mrErr error
+	if !restricted() {
+		allowedMediaRoots, mrErr = resolveMediaRoots()
+	}
 	if mrErr != nil {
 		logger.Errorf("Failed to resolve media roots: %v", mrErr)
 		return
@@ -3453,6 +3556,9 @@ func callChatJID(meta types.BasicCallMeta) string {
 // notifying linked devices, so events observed here are always inbound and
 // isFromMe stays false. We keep the branch anyway in case behavior changes.
 func handleCallOffer(client *whatsmeow.Client, messageStore *MessageStore, meta types.BasicCallMeta, callType string, isGroup bool, logger waLog.Logger) {
+	if restricted() {
+		return
+	}
 	chatJID := callChatJID(meta)
 
 	fromJID := ""
@@ -3483,6 +3589,9 @@ func handleCallOffer(client *whatsmeow.Client, messageStore *MessageStore, meta 
 }
 
 func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, historySync *events.HistorySync, logger waLog.Logger) {
+	if restricted() {
+		logger = waLog.Noop
+	}
 	// Log every history sync event with its shape. Different sync types
 	// carry different payloads; logging type/chunk/progress makes it easy
 	// to reason about what arrived from WhatsApp when debugging.
@@ -3501,6 +3610,9 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 		}
 
 		rawChatJID := *conversation.ID
+		if !cacheAllowed(rawChatJID) {
+			continue
+		}
 
 		// Try to parse the JID
 		jid, err := types.ParseJID(rawChatJID)

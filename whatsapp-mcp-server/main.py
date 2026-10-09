@@ -4,6 +4,13 @@ import sys
 import tempfile
 from typing import Annotated, Any
 
+# The executable always selects the restricted profile before importing legacy tools.
+if __name__ == "__main__":
+    from readonly_main import run
+
+    run()
+    raise SystemExit(0)
+
 from mcp.server.fastmcp import FastMCP, Image
 from pydantic import Field
 
