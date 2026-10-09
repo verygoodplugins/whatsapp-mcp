@@ -16,10 +16,12 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    # cryptography 49+ no longer publishes Intel macOS wheels. Keep the
-    # developer-laptop install path working until the project deliberately
-    # drops x86_64 macOS support.
-    "cryptography>=48.0.1,<49",
+    # The restricted profile requires patched crypto dependencies.
+    "cryptography>=50.0.0,<51",
+    "pyjwt>=2.15.0",
+    "urllib3>=2.8.0",
+    "pygments>=2.20.0",
+    "python-dotenv>=1.2.2",
     "httpx>=0.28.1",
     "mcp[cli]>=1.28.1,<2",
     "requests>=2.34.2",
@@ -40,7 +42,7 @@ Repository = "https://github.com/verygoodplugins/whatsapp-mcp"
 Issues = "https://github.com/verygoodplugins/whatsapp-mcp/issues"
 
 [tool.setuptools]
-py-modules = ["main", "whatsapp", "audio", "mcp_config", "parent_watchdog", "transcription", "media_preview"]
+py-modules = ["main", "whatsapp", "audio", "mcp_config", "parent_watchdog", "transcription", "media_preview", "owner_policy", "readonly_main"]
 
 [tool.mcp]
 name = "io.github.verygoodplugins/whatsapp-mcp"

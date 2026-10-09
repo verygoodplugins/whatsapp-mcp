@@ -1,5 +1,11 @@
 # WhatsApp MCP Server
 
+> This local branch runs the owner-controlled selected-group read-only profile.
+> Read [OWNER_READ_ONLY.md](OWNER_READ_ONLY.md) before launching anything. Access
+> starts disabled; pairing requires separate owner approval. The broad features
+> and stock quick-start instructions below describe the upstream base and are
+> unavailable through this branch's executable entry points.
+
 [![CI](https://github.com/verygoodplugins/whatsapp-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/verygoodplugins/whatsapp-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)

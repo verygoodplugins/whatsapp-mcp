@@ -69,20 +69,17 @@ def test_unknown_jpg_bytes_without_ffmpeg_are_rejected(tmp_path, monkeypatch):
 def test_file_that_grows_after_size_check_is_not_returned_without_ffmpeg(tmp_path, monkeypatch):
     monkeypatch.setattr(media_preview.shutil, "which", lambda _: None)
     image = _write(tmp_path / "generated.jpg", b"\x89PNG\r\n\x1a\nsmall")
-    original_stat = media_preview.Path.stat
-    size_checks = 0
+    original_open = media_preview.Path.open
 
     def grow_before_read(path, *args, **kwargs):
-        nonlocal size_checks
-        result = original_stat(path, *args, **kwargs)
-        if path == image:
-            size_checks += 1
-            if size_checks == 2:
-                with open(image, "ab") as media_file:
-                    media_file.write(b"0" * media_preview.MAX_PASSTHROUGH_BYTES)
-        return result
+        if path == image and args == ("rb",):
+            with open(image, "ab") as media_file:
+                media_file.write(b"0" * media_preview.MAX_PASSTHROUGH_BYTES)
+        return original_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(media_preview.Path, "stat", grow_before_read)
+    # Hook the actual read boundary: pathlib.is_file no longer calls Path.stat
+    # on Python 3.14, so counting stat calls never exercised the growth race.
+    monkeypatch.setattr(media_preview.Path, "open", grow_before_read)
     with pytest.raises(media_preview.PreviewError, match="size worth returning"):
         media_preview.render_preview(image)
 

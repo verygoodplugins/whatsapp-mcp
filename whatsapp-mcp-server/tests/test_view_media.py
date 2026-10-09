@@ -5,8 +5,8 @@ import base64
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 
-import main
 import media_preview
+from tests import legacy_main_fixture as main
 
 
 def test_view_media_returns_mcp_image_content(tmp_path, monkeypatch):

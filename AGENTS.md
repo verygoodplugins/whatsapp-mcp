@@ -94,6 +94,11 @@ A failing blocking job is a hard block — fix it or explain in the PR why it's 
 
 ## Environment variables
 
+This local branch's executable entry points require `WHATSAPP_POLICY_FILE`, an
+absolute owner-only policy path. See [OWNER_READ_ONLY.md](OWNER_READ_ONLY.md).
+`WHATSAPP_MCP_TRANSPORT` permits only stdio; webhook/media flags cannot enable
+those capabilities. The broad upstream variables below describe legacy helpers.
+
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `WHATSAPP_DB_PATH` | `../whatsapp-bridge/store/messages.db` | SQLite path used by the MCP server |
