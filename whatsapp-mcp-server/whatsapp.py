@@ -697,7 +697,12 @@ def list_chats(
         """
         ]
 
-        where_clauses = []
+        # Keep read/ephemeral state for unknown conversations, but do not list
+        # metadata-only rows as chats until content or a reaction is stored.
+        where_clauses = [
+            "(chats.last_message_time IS NOT NULL OR EXISTS "
+            "(SELECT 1 FROM messages activity WHERE activity.chat_jid = chats.jid))"
+        ]
         params = []
 
         if query:

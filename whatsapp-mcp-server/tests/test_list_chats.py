@@ -95,6 +95,22 @@ def test_list_chats_without_last_message(messages_db):
     assert chats[0]["last_is_from_me"] == 0
 
 
+def test_list_chats_hides_metadata_only_rows(messages_db):
+    with sqlite3.connect(messages_db) as conn:
+        conn.execute("INSERT INTO chats (jid) VALUES ('metadata@s.whatsapp.net')")
+    assert len(whatsapp.list_chats()) == 1
+    assert whatsapp.list_chats(query="metadata") == []
+
+
+def test_list_chats_keeps_reaction_only_rows(messages_db):
+    with sqlite3.connect(messages_db) as conn:
+        conn.execute("INSERT INTO chats (jid) VALUES ('reaction@s.whatsapp.net')")
+        conn.execute(
+            "INSERT INTO messages (id, chat_jid, media_type) VALUES ('r', 'reaction@s.whatsapp.net', 'reaction')"
+        )
+    assert len(whatsapp.list_chats()) == 2
+
+
 def test_list_chats_query_filter_with_include_last_message_false(messages_db):
     """Filter by query while not including the last message — both code paths
     should compose cleanly."""

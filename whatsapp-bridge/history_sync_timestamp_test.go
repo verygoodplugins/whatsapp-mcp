@@ -109,6 +109,30 @@ func TestHandleHistorySync_ProtocolOnlyConversationCreatesNoChat(t *testing.T) {
 	}
 }
 
+func TestHandleHistorySync_ProtocolMetadataIsRetainedWithoutActivity(t *testing.T) {
+	client := newTestClientWithSelf(&mockLIDStore{}, selfPhone)
+	ms := newTestMessageStore(t)
+	ts := time.Unix(1710000000, 0)
+	sync := historySyncFor(phonePN.String(), historyRevokeMsg("control", "other", ts))
+	conversation := sync.Data.Conversations[0]
+	conversation.UnreadCount = proto.Uint32(0)
+	conversation.EphemeralExpiration = proto.Uint32(86400)
+	conversation.EphemeralSettingTimestamp = proto.Int64(ts.Unix())
+	handleHistorySync(client, ms, sync, testLogger())
+	_, valid, exists := historyChatLastMessageTime(t, ms, phonePN.String())
+	if !exists || valid || queryMessageCount(ms, phonePN.String()) != 0 {
+		t.Fatalf("metadata must be retained without inventing message activity (exists=%v valid=%v)", exists, valid)
+	}
+	settings, err := ms.GetChatEphemeralSettings(phonePN.String())
+	if err != nil || settings.Expiration != 86400 {
+		t.Fatalf("disappearing-message settings lost: %+v, %v", settings, err)
+	}
+	var readAt sql.NullTime
+	if err := ms.db.QueryRow("SELECT last_read_time FROM chats WHERE jid = ?", phonePN.String()).Scan(&readAt); err != nil || !readAt.Valid || !readAt.Time.Equal(ts) {
+		t.Fatalf("read metadata lost: %v, %v", readAt, err)
+	}
+}
+
 func TestHandleHistorySync_SupportedBusinessTextSetsChatTime(t *testing.T) {
 	for _, archived := range []bool{false, true} {
 		for _, tc := range []struct {

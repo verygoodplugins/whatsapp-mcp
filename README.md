@@ -795,8 +795,9 @@ retroactively restore text skipped by an older bridge: the affected messages
 must be delivered again through history sync, subject to the phone's limits.
 
 Chat activity timestamps follow the newest history message stored as supported
-text or media. Protocol-only entries do not advance chat activity or create a
-chat with a phantom latest message.
+text or media. Protocol-only entries do not advance chat activity. Their read
+and disappearing-message settings are retained, while metadata-only rows are
+excluded from chat listings until a message or reaction is stored.
 
 ### Requesting history for a single chat (on-demand)
 
