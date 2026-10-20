@@ -1193,6 +1193,9 @@ func formatContactContent(displayName, vcard string) string {
 // so the property name is compared after stripping any group prefix.
 func extractVCardPhones(vcard string) []string {
 	var phones []string
+	// vCard continuation lines remove the newline and one leading whitespace.
+	// Unfold before splitting properties so TEL values cannot be truncated.
+	vcard = strings.NewReplacer("\r\n ", "", "\r\n\t", "", "\n ", "", "\n\t", "").Replace(vcard)
 	for _, line := range strings.Split(vcard, "\n") {
 		line = strings.TrimSpace(line)
 		prop := line
