@@ -357,11 +357,20 @@ def _is_stored_self_name(jid: str, name: str | None) -> bool:
     conn = None
     try:
         conn = sqlite3.connect(Path(WHATSMEOW_DB_PATH).resolve().as_uri() + "?mode=ro", uri=True)
-        own_users = {
-            row[0].split("@")[0].split(":")[0]
-            for row in conn.execute("SELECT DISTINCT our_jid FROM whatsmeow_contacts")
-            if row[0]
-        }
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(whatsmeow_device)")}
+        fields = [field for field in ("jid", "lid") if field in columns]
+        own_jids = []
+        if fields:
+            own_jids = [
+                jid
+                for row in conn.execute("SELECT " + ", ".join(fields) + " FROM whatsmeow_device")
+                for jid in row
+                if jid
+            ]
+        if not own_jids:
+            # Compatibility with stores that predate the device identity table.
+            own_jids = [row[0] for row in conn.execute("SELECT DISTINCT our_jid FROM whatsmeow_contacts") if row[0]]
+        own_users = {jid.split("@")[0].split(":")[0].split(".")[0] for jid in own_jids}
         peer = (_resolve_lid_to_phone(user) or user) if server == "lid" else user
         named_user = _resolve_lid_to_phone(name) or name
         return named_user in own_users and peer not in own_users
@@ -731,6 +740,19 @@ def list_chats(
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
 
+        names: dict[tuple[str, str | None], str | None] = {}
+
+        def name_for_chat(jid, stored_name):
+            key = (jid, stored_name)
+            if key not in names:
+                names[key] = _display_chat_name(jid, stored_name)
+            return names[key]
+
+        # Resolve before filtering/sorting/pagination, using the same cached
+        # value for the returned row. The default activity path stays bounded
+        # to the selected page when no name search is requested.
+        conn.create_function("resolved_chat_name", 2, name_for_chat)
+
         # The last message is always joined — is_from_me feeds the unread
         # flag — but its content is only selected when asked for. The columns
         # are referenced by tuple index downstream, so the result shape stays
@@ -760,7 +782,8 @@ def list_chats(
         if query:
             # instr() on the raw column matches Unicode; LOWER()+LIKE only covers ASCII.
             where_clauses.append(
-                "(instr(LOWER(chats.name), LOWER(?)) > 0 OR instr(chats.name, ?) > 0 OR chats.jid LIKE ?)"
+                "(instr(LOWER(resolved_chat_name(chats.jid, chats.name)), LOWER(?)) > 0 "
+                "OR instr(resolved_chat_name(chats.jid, chats.name), ?) > 0 OR chats.jid LIKE ?)"
             )
             params.extend([query, query, f"%{query}%"])
 
@@ -768,7 +791,9 @@ def list_chats(
             query_parts.append("WHERE " + " AND ".join(where_clauses))
 
         # Add sorting
-        order_by = "chats.last_message_time DESC" if sort_by == "last_active" else "chats.name"
+        order_by = (
+            "chats.last_message_time DESC" if sort_by == "last_active" else "resolved_chat_name(chats.jid, chats.name)"
+        )
         query_parts.append(f"ORDER BY {order_by}")
 
         # Add pagination
@@ -783,7 +808,7 @@ def list_chats(
         for chat_data in chats:
             chat = Chat(
                 jid=chat_data[0],
-                name=_display_chat_name(chat_data[0], chat_data[1]),
+                name=name_for_chat(chat_data[0], chat_data[1]),
                 last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
                 last_message=chat_data[3],
                 last_sender=chat_data[4],
