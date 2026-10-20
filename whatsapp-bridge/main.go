@@ -730,6 +730,25 @@ func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time
 	return err
 }
 
+// StoreChatName refreshes a chat's display name without touching
+// last_message_time. Events that are not content messages (reactions,
+// protocol messages, polls, contact cards) go through here: they may keep
+// the name fresh and must guarantee the chats row exists for the messages
+// foreign key, but they must not reorder the chat in list_chats or make it
+// look unread — WhatsApp itself neither bumps nor badges a chat for them.
+// A new row gets a NULL last_message_time, the same shape MarkChatRead and
+// UpdateChatEphemeralSettings already produce.
+func (store *MessageStore) StoreChatName(jid, name string) error {
+	_, err := store.db.Exec(
+		`INSERT INTO chats (jid, name)
+		VALUES (?, ?)
+		ON CONFLICT(jid) DO UPDATE SET
+			name = CASE WHEN excluded.name = '' THEN chats.name ELSE excluded.name END`,
+		jid, name,
+	)
+	return err
+}
+
 // UpdateChatEphemeralSettings records the chat's disappearing-message timer.
 // Writes are gated on settingTimestamp so that low-information events don't
 // clobber authoritative ones:
@@ -2038,12 +2057,10 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		msgTimestamp = orig
 	}
 
-	// Update chat in database with the message timestamp (keeps last message time updated)
-	err := messageStore.StoreChat(chatJID, name, msgTimestamp)
-	if err != nil {
-		logger.Warnf("Failed to store chat: %v", err)
-	}
-
+	// last_message_time is advanced only when a message row is actually stored
+	// (see StoreChat below). Bumping it here for every stanza let reactions
+	// and protocol messages float a chat to the top of list_chats — and, for
+	// inbound reactions, flag it unread — without any new message to show.
 	updateChatEphemeralSettingsFromProtocolMessage(messageStore, chatJID, msg.Message, msg.Info.Timestamp.Unix(), logger)
 	handleMessageRevoke(messageStore, msg.Message, chatJID, msg.Info.Timestamp.Unix(), logger)
 
@@ -2075,6 +2092,9 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}
 		if reactedToID != "" {
 			emoji := reaction.GetText()
+			if err := messageStore.StoreChatName(chatJID, name); err != nil {
+				logger.Warnf("Failed to store chat for reaction: %v", err)
+			}
 			if err := messageStore.StoreMessage(
 				msg.Info.ID, chatJID, sender, emoji,
 				msgTimestamp, msg.Info.IsFromMe,
@@ -2106,8 +2126,13 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		return
 	}
 
-	// Store message in database first so that downloadMedia (which queries the DB
-	// by message ID) can find the row when we call it synchronously below.
+	// Advance the chat's last_message_time now that we know a message row will
+	// be written, then store the message first so that downloadMedia (which
+	// queries the DB by message ID) can find the row when called synchronously.
+	err := messageStore.StoreChat(chatJID, name, msgTimestamp)
+	if err != nil {
+		logger.Warnf("Failed to store chat: %v", err)
+	}
 	err = messageStore.StoreMessage(
 		msg.Info.ID,
 		chatJID,
@@ -3380,12 +3405,52 @@ connectionSuccess:
 	client.Disconnect()
 }
 
+// isPlaceholderChatName reports whether name is one of the fallbacks GetChatName
+// stores when no real display name could be resolved: the bare numeric user-part
+// of the JID, or "Group <id>" for groups. Such a value must not be treated as a
+// resolved name, otherwise it can never be upgraded once a better one exists.
+func isPlaceholderChatName(name string, jid types.JID) bool {
+	if name == "" {
+		return true
+	}
+	return name == jid.User || name == fmt.Sprintf("Group %s", jid.User)
+}
+
+// isSelfUser reports whether user is the user-part of our own account, in
+// either its phone or its LID form. Used to keep our own identity out of
+// peer-facing display names.
+func isSelfUser(client *whatsmeow.Client, user string) bool {
+	if user == "" || client == nil || client.Store == nil {
+		return false
+	}
+	if client.Store.ID != nil && user == client.Store.ID.ToNonAD().User {
+		return true
+	}
+	if !client.Store.LID.IsEmpty() && user == client.Store.LID.ToNonAD().User {
+		return true
+	}
+	return false
+}
+
 // GetChatName determines the appropriate name for a chat based on JID and other info
 func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types.JID, chatJID string, conversation interface{}, sender string, logger waLog.Logger) string {
-	// First, check if chat already exists in database with a name
+	// First, check if chat already exists in database with a real name.
+	//
+	// A stored name that is merely the numeric JID user-part (or "Group <id>")
+	// is one of the fallbacks further down this function, not a name anyone
+	// chose. Returning it here would make that fallback permanent: the first
+	// message from an unknown peer pins the number, and the chat keeps it even
+	// after the contact shows up in whatsmeow's store — which is exactly what
+	// happens after a re-pair, when the contact sync repopulates
+	// whatsmeow_contacts but nothing ever re-reads it. Treat those as "no name
+	// yet" and fall through to resolution instead.
 	var existingName string
 	err := messageStore.db.QueryRow("SELECT name FROM chats WHERE jid = ?", chatJID).Scan(&existingName)
-	if err == nil && existingName != "" {
+	// Older bridges also cached our own number as the name of outgoing-first
+	// DMs. Repair those on the next event, while preserving actual self chats.
+	badSelfName := (jid.Server == types.DefaultUserServer || jid.Server == types.HiddenUserServer) &&
+		!isSelfUser(client, jid.User) && isSelfUser(client, existingName)
+	if err == nil && existingName != "" && !isPlaceholderChatName(existingName, jid) && !badSelfName {
 		// Chat exists with a name, use that
 		logger.Infof("Using existing chat name for %s: %s", chatJID, existingName)
 		return existingName
@@ -3453,7 +3518,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 			name = lookupLocalContactName(client, messageStore, chatJID, logger)
 
 			if name == "" {
-				if sender != "" {
+				if sender != "" && !isSelfUser(client, sender) {
 					name = sender
 				} else {
 					name = jid.User
@@ -3659,21 +3724,34 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				// Determine sender. History-sync rows do not carry SenderAlt,
 				// so any LID-based participant is resolved through the
 				// whatsmeow LID store (populated during live message handling).
+				// Group senders live in the top-level WebMessageInfo.participant
+				// field on modern history syncs; Key.Participant is only a legacy
+				// fallback. Participant is only consulted for group/broadcast
+				// chats — for one-to-one (phone or LID) and newsletter chats
+				// the sender is the chat itself. Same order and gating as
+				// whatsmeow's ParseWebMessage.
 				var sender string
 				isFromMe := false
 				if msg.Message.Key != nil {
 					if msg.Message.Key.FromMe != nil {
 						isFromMe = *msg.Message.Key.FromMe
 					}
+					var participant string
+					if jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer && jid.Server != types.NewsletterServer {
+						participant = msg.Message.GetParticipant()
+						if participant == "" {
+							participant = msg.Message.Key.GetParticipant()
+						}
+					}
 					var rawSender types.JID
 					switch {
 					case isFromMe && client.Store.ID != nil:
 						rawSender = client.Store.ID.ToNonAD()
-					case msg.Message.Key.Participant != nil && *msg.Message.Key.Participant != "":
-						if parsed, perr := types.ParseJID(*msg.Message.Key.Participant); perr == nil {
+					case participant != "":
+						if parsed, perr := types.ParseJID(participant); perr == nil {
 							rawSender = parsed
 						} else {
-							rawSender = types.JID{User: *msg.Message.Key.Participant}
+							rawSender = types.JID{User: participant}
 						}
 					default:
 						rawSender = jid

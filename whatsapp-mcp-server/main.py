@@ -250,7 +250,8 @@ def list_chats(
         last_sender, last_is_from_me, last_read_time and unread. `last_read_time` is
         how far the chat has been read on any device (null if never reported); `unread`
         is true when the last message is inbound and newer than that marker, so chats
-        already read on the phone are not reported as unread.
+        already read on the phone are not reported as unread. Numeric fallback names
+        are resolved from local contacts when possible, even while the bridge is offline.
     """
     # Cap limit at 200 to prevent excessive queries
     limit = max(1, min(limit, 200))
