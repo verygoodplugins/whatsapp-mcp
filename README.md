@@ -794,6 +794,10 @@ captions. This applies to both active and archived chats. The fix does not
 retroactively restore text skipped by an older bridge: the affected messages
 must be delivered again through history sync, subject to the phone's limits.
 
+Chat activity timestamps follow the newest history message stored as supported
+text or media. Protocol-only entries do not advance chat activity or create a
+chat with a phantom latest message.
+
 ### Requesting history for a single chat (on-demand)
 
 `--full-history-pair` only applies to a fresh pair, so recovering a gap in one

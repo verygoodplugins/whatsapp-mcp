@@ -3483,14 +3483,14 @@ func handleCallOffer(client *whatsmeow.Client, messageStore *MessageStore, meta 
 }
 
 // historyMessageIsStorable mirrors the skip rule in handleHistorySync's store
-// loop: only text (Conversation / ExtendedTextMessage) or media produces a
+// loop: text supported by the shared parser or media produces a
 // messages row, so anything else must not influence chat ordering.
 func historyMessageIsStorable(msg *waProto.HistorySyncMsg) bool {
 	if msg == nil || msg.Message == nil || msg.Message.Message == nil {
 		return false
 	}
 	m := msg.Message.Message
-	if m.GetConversation() != "" || m.GetExtendedTextMessage().GetText() != "" {
+	if extractTextContent(m) != "" {
 		return true
 	}
 	mediaType, _, _, _, _, _, _ := extractMediaInfo(m, time.Time{}, "")

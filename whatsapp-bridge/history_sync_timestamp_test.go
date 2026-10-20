@@ -108,3 +108,35 @@ func TestHandleHistorySync_ProtocolOnlyConversationCreatesNoChat(t *testing.T) {
 		t.Fatalf("a conversation with nothing storable must not create a chats row")
 	}
 }
+
+func TestHandleHistorySync_SupportedBusinessTextSetsChatTime(t *testing.T) {
+	for _, archived := range []bool{false, true} {
+		for _, tc := range []struct {
+			name string
+			msg  *waProto.Message
+		}{
+			{"template", &waProto.Message{TemplateMessage: &waProto.TemplateMessage{
+				HydratedTemplate: &waProto.TemplateMessage_HydratedFourRowTemplate{HydratedContentText: proto.String("business text")},
+			}}},
+			{"buttons", &waProto.Message{ButtonsMessage: &waProto.ButtonsMessage{ContentText: proto.String("button text")}}},
+		} {
+			t.Run(tc.name+map[bool]string{false: "/active", true: "/archived"}[archived], func(t *testing.T) {
+				client := newTestClientWithSelf(&mockLIDStore{}, selfPhone)
+				ms := newTestMessageStore(t)
+				ts := time.Unix(1710000000, 0)
+				text := historyTextMsg("business", "", ts)
+				text.Message.Message = tc.msg
+				sync := historySyncFor(phonePN.String(), historyRevokeMsg("control", "other", ts.Add(time.Minute)), text)
+				sync.Data.Conversations[0].Archived = proto.Bool(archived)
+				handleHistorySync(client, ms, sync, testLogger())
+				got, valid, exists := historyChatLastMessageTime(t, ms, phonePN.String())
+				if !exists || !valid || !got.Equal(ts) {
+					t.Fatalf("last message time = %v (valid=%v, exists=%v), want %v", got, valid, exists, ts)
+				}
+				if n := queryMessageCount(ms, phonePN.String()); n != 1 {
+					t.Fatalf("stored %d messages, want 1", n)
+				}
+			})
+		}
+	}
+}
