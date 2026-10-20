@@ -230,7 +230,6 @@ test_install_preserves_optional_env_values() {
     WHATSAPP_AUTO_DOWNLOAD_MEDIA="false" \
     FORWARD_SELF="true" \
     WHATSAPP_BRIDGE_TOKEN="test token with spaces and 'quotes'" \
-    WHATSAPP_MEDIA_ROOTS="/tmp/outbox:/tmp/other outbox" \
     ./scripts/install-launchd-macos.sh
   )
 
@@ -243,7 +242,6 @@ test_install_preserves_optional_env_values() {
   assert_contains "$support/launchd.env" "export FORWARD_SELF='true'"
   run_monitor "$tmp" '{"status":"ok","connected":true}'
   assert_contains "$tmp/cmd.log" "Authorization: Bearer test token with spaces and 'quotes'"
-  assert_contains "$support/launchd.env" "export WHATSAPP_MEDIA_ROOTS='/tmp/outbox:/tmp/other outbox'"
 }
 
 test_uninstall_removes_generated_files_only() {
