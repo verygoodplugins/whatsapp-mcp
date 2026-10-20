@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1](https://github.com/verygoodplugins/whatsapp-mcp/compare/v0.7.0...v0.7.1) (2026-10-20)
+
+
+### Bug Fixes
+
+* **bridge:** derive history chat activity from stored message text ([#288](https://github.com/verygoodplugins/whatsapp-mcp/issues/288)) ([2ccf384](https://github.com/verygoodplugins/whatsapp-mcp/commit/2ccf384ce9fbc5241468e71409598a150b6ab3e0))
+* **bridge:** exit non-zero when connection attempts are exhausted ([#266](https://github.com/verygoodplugins/whatsapp-mcp/issues/266)) ([8c20f2f](https://github.com/verygoodplugins/whatsapp-mcp/commit/8c20f2f461565d1798de7afc0bf3c21c6cd39ec2))
+* **bridge:** only advance chat last_message_time when a message row is stored ([#229](https://github.com/verygoodplugins/whatsapp-mcp/issues/229)) ([6f011f2](https://github.com/verygoodplugins/whatsapp-mcp/commit/6f011f2493ec55d4e1fb9eec653058ebf51d6883))
+* **bridge:** preserve shared contact cards as searchable text ([#287](https://github.com/verygoodplugins/whatsapp-mcp/issues/287)) ([dee8154](https://github.com/verygoodplugins/whatsapp-mcp/commit/dee8154a595bf7ff116fb23752a7235471a3f41d))
+* **bridge:** preserve supported message text during history sync ([#271](https://github.com/verygoodplugins/whatsapp-mcp/issues/271)) ([c4d05fa](https://github.com/verygoodplugins/whatsapp-mcp/commit/c4d05fae0aecf29acbb43310e9f5ef60f2f3c51d))
+* **bridge:** read top-level participant for history-sync group senders ([#171](https://github.com/verygoodplugins/whatsapp-mcp/issues/171)) ([561582f](https://github.com/verygoodplugins/whatsapp-mcp/commit/561582fd13db73ae2d8ec97cd3bd0e357ec88c8e))
+* **bridge:** refresh fallback chat names and repair cached self numbers ([#284](https://github.com/verygoodplugins/whatsapp-mcp/issues/284)) ([be5475f](https://github.com/verygoodplugins/whatsapp-mcp/commit/be5475fce97ab4ee6331a111483550423492ae8c))
+* **deps:** patch remaining Python dependency vulnerabilities ([#280](https://github.com/verygoodplugins/whatsapp-mcp/issues/280)) ([cca2413](https://github.com/verygoodplugins/whatsapp-mcp/commit/cca2413d8ecf18988c040126fe8a7e64a3b46ebd))
+* **mcp:** anchor contact lookups on the JID user part ([#225](https://github.com/verygoodplugins/whatsapp-mcp/issues/225)) ([2ea6c3b](https://github.com/verygoodplugins/whatsapp-mcp/commit/2ea6c3b7eba98146ddb8cbd64df01e1f54b0f92c))
+* **mcp:** clamp pagination lower bounds ([#226](https://github.com/verygoodplugins/whatsapp-mcp/issues/226)) ([44a01c3](https://github.com/verygoodplugins/whatsapp-mcp/commit/44a01c36f4c4b6df9507852ddf947caaf542d284))
+* **mcp:** filter resolved names and read paired account identity ([#289](https://github.com/verygoodplugins/whatsapp-mcp/issues/289)) ([ccdd637](https://github.com/verygoodplugins/whatsapp-mcp/commit/ccdd637e5b31597160dca3ef8894c5b5dfda5e6e))
+* **mcp:** open the bridge message store with SQLite read-only mode ([#286](https://github.com/verygoodplugins/whatsapp-mcp/issues/286)) ([ba03195](https://github.com/verygoodplugins/whatsapp-mcp/commit/ba0319520b07569d6e4d99dc3fdd6d90e53d4383))
+* **mcp:** resolve placeholder and cached self-number chat names ([#285](https://github.com/verygoodplugins/whatsapp-mcp/issues/285)) ([b4c0a44](https://github.com/verygoodplugins/whatsapp-mcp/commit/b4c0a445cfa1a86077a5885ed5f2acf03d8726c8))
+
 ## [0.7.0](https://github.com/verygoodplugins/whatsapp-mcp/compare/v0.6.0...v0.7.0) (2026-09-23)
 
 
