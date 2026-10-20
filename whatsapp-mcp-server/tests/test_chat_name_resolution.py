@@ -145,6 +145,28 @@ def test_get_chat_resolves_placeholder(dbs):
     assert chat["name"] == "Ada Lovelace"
 
 
+@pytest.mark.parametrize("contact_available", [True, False])
+def test_get_chat_repairs_stored_self_number_without_bridge(dbs, contact_available):
+    messages, contacts = dbs
+    with sqlite3.connect(contacts) as conn:
+        conn.execute("UPDATE whatsmeow_contacts SET our_jid = '31699999999:17@s.whatsapp.net'")
+        if not contact_available:
+            conn.execute("DELETE FROM whatsmeow_contacts WHERE their_jid = ?", (PEER,))
+    with sqlite3.connect(messages) as conn:
+        conn.execute("UPDATE chats SET name = '31699999999' WHERE jid = ?", (PEER,))
+    expected = "Ada Lovelace" if contact_available else "31600000001"
+    assert whatsapp.get_chat(PEER, include_last_message=False)["name"] == expected
+    with sqlite3.connect(messages) as conn:
+        assert conn.execute("SELECT name FROM chats WHERE jid = ?", (PEER,)).fetchone()[0] == "31699999999"
+
+
+def test_other_numeric_names_are_preserved(dbs):
+    messages, _ = dbs
+    with sqlite3.connect(messages) as conn:
+        conn.execute("UPDATE chats SET name = '31688888888' WHERE jid = ?", (PEER,))
+    assert whatsapp.get_chat(PEER, include_last_message=False)["name"] == "31688888888"
+
+
 def test_missing_whatsmeow_db_is_not_fatal(dbs, monkeypatch):
     """The placeholder survives when whatsapp.db is absent."""
     monkeypatch.setattr(whatsapp, "WHATSMEOW_DB_PATH", "/nonexistent/whatsapp.db")

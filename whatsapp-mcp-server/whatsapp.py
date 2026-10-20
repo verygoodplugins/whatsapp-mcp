@@ -4,6 +4,7 @@ import os.path
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -340,9 +341,35 @@ def _display_chat_name(jid: str, stored_name: str | None) -> str | None:
     The lookup opens its own short-lived connection, so it is deliberately
     gated on the placeholder check rather than run for every row.
     """
-    if not _is_placeholder_chat_name(jid, stored_name):
+    placeholder = _is_placeholder_chat_name(jid, stored_name)
+    wrong_self_name = not placeholder and _is_stored_self_name(jid, stored_name)
+    if not placeholder and not wrong_self_name:
         return stored_name
-    return _resolve_name_from_whatsmeow(jid) or stored_name
+    fallback = jid.split("@")[0] if wrong_self_name else stored_name
+    return _resolve_name_from_whatsmeow(jid) or fallback
+
+
+def _is_stored_self_name(jid: str, name: str | None) -> bool:
+    """Recognize outgoing-first DM names cached as our own account number."""
+    user, _, server = jid.partition("@")
+    if server not in ("s.whatsapp.net", "lid") or not name or not name.isdecimal() or user == name:
+        return False
+    conn = None
+    try:
+        conn = sqlite3.connect(Path(WHATSMEOW_DB_PATH).resolve().as_uri() + "?mode=ro", uri=True)
+        own_users = {
+            row[0].split("@")[0].split(":")[0]
+            for row in conn.execute("SELECT DISTINCT our_jid FROM whatsmeow_contacts")
+            if row[0]
+        }
+        peer = (_resolve_lid_to_phone(user) or user) if server == "lid" else user
+        named_user = _resolve_lid_to_phone(name) or name
+        return named_user in own_users and peer not in own_users
+    except sqlite3.Error:
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _like_escape(value: str) -> str:
