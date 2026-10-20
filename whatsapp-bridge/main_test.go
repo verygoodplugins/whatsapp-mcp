@@ -666,6 +666,95 @@ func TestGetChatName_LocalContactFallbackMissingTableFallsBack(t *testing.T) {
 	}
 }
 
+func TestGetChatName_PlaceholderNameIsRefreshedFromContacts(t *testing.T) {
+	client := newTestClientWithSelf(&mockLIDStore{}, selfPhone)
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	// The chat was stored earlier with the bare number, which is what
+	// GetChatName falls back to when no contact is known yet.
+	if _, err := ms.db.Exec(
+		`INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)`,
+		phonePN.String(), phonePN.User, time.Now(),
+	); err != nil {
+		t.Fatalf("seed chat: %v", err)
+	}
+
+	waDB, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open whatsmeow db: %v", err)
+	}
+	t.Cleanup(func() { _ = waDB.Close() })
+	ms.waDB = waDB
+
+	// Meanwhile the contact turned up in whatsmeow's store — e.g. the contact
+	// sync that runs after a re-pair.
+	if _, err := waDB.Exec(`
+		CREATE TABLE whatsmeow_contacts (
+			our_jid TEXT,
+			their_jid TEXT,
+			first_name TEXT,
+			full_name TEXT,
+			push_name TEXT,
+			business_name TEXT,
+			PRIMARY KEY (our_jid, their_jid)
+		);
+		INSERT INTO whatsmeow_contacts (our_jid, their_jid, first_name, full_name, push_name, business_name)
+			VALUES (?, ?, '', 'Real Name', '', '');
+	`, selfPhone.String(), phonePN.String()); err != nil {
+		t.Fatalf("seed whatsmeow contacts: %v", err)
+	}
+
+	got := GetChatName(client, ms, phonePN, phonePN.String(), nil, "", logger)
+	if got != "Real Name" {
+		t.Fatalf("GetChatName() = %q, want the resolved contact name to replace the numeric placeholder", got)
+	}
+}
+
+func TestGetChatName_RealStoredNameIsKept(t *testing.T) {
+	client := newTestClientWithSelf(&mockLIDStore{}, selfPhone)
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	if _, err := ms.db.Exec(
+		`INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)`,
+		phonePN.String(), "Nickname I Chose", time.Now(),
+	); err != nil {
+		t.Fatalf("seed chat: %v", err)
+	}
+
+	got := GetChatName(client, ms, phonePN, phonePN.String(), nil, "Sender Fallback", logger)
+	if got != "Nickname I Chose" {
+		t.Fatalf("GetChatName() = %q, want the stored name to be preserved", got)
+	}
+}
+
+func TestIsPlaceholderChatName(t *testing.T) {
+	group := types.JID{User: "123456789", Server: types.GroupServer}
+
+	cases := []struct {
+		name string
+		in   string
+		jid  types.JID
+		want bool
+	}{
+		{"empty", "", phonePN, true},
+		{"bare number", phonePN.User, phonePN, true},
+		{"group fallback", "Group 123456789", group, true},
+		{"real name", "Alice", phonePN, false},
+		{"other number", "31600000000", phonePN, false},
+		{"group with real name", "Family", group, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isPlaceholderChatName(tc.in, tc.jid); got != tc.want {
+				t.Fatalf("isPlaceholderChatName(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // --- Integration tests: handleMessage stores under correct JID ---
 
 func TestHandleMessage_IncomingLIDMessage_StoredUnderPhoneJID(t *testing.T) {
@@ -3269,5 +3358,49 @@ func TestRenderPairingQRCodes_Outcomes(t *testing.T) {
 		if got != c.want {
 			t.Errorf("%s: outcome = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+func TestGetChatName_SenderFallbackNeverUsesOwnNumber(t *testing.T) {
+	client := newTestClientWithSelf(&mockLIDStore{}, selfPhone)
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	// No contact known for the peer, and the triggering message was outgoing,
+	// so handleMessage passes our own user-part as sender.
+	got := GetChatName(client, ms, phonePN, phonePN.String(), nil, selfPhone.User, logger)
+	if got == selfPhone.User {
+		t.Fatalf("GetChatName() = %q, want the peer JID rather than our own number", got)
+	}
+	if got != phonePN.User {
+		t.Fatalf("GetChatName() = %q, want %q", got, phonePN.User)
+	}
+}
+
+func TestGetChatName_SenderFallbackStillUsedForOtherSender(t *testing.T) {
+	client := newTestClientWithSelf(&mockLIDStore{}, selfPhone)
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+
+	got := GetChatName(client, ms, phonePN, phonePN.String(), nil, "Sender Fallback", logger)
+	if got != "Sender Fallback" {
+		t.Fatalf("GetChatName() = %q, want the sender fallback to be kept", got)
+	}
+}
+
+func TestIsSelfUser(t *testing.T) {
+	client := newTestClientWithSelf(&mockLIDStore{}, selfPhone)
+
+	if !isSelfUser(client, selfPhone.User) {
+		t.Fatalf("isSelfUser(%q) = false, want true for our own phone user-part", selfPhone.User)
+	}
+	if isSelfUser(client, phonePN.User) {
+		t.Fatalf("isSelfUser(%q) = true, want false for a peer", phonePN.User)
+	}
+	if isSelfUser(client, "") {
+		t.Fatal("isSelfUser(\"\") = true, want false")
+	}
+	if isSelfUser(nil, selfPhone.User) {
+		t.Fatal("isSelfUser(nil, ...) = true, want false")
 	}
 }

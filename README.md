@@ -1016,6 +1016,13 @@ are documented in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Troubleshooting
 
+### Chat names show phone numbers
+
+The bridge retries name resolution when a stored chat name is a numeric
+placeholder. It also repairs DMs previously named after your own account number
+when another message or history-sync event reaches that chat. Real stored names
+are preserved.
+
 ### Authentication Issues
 
 - **Pairing fails with `Client outdated` or HTTP 405**: Update to the latest
@@ -1030,6 +1037,10 @@ are documented in [docs/RELEASING.md](docs/RELEASING.md).
   build from 2026-09-15 or later; older ones never emit the rotated code.
 - **Device Limit Reached**: Remove a linked device from WhatsApp Settings > Linked Devices.
 - **No Messages Loading**: Initial sync can take several minutes for large chat histories.
+- **MCP tools fail with `WhatsApp messages database not found`**: The MCP
+  server opens `messages.db` read-only and refuses to create it. Start the
+  bridge once so it creates `whatsapp-bridge/store/messages.db`, or set
+  `WHATSAPP_DB_PATH` to wherever it lives.
 - **Out of Sync**: Back up `whatsapp-bridge/store`, then move
   `whatsapp-bridge/store/whatsapp.db` aside and re-authenticate. Keep
   `messages.db` unless you intentionally want to discard local message history.
