@@ -826,6 +826,24 @@ Caveats:
   message first.
 - Messages the phone has deleted are not recoverable, as above.
 
+### Listing a group's members
+
+`messages.db` only knows the members of a group who have sent something. To get
+the full member list, fetched live from WhatsApp:
+
+```bash
+curl http://127.0.0.1:8080/api/group-info?jid=120363000000000000@g.us \
+  -H "Authorization: Bearer $(cat whatsapp-bridge/store/.bridge-token)"
+```
+
+```json
+{"jid": "120363000000000000@g.us", "name": "Family",
+ "participants": [{"jid": "15555550100@s.whatsapp.net", "phone": "15555550100", "is_admin": true, "is_super_admin": false}]}
+```
+
+Members are resolved from LID to their phone-number JID where the bridge knows
+it. A member known only by LID keeps the `@lid` JID and has no `phone`.
+
 ## Call History
 
 The bridge captures incoming WhatsApp voice and video calls live into a
@@ -915,6 +933,7 @@ flowchart LR
         REACT["/api/react"]
         TYPE["/api/typing"]
         HIST["/api/history"]
+        GINFO["/api/group-info"]
         HEALTH["/api/health"]
     end
 
