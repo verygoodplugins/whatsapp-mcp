@@ -1121,6 +1121,30 @@ func extractTextContent(msg *waProto.Message) string {
 		return doc.GetCaption()
 	}
 
+	// Shared contact cards (vCards) carry no URL/MediaKey — the vCard text is
+	// embedded directly in the message rather than fetched from the CDN — so
+	// without this branch extractMediaInfo also returns "" for them and the
+	// message is silently dropped at the "no content and no media" gate in
+	// handleMessage: shared contacts were vanishing entirely.
+	if contact := msg.GetContactMessage(); contact != nil {
+		if body := formatContactContent(contact.GetDisplayName(), contact.GetVcard()); body != "" {
+			return "📇 " + body
+		}
+	}
+	if contacts := msg.GetContactsArrayMessage(); contacts != nil {
+		if list := contacts.GetContacts(); len(list) > 0 {
+			names := make([]string, 0, len(list))
+			for _, c := range list {
+				if body := formatContactContent(c.GetDisplayName(), c.GetVcard()); body != "" {
+					names = append(names, body)
+				}
+			}
+			if len(names) > 0 {
+				return fmt.Sprintf("📇 %d contacts shared: %s", len(names), strings.Join(names, "; "))
+			}
+		}
+	}
+
 	// WhatsApp Business templates arrive hydrated — body lives in
 	// HydratedTemplate.HydratedContentText. Without this branch every
 	// template-sent message (e.g. WABA Connect Hrms_* notifications)
@@ -1164,6 +1188,52 @@ func extractTextContent(msg *waProto.Message) string {
 	}
 
 	return ""
+}
+
+// formatContactContent renders a shared contact card as searchable text:
+// the display name plus every phone number in the vCard body. All numbers are
+// kept (not just the first) because the vCard is the only copy we ever get —
+// there is no CDN payload to re-download later. Returns "" when there is
+// nothing usable (no display name and no TEL line).
+func formatContactContent(displayName, vcard string) string {
+	phones := extractVCardPhones(vcard)
+	if displayName == "" && len(phones) == 0 {
+		return ""
+	}
+	if len(phones) > 0 {
+		return fmt.Sprintf("%s (%s)", displayName, strings.Join(phones, ", "))
+	}
+	return displayName
+}
+
+// extractVCardPhones returns the values of all TEL lines in a vCard blob,
+// e.g. "TEL;type=CELL;waid=6281234567890:+62 812-3456-7890" -> "+62 812-3456-7890".
+// iPhone-exported vCards wrap properties in groups ("item1.TEL;...:+62 ..."),
+// so the property name is compared after stripping any group prefix.
+func extractVCardPhones(vcard string) []string {
+	var phones []string
+	// vCard continuation lines remove the newline and one leading whitespace.
+	// Unfold before splitting properties so TEL values cannot be truncated.
+	vcard = strings.NewReplacer("\r\n ", "", "\r\n\t", "", "\n ", "", "\n\t", "").Replace(vcard)
+	for _, line := range strings.Split(vcard, "\n") {
+		line = strings.TrimSpace(line)
+		prop := line
+		if i := strings.IndexAny(prop, ";:"); i != -1 {
+			prop = prop[:i]
+		}
+		if dot := strings.LastIndex(prop, "."); dot != -1 {
+			prop = prop[dot+1:]
+		}
+		if !strings.EqualFold(prop, "TEL") {
+			continue
+		}
+		if idx := strings.LastIndex(line, ":"); idx != -1 {
+			if phone := strings.TrimSpace(line[idx+1:]); phone != "" {
+				phones = append(phones, phone)
+			}
+		}
+	}
+	return phones
 }
 
 // SendMessageResponse represents the response for the send message API
@@ -1317,6 +1387,10 @@ func extractChatEphemeralFromMessage(msg *waProto.Message) ChatEphemeralSettings
 		ctx = msg.DocumentMessage.GetContextInfo()
 	case msg.StickerMessage != nil:
 		ctx = msg.StickerMessage.GetContextInfo()
+	case msg.ContactMessage != nil:
+		ctx = msg.ContactMessage.GetContextInfo()
+	case msg.ContactsArrayMessage != nil:
+		ctx = msg.ContactsArrayMessage.GetContextInfo()
 	}
 	if ctx == nil {
 		return ChatEphemeralSettings{}
@@ -1709,6 +1783,10 @@ func extractQuotedMessageInfo(msg *waProto.Message) (quotedMessageId string, quo
 		contextInfo = doc.GetContextInfo()
 	} else if aud := msg.GetAudioMessage(); aud != nil {
 		contextInfo = aud.GetContextInfo()
+	} else if contact := msg.GetContactMessage(); contact != nil {
+		contextInfo = contact.GetContextInfo()
+	} else if contacts := msg.GetContactsArrayMessage(); contacts != nil {
+		contextInfo = contacts.GetContextInfo()
 	}
 
 	if contextInfo == nil {
@@ -1750,6 +1828,10 @@ func extractMentionedJIDs(msg *waProto.Message) []string {
 		contextInfo = doc.GetContextInfo()
 	} else if aud := msg.GetAudioMessage(); aud != nil {
 		contextInfo = aud.GetContextInfo()
+	} else if contact := msg.GetContactMessage(); contact != nil {
+		contextInfo = contact.GetContextInfo()
+	} else if contacts := msg.GetContactsArrayMessage(); contacts != nil {
+		contextInfo = contacts.GetContextInfo()
 	}
 
 	if contextInfo == nil || len(contextInfo.MentionedJID) == 0 {
