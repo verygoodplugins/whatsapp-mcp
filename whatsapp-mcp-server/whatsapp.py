@@ -3,7 +3,7 @@ import os
 import os.path
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import requests
@@ -409,6 +409,32 @@ def format_messages_list(messages: list[Message], show_chat_info: bool = True) -
     return output
 
 
+# messages.timestamp is written by the bridge with a UTC offset
+# ("2024-01-15 10:30:00.123+02:00"). Comparing it as a raw string against a
+# naive or UTC bound is off by the bridge's offset, so both sides are
+# normalised to UTC in SQL: this expression for the column, _utc_bound() for
+# the parameter. %f keeps millisecond precision so a bound never rounds a
+# message onto the wrong side of the comparison.
+_TIMESTAMP_UTC_SQL = "strftime('%Y-%m-%d %H:%M:%f', messages.timestamp)"
+
+
+def _utc_bound(value: str, field: str) -> str:
+    """Parse an ISO-8601 filter bound and render it as UTC 'YYYY-MM-DD HH:MM:SS.mmm'.
+
+    Naive inputs are read as the MCP server's local time, the same clock the
+    bridge stamps messages with, so "2026-01-01T09:00" means 9am as the user
+    sees it in WhatsApp.
+    """
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"Invalid date format for '{field}': {value}. Please use ISO-8601 format.")
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    parsed = parsed.astimezone(UTC)
+    return parsed.strftime("%Y-%m-%d %H:%M:%S.") + f"{parsed.microsecond // 1000:03d}"
+
+
 def list_messages(
     after: str | None = None,
     before: str | None = None,
@@ -454,22 +480,12 @@ def list_messages(
 
         # Add filters
         if after:
-            try:
-                after = datetime.fromisoformat(after)
-            except ValueError:
-                raise ValueError(f"Invalid date format for 'after': {after}. Please use ISO-8601 format.")
-
-            where_clauses.append("messages.timestamp > ?")
-            params.append(after)
+            where_clauses.append(f"{_TIMESTAMP_UTC_SQL} > ?")
+            params.append(_utc_bound(after, "after"))
 
         if before:
-            try:
-                before = datetime.fromisoformat(before)
-            except ValueError:
-                raise ValueError(f"Invalid date format for 'before': {before}. Please use ISO-8601 format.")
-
-            where_clauses.append("messages.timestamp < ?")
-            params.append(before)
+            where_clauses.append(f"{_TIMESTAMP_UTC_SQL} < ?")
+            params.append(_utc_bound(before, "before"))
 
         if sender_phone_number:
             aliases = _sender_aliases(sender_phone_number)
