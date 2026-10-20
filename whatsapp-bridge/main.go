@@ -3351,7 +3351,11 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 	// yet" and fall through to resolution instead.
 	var existingName string
 	err := messageStore.db.QueryRow("SELECT name FROM chats WHERE jid = ?", chatJID).Scan(&existingName)
-	if err == nil && existingName != "" && !isPlaceholderChatName(existingName, jid) {
+	// Older bridges also cached our own number as the name of outgoing-first
+	// DMs. Repair those on the next event, while preserving actual self chats.
+	badSelfName := (jid.Server == types.DefaultUserServer || jid.Server == types.HiddenUserServer) &&
+		!isSelfUser(client, jid.User) && isSelfUser(client, existingName)
+	if err == nil && existingName != "" && !isPlaceholderChatName(existingName, jid) && !badSelfName {
 		// Chat exists with a name, use that
 		logger.Infof("Using existing chat name for %s: %s", chatJID, existingName)
 		return existingName

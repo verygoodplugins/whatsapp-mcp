@@ -1011,6 +1011,13 @@ are documented in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Troubleshooting
 
+### Chat names show phone numbers
+
+The bridge retries name resolution when a stored chat name is a numeric
+placeholder. It also repairs DMs previously named after your own account number
+when another message or history-sync event reaches that chat. Real stored names
+are preserved.
+
 ### Authentication Issues
 
 - **Pairing fails with `Client outdated` or HTTP 405**: Update to the latest
