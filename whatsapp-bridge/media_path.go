@@ -115,31 +115,42 @@ func validateMediaPath(mediaPath string, allowedRoots []string) (string, error) 
 		return "", fmt.Errorf("media_path is not a regular file: %q", resolved)
 	}
 
-	for _, root := range allowedRoots {
-		if pathHasPrefix(resolved, root) {
-			return resolved, nil
+	if !isPathWithinRoots(resolved, allowedRoots) {
+		return "", fmt.Errorf(
+			"media_path %q is outside the configured media roots; "+
+				"set WHATSAPP_MEDIA_ROOTS to allow additional directories",
+			resolved,
+		)
+	}
+	return resolved, nil
+}
+
+// isPathWithinRoots reports whether path is the same as, or a strict
+// descendant of, one of roots.
+func isPathWithinRoots(path string, roots []string) bool {
+	for _, root := range roots {
+		if pathHasPrefix(path, root) {
+			return true
 		}
 	}
-	return "", fmt.Errorf(
-		"media_path %q is outside the configured media roots; "+
-			"set WHATSAPP_MEDIA_ROOTS to allow additional directories",
-		resolved,
-	)
+	return false
 }
 
 // pathHasPrefix returns true when child is the same path as parent, or a
 // strict descendant. Plain string-prefix matching is unsafe ("/foo/bar"
 // would match "/foo/barbaz"), so we require either exact match or an
 // explicit separator after parent.
+//
+// Keep the strings.HasPrefix(child, ...) check dominating the only return
+// that can yield true: that is the shape CodeQL's go/path-injection
+// barrier-guard model needs to treat this function (and isPathWithinRoots,
+// validateMediaPath on top of it) as a containment check.
 func pathHasPrefix(child, parent string) bool {
-	if child == parent {
-		return true
-	}
 	if !strings.HasPrefix(child, parent) {
 		return false
 	}
 	rest := child[len(parent):]
-	return strings.HasPrefix(rest, string(os.PathSeparator))
+	return rest == "" || strings.HasPrefix(rest, string(os.PathSeparator))
 }
 
 // outboundFileName returns the name a RECIPIENT should see for an outbound
