@@ -791,7 +791,8 @@ Caveats:
 History sync preserves the same supported message text as live reception,
 including WhatsApp Business templates, button messages, and image/video/document
 captions. Shared contact cards are searchable text containing the display name
-and phone numbers; they do not require a media download. This applies to both
+and phone numbers; they do not require a media download. Live contact cards
+retain reply context and disappearing-message settings. This applies to both
 active and archived chats. The fix does not
 retroactively restore text skipped by an older bridge: the affected messages
 must be delivered again through history sync, subject to the phone's limits.

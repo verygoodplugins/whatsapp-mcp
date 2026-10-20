@@ -1387,6 +1387,10 @@ func extractChatEphemeralFromMessage(msg *waProto.Message) ChatEphemeralSettings
 		ctx = msg.DocumentMessage.GetContextInfo()
 	case msg.StickerMessage != nil:
 		ctx = msg.StickerMessage.GetContextInfo()
+	case msg.ContactMessage != nil:
+		ctx = msg.ContactMessage.GetContextInfo()
+	case msg.ContactsArrayMessage != nil:
+		ctx = msg.ContactsArrayMessage.GetContextInfo()
 	}
 	if ctx == nil {
 		return ChatEphemeralSettings{}
@@ -1779,6 +1783,10 @@ func extractQuotedMessageInfo(msg *waProto.Message) (quotedMessageId string, quo
 		contextInfo = doc.GetContextInfo()
 	} else if aud := msg.GetAudioMessage(); aud != nil {
 		contextInfo = aud.GetContextInfo()
+	} else if contact := msg.GetContactMessage(); contact != nil {
+		contextInfo = contact.GetContextInfo()
+	} else if contacts := msg.GetContactsArrayMessage(); contacts != nil {
+		contextInfo = contacts.GetContextInfo()
 	}
 
 	if contextInfo == nil {
@@ -1820,6 +1828,10 @@ func extractMentionedJIDs(msg *waProto.Message) []string {
 		contextInfo = doc.GetContextInfo()
 	} else if aud := msg.GetAudioMessage(); aud != nil {
 		contextInfo = aud.GetContextInfo()
+	} else if contact := msg.GetContactMessage(); contact != nil {
+		contextInfo = contact.GetContextInfo()
+	} else if contacts := msg.GetContactsArrayMessage(); contacts != nil {
+		contextInfo = contacts.GetContextInfo()
 	}
 
 	if contextInfo == nil || len(contextInfo.MentionedJID) == 0 {
