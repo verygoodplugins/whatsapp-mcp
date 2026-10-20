@@ -167,6 +167,33 @@ def test_other_numeric_names_are_preserved(dbs):
     assert whatsapp.get_chat(PEER, include_last_message=False)["name"] == "31688888888"
 
 
+def test_query_matches_resolved_name(dbs):
+    chats = whatsapp.list_chats(query="Ada", limit=1)
+    assert [chat["jid"] for chat in chats] == [PEER]
+
+
+def test_name_sort_uses_resolved_name_before_pagination(dbs):
+    with sqlite3.connect(dbs[0]) as conn:
+        conn.execute("DELETE FROM chats WHERE jid NOT IN (?, ?)", (PEER, NAMED))
+    assert whatsapp.list_chats(sort_by="name", limit=1, page=0)[0]["name"] == "Ada Lovelace"
+    assert whatsapp.list_chats(sort_by="name", limit=1, page=1)[0]["name"] == "Bert"
+
+
+@pytest.mark.parametrize("name", ["31699999999", "999111222333444"])
+@pytest.mark.parametrize("drop_contacts", [False, True])
+def test_self_number_repair_uses_device_identity_without_contacts(dbs, name, drop_contacts):
+    messages, contacts = dbs
+    with sqlite3.connect(contacts) as conn:
+        conn.execute("CREATE TABLE whatsmeow_device (jid TEXT, lid TEXT)")
+        conn.execute("INSERT INTO whatsmeow_device VALUES ('31699999999:17@s.whatsapp.net', '999111222333444@lid')")
+        conn.execute("DELETE FROM whatsmeow_contacts")
+        if drop_contacts:
+            conn.execute("DROP TABLE whatsmeow_contacts")
+    with sqlite3.connect(messages) as conn:
+        conn.execute("UPDATE chats SET name = ? WHERE jid = ?", (name, PEER))
+    assert whatsapp.get_chat(PEER, include_last_message=False)["name"] == "31600000001"
+
+
 def test_missing_whatsmeow_db_is_not_fatal(dbs, monkeypatch):
     """The placeholder survives when whatsapp.db is absent."""
     monkeypatch.setattr(whatsapp, "WHATSMEOW_DB_PATH", "/nonexistent/whatsapp.db")
