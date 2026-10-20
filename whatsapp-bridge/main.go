@@ -1096,8 +1096,15 @@ func (store *MessageStore) GetChats() (map[string]time.Time, error) {
 	return chats, nil
 }
 
-// Extract text content from a message
+// unwrapMessageContent normalizes raw history-sync envelopes using the same
+// whatsmeow parser used for live events. Already-unwrapped messages are unchanged.
+func unwrapMessageContent(msg *waProto.Message) *waProto.Message {
+	return (&events.Message{RawMessage: msg}).UnwrapRaw().Message
+}
+
+// Extract text content from a message.
 func extractTextContent(msg *waProto.Message) string {
+	msg = unwrapMessageContent(msg)
 	if msg == nil {
 		return ""
 	}
@@ -1844,6 +1851,7 @@ func extractMentionedJIDs(msg *waProto.Message) []string {
 // Extract media info from a message. Filenames embed the message ID so that
 // two messages arriving in the same second do not collide on a single file.
 func extractMediaInfo(msg *waProto.Message, msgTimestamp time.Time, msgID string) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
+	msg = unwrapMessageContent(msg)
 	if msg == nil {
 		return "", "", "", nil, nil, nil, 0
 	}
