@@ -38,6 +38,20 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 - Claude Desktop or Cursor
 - FFmpeg (optional, for voice message conversion)
 
+**Intel macOS:** patched `cryptography` releases no longer provide Intel Mac
+wheels, so installation may compile this dependency from source. Install the
+Xcode Command Line Tools (`xcode-select --install`) and, with Homebrew,
+`brew install rust openssl@3 pkg-config`. Then install the Python dependencies:
+
+```bash
+cd whatsapp-mcp-server
+OPENSSL_DIR="$(brew --prefix openssl@3)" uv sync
+```
+
+Use a Rust toolchain supported by the installed `cryptography` release; see its
+[source-build instructions](https://cryptography.io/en/latest/installation/#building-cryptography-on-macos).
+Keep the patched dependency rather than restoring the old vulnerable version pin.
+
 ### Quick Start
 
 1. **Clone the repository**

@@ -129,6 +129,7 @@ When adding a new env var: document it here, in `README.md`, and in `.env.exampl
 4. **History sync** is controlled by the *primary* device (the phone). The bridge can request more at pair time (see the `--full-history-pair` flag) or for a single chat at runtime (`POST /api/history`, see `history_ondemand.go`), but the phone has the final word.
 5. **`messages.db` is the source of truth for the MCP server.** Don't make the MCP server dependent on the bridge being up for *read* operations.
 6. **Outgoing calls are not visible to linked devices.** Don't promise features that depend on them.
+7. **Intel macOS dependency builds.** Patched `cryptography` is required even when Intel Mac wheels are unavailable. Source builds need Rust, OpenSSL, pkg-config, and Xcode Command Line Tools (see README prerequisites); do not restore the old `<49` pin to avoid installing build tools.
 
 ## Where to make changes
 
