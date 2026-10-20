@@ -4,6 +4,7 @@ import os.path
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -33,17 +34,19 @@ def _connect_messages_db() -> sqlite3.Connection:
     a misconfigured WHATSAPP_DB_PATH (or a bridge that never ran) used to read
     as "you have no messages" rather than a setup problem. FileNotFoundError is
     not a sqlite3.Error, so it surfaces to the MCP client as a tool error with
-    an actionable message. query_only then guarantees the MCP server never
-    writes to the bridge-owned store.
+    an actionable message. SQLite's mode=ro prevents both database creation
+    and writes, even if the path disappears before the connection opens.
     """
-    if not os.path.isfile(MESSAGES_DB_PATH):
-        raise FileNotFoundError(
-            f"WhatsApp messages database not found at {MESSAGES_DB_PATH}. "
-            "Start the bridge once so it creates the store, or point WHATSAPP_DB_PATH at it."
-        )
-    conn = sqlite3.connect(MESSAGES_DB_PATH)
-    conn.execute("PRAGMA query_only = ON")
-    return conn
+    path = Path(MESSAGES_DB_PATH).resolve()
+    try:
+        return sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"WhatsApp messages database not found at {MESSAGES_DB_PATH}. "
+                "Start the bridge once so it creates the store, or point WHATSAPP_DB_PATH at it."
+            ) from exc
+        raise
 
 
 def _read_bridge_token() -> str | None:

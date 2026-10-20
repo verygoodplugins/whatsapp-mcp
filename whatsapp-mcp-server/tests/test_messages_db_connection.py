@@ -64,10 +64,26 @@ def test_messages_db_is_opened_read_only(tmp_path, monkeypatch):
 
     conn = whatsapp._connect_messages_db()
     try:
+        conn.execute("PRAGMA query_only = OFF")
         with pytest.raises(sqlite3.OperationalError, match="readonly"):
             conn.execute("INSERT INTO chats (jid) VALUES ('x@s.whatsapp.net')")
     finally:
         conn.close()
+
+
+def test_removed_database_is_not_recreated(tmp_path, monkeypatch):
+    db = _make_db(tmp_path / "messages.db")
+    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(db))
+    connect = sqlite3.connect
+
+    def remove_before_open(*args, **kwargs):
+        db.unlink()
+        return connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", remove_before_open)
+    with pytest.raises(FileNotFoundError):
+        whatsapp._connect_messages_db()
+    assert not db.exists()
 
 
 def test_messages_db_path_with_uri_special_characters(tmp_path, monkeypatch):
