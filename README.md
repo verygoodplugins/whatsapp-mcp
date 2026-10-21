@@ -25,6 +25,7 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
 - **Read Receipts**: Explicitly mark selected messages as read across linked devices
 - **Media Support**: Send and download images, videos, documents, and voice messages
 - **Call History**: Capture incoming voice/video calls into a local SQLite table (live, 1:1 and group)
+- **WhatsApp Business Lists**: Read, create and change lists (labels) and the chats in them over the bridge REST API
 - **Webhook Integration**: Forward incoming messages to external services
 - **Local Storage**: All messages stored locally in SQLite - only sent to Claude when you allow it
 
@@ -878,6 +879,104 @@ CREATE TABLE calls (
   calls via `CallOfferNotice` include a `Media` field and are recorded
   accurately as voice or video.
 
+## WhatsApp Business Lists
+
+WhatsApp Business lists (labels in the protocol) sync between devices through
+app state, not messages. The bridge keeps every list and the chats in it in
+`messages.db`, fed by the `LabelEdit` and `LabelAssociationChat` events
+WhatsApp sends whenever any device changes a list, and serves them over REST:
+
+```bash
+TOKEN=$(cat whatsapp-bridge/store/.bridge-token)
+
+# Every list with its chats; ?resync=1 re-reads all lists from WhatsApp first
+curl http://127.0.0.1:8080/api/labels -H "Authorization: Bearer $TOKEN"
+
+# Create a list (no "id"), or rename, recolour or delete one (pass its "id")
+curl -X POST http://127.0.0.1:8080/api/labels \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name": "Follow up"}'
+
+# Put a chat in a list ("labeled": false takes it out)
+curl -X POST http://127.0.0.1:8080/api/labels/chat \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"phone": "15551234567", "label_id": "7", "labeled": true}'
+```
+
+`GET /api/labels` returns the lists that aren't deleted. A chat filed under a
+LID carries the phone number WhatsApp mapped to it (`""` if none is known):
+
+```json
+{
+  "success": true,
+  "labels": [
+    {
+      "id": "7",
+      "name": "Follow up",
+      "color": 0,
+      "list_type": "CUSTOM",
+      "order_index": 7,
+      "chats": [{ "jid": "123456789012345@lid", "phone": "15551234567" }]
+    }
+  ]
+}
+```
+
+`POST /api/labels`:
+
+| Field | Required | Description |
+| --------- | -------- | ------------------------------------------------------ |
+| `id` | no | List to change; omit it to create a list (the response returns the new `id`) |
+| `name` | for a new list | List name |
+| `color` | no | Colour index; `0` for a new list |
+| `deleted` | no | `true` deletes the list |
+
+A new list is written the way the phone writes one (type `CUSTOM`, active, next
+free id and position). An edit keeps every field it doesn't change, including
+those only the phone sets.
+
+`POST /api/labels/chat`:
+
+| Field | Required | Description |
+| --------- | -------- | ------------------------------------------------------ |
+| `phone` | `phone` or `jid` | Phone number; resolved to the chat's LID when one is known, since that is how the phone files list members |
+| `jid` | `phone` or `jid` | Chat JID, used exactly as given (e.g. to remove a member stored under that JID) |
+| `label_id` | yes | List `id` from `GET /api/labels` |
+| `labeled` | no | `true` puts the chat in the list; `false` or omitted takes it out |
+
+### Schema
+
+```sql
+CREATE TABLE labels (
+    id TEXT PRIMARY KEY,     -- chosen by the device that created the list
+    name TEXT,
+    color INTEGER,
+    list_type INTEGER,       -- LabelEditAction.ListType (5 = CUSTOM)
+    order_index INTEGER,
+    deleted BOOLEAN,
+    action TEXT,             -- last LabelEditAction seen, as protojson
+    updated_at TIMESTAMP
+);
+
+CREATE TABLE chat_labels (
+    chat_jid TEXT,           -- the chat as WhatsApp files it, usually a LID
+    label_id TEXT,
+    updated_at TIMESTAMP,
+    PRIMARY KEY (chat_jid, label_id)
+);
+```
+
+### Caveats
+
+- **A bridge paired before this feature starts with no lists.** Its first
+  app-state sync ran without these events, so call `GET /api/labels?resync=1`
+  once to load the lists that already exist.
+- **Writes and `?resync=1` need a live connection** (`503` otherwise). Reading
+  the stored lists does not.
+- **Writes go through WhatsApp app state.** A `502` with
+  `SendAppState failed: ... 409 conflict` means the device's app state is out of
+  sync; see [App State / LTHash Conflicts](#app-state--lthash-conflicts).
+
 ## Architecture
 
 ```mermaid
@@ -924,6 +1023,7 @@ flowchart LR
         REACT["/api/react"]
         TYPE["/api/typing"]
         HIST["/api/history"]
+        LABELS["/api/labels"]
         HEALTH["/api/health"]
     end
 

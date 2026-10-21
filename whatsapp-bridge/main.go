@@ -241,6 +241,10 @@ func NewMessageStore() (*MessageStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to create tables: %v", err)
 	}
+	if err := ensureLabelTables(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to create label tables: %v", err)
+	}
 
 	// Open whatsmeow's database read-only for contact name resolution fallback.
 	// Missing DBs are expected on first run and should not create a new file.
@@ -2511,6 +2515,9 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 	// On-demand history sync endpoint (see history_ondemand.go)
 	registerHistoryEndpoint(mux, auth, client, messageStore)
 
+	// WhatsApp Business lists (see labels.go)
+	registerLabelEndpoints(mux, auth, client, messageStore)
+
 	// Health check endpoint
 	mux.HandleFunc("/api/health", auth(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -3063,6 +3070,9 @@ func main() {
 		logger.Errorf("Failed to create WhatsApp client")
 		return
 	}
+	// Full app-state syncs must emit their events too, or the WhatsApp
+	// Business lists already on the phone never reach the labels table.
+	client.EmitAppStateEventsOnFullSync = true
 
 	// Initialize message store
 	messageStore, err := NewMessageStore()
@@ -3137,6 +3147,12 @@ func main() {
 			// re-sends after our retry receipt, but that copy's `t` is the resend
 			// time — so stash the original now and reuse it in handleMessage.
 			rememberOriginalTimestamp(v.Info.ID, v.Info.Timestamp)
+
+		case *events.LabelEdit:
+			handleLabelEdit(messageStore, v)
+
+		case *events.LabelAssociationChat:
+			handleLabelAssociationChat(messageStore, v)
 
 		case *events.HistorySync:
 			// Process history sync events
