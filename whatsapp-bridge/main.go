@@ -3125,6 +3125,10 @@ func main() {
 	// Channel to signal reconnection needs
 	reconnectChan := make(chan bool, 1)
 
+	// Keep WhatsApp seeing this companion as in use (see presence.go)
+	presenceChan := make(chan struct{}, 1)
+	startPresenceHeartbeat(client, presenceChan, logger)
+
 	// Setup event handling for messages and history sync
 	client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
@@ -3216,6 +3220,10 @@ func main() {
 
 		case *events.Connected:
 			logger.Infof("✓ Successfully connected to WhatsApp servers")
+			select {
+			case presenceChan <- struct{}{}:
+			default:
+			}
 
 		case *events.LoggedOut:
 			logger.Warnf("⚠️  Device logged out, please scan QR code to log in again")
