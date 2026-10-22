@@ -595,6 +595,9 @@ when the machine or a backup is lost.
    launchctl bootout "gui/$(id -u)/com.whatsapp-mcp.bridge"
    ```
 
+   On Windows, run `scripts\uninstall-task-windows.ps1` if you installed the
+   task; it also stops the bridge process the task started.
+
    For a manually started bridge, stop it in its terminal. Confirm all bridge
    and MCP server processes have exited. Never copy live SQLite databases.
 
@@ -678,6 +681,10 @@ when the machine or a backup is lost.
      "$HOME/Library/LaunchAgents/com.whatsapp-mcp.bridge-monitor.plist"
    ```
 
+   **Windows Task Scheduler:** the task always runs the bridge from the
+   checkout's `whatsapp-bridge\` directory, so start a relocated bridge
+   manually instead of reinstalling the task.
+
    Check that the bridge reconnects with the existing session and that the MCP
    client can read known history. An unexpected QR pairing prompt or empty
    history is a reason to stop and recheck paths before proceeding.
@@ -755,6 +762,69 @@ scripts/uninstall-launchd-macos.sh
 Uninstall preserves `whatsapp-bridge/store/`, including WhatsApp session DBs,
 message DBs, media, and `.bridge-token`. Logs are left in
 `~/Library/Logs/whatsapp-mcp/` for manual cleanup.
+
+### Run automatically on Windows
+
+Windows users can install an optional per-user Task Scheduler task that starts
+the Go bridge at login and starts it again whenever it exits, for example when
+it gives up connecting because the network is not up yet. The installer does
+not need administrator rights, stores no password, and does not install or
+start the MCP server.
+
+Pair the bridge before installing: run it once in a terminal and scan the QR
+code. The task runs without a window, so a QR code would only appear in its
+log. Stop any bridge you started by hand, then run from the repository root:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-task-windows.ps1
+```
+
+The installer builds `whatsapp-bridge\whatsapp-bridge.exe` with `go build` when
+Go and a cgo C compiler are available (see [Windows](#windows)), and otherwise
+uses the existing binary. It registers one task, `whatsapp-mcp-bridge`, writes
+generated support files to `%LOCALAPPDATA%\whatsapp-mcp\`, and writes logs to
+`%LOCALAPPDATA%\whatsapp-mcp\logs\`. The task runs a generated PowerShell
+runner that starts the bridge in `whatsapp-bridge\` and starts it again 10
+seconds after it exits. Reinstalling stops only the bridge process this task
+started, and the installer refuses to continue while the bridge port is still
+in use.
+
+To customize the task environment, set variables before running the installer.
+Re-run the installer after changing them. On Windows, `WHATSAPP_MEDIA_ROOTS`
+separates directories with `;`.
+
+```powershell
+$env:WHATSAPP_BRIDGE_PORT = "8080"
+$env:WEBHOOK_URL = "http://localhost:8769/whatsapp/webhook"
+$env:FORWARD_SELF = "false"
+$env:WHATSAPP_MEDIA_ROOTS = "$env:USERPROFILE\.local\share\whatsapp-mcp\outbox"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-task-windows.ps1
+```
+
+The installer also passes through `WEBHOOK_ENABLED`,
+`WHATSAPP_AUTO_DOWNLOAD_MEDIA`, and `WHATSAPP_BRIDGE_TOKEN`. It saves these
+values in `%LOCALAPPDATA%\whatsapp-mcp\bridge-task.json`, which only your user
+account can read. Without an explicit `WHATSAPP_BRIDGE_TOKEN`, the bridge keeps
+using `whatsapp-bridge\store\.bridge-token`.
+
+Verify the task and inspect logs:
+
+```powershell
+Get-ScheduledTask -TaskName whatsapp-mcp-bridge | Get-ScheduledTaskInfo
+Get-Content "$env:LOCALAPPDATA\whatsapp-mcp\logs\runner.log" -Tail 20
+Get-Content "$env:LOCALAPPDATA\whatsapp-mcp\logs\bridge.out.log" -Tail 100 -Encoding UTF8
+```
+
+Uninstall the task and the generated support files with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\uninstall-task-windows.ps1
+```
+
+Uninstall stops the bridge process the task started and preserves
+`whatsapp-bridge\store\`, including WhatsApp session DBs, message DBs, media,
+and `.bridge-token`. Logs are left in `%LOCALAPPDATA%\whatsapp-mcp\logs\` for
+manual cleanup.
 
 ### CLI flags (Go bridge)
 
@@ -1105,6 +1175,9 @@ Windows requires CGO for go-sqlite3. Install [MSYS2](https://www.msys2.org/) and
 go env -w CGO_ENABLED=1
 go run .
 ```
+
+To start the bridge at login and keep it running, see
+[Run automatically on Windows](#run-automatically-on-windows).
 
 ## Security Notice
 
