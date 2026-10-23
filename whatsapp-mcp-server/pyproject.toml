@@ -18,19 +18,19 @@ classifiers = [
 dependencies = [
     # Require patched cryptography; Intel macOS may need a source build.
     # See README prerequisites for its Rust/OpenSSL build requirements.
-    "cryptography>=50.0.1,<51",
+    "cryptography>=50.0.2,<51",
     "httpx>=0.28.1",
-    "mcp[cli]>=1.28.1,<2",
+    "mcp[cli]>=2.3.0,<3",
     "requests>=2.34.2",
     # Require the patched release for installs that do not use uv.lock.
-    "anyio>=4.14.2,<4.15",
+    "anyio>=4.15.1,<4.16",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=9.0.3",
+    "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
-    "ruff>=0.15.15",
+    "ruff>=0.17.1",
 ]
 
 [project.urls]
