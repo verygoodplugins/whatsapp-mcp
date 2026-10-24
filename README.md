@@ -556,6 +556,25 @@ outbox is `~/.local/share/whatsapp-mcp/outbox`, created on bridge startup. Move
 files there before calling `send_file` or `send_audio_message`, or set
 `WHATSAPP_MEDIA_ROOTS` to a colon-separated list of absolute directories.
 
+### Connection status and phone linking
+
+The authenticated bridge API remains available before linking:
+
+- `GET /api/connection` returns `state`, `connected`, `paired`, `message`,
+  `qrCode`, `qrExpiresAt`, `updatedAt`, and `lastError` (`code`/`message` or null).
+  States are `connected`, `pairing`, `logged_out`, `disconnected`, `outdated`,
+  `connecting`, and `error`. QR values expire and refresh automatically; responses
+  use `Cache-Control: no-store`. Treat the QR as a short-lived pairing secret.
+- `POST /api/connection/reconnect` retries the saved session or requests a new
+  pairing QR if unpaired. Repeated requests share one connection attempt. It
+  never deletes the databases or logs QR data when running in the background.
+- `GET /api/health` keeps its 200/503 readiness behavior and includes the current
+  `state`, `paired`, `message`, and `lastError`, without QR data.
+
+AutoHub displays this status and QR at `/ui/whatsapp`. From your phone, use
+WhatsApp **Linked Devices → Link a Device**. A healthy existing session reconnects
+without scanning a new QR.
+
 ### Where runtime data is stored
 
 The bridge keeps its runtime state in `store/`, resolved **relative to its
