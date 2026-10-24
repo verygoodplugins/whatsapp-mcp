@@ -487,6 +487,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSMEOW_DB_PATH`    | `../whatsapp-bridge/store/whatsapp.db`   | whatsmeow DB used for LID ↔ phone resolution |
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token for bridge REST calls; also signed onto outbound webhook POSTs |
+| `WHATSAPP_HUB_URL` | `http://localhost:8767/ui/whatsapp` | AutoHub status/pairing page opened by macOS bridge notifications |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default)          | Label shown for this connection under WhatsApp > Linked Devices. Set to a recognisable name. Applies at pair time only (re-pair to change) |
 | `WHATSAPP_MCP_TRANSPORT` | `stdio`                                | MCP transport to serve clients: `stdio`, `http`, or `sse` |
@@ -682,12 +683,10 @@ when the machine or a backup is lost.
    client can read known history. An unexpected QR pairing prompt or empty
    history is a reason to stop and recheck paths before proceeding.
 
-**Installer caveat:** rerunning `scripts/install-launchd-macos.sh` rewrites
-`launchd.env` and both plists, restores the checkout's bridge directory, and
-starts the jobs immediately. It does not preserve this custom runtime location.
-After a reinstall, stop both jobs again and reapply the directory and token
-settings above before restarting them. Review any newly created checkout store;
-do not replace the relocated store with it.
+**Reinstalling:** the installer preserves existing runtime/store paths and saved
+settings from `launchd.env`; explicitly exported values override saved settings.
+It builds from the current checkout into the saved binary path. Existing session
+and message databases are left in place.
 
 **Fresh manual installation:** only when there is no session or history to
 preserve, omit the `mv` step, create the runtime directory, and launch the built
@@ -715,7 +714,7 @@ It safely reloads only these labels:
 - `com.whatsapp-mcp.bridge-monitor`
 
 To customize the launchd environment, export values before running the installer.
-Re-run the installer after changing them.
+Re-run the installer after changing them; saved values are otherwise preserved.
 
 ```bash
 export WHATSAPP_BRIDGE_PORT=8080
@@ -734,10 +733,12 @@ tail -n 100 ~/Library/Logs/whatsapp-mcp/bridge.err.log
 tail -n 100 ~/Library/Logs/whatsapp-mcp/monitor.err.log
 ```
 
-The monitor sends a macOS notification once per failure type until recovery. It
-alerts when the bridge LaunchAgent is unloaded, the token is missing, the health
-endpoint is unreachable, WhatsApp is disconnected, or recent logs indicate that
-QR relinking is needed.
+The monitor reports the actual connection cause: an outdated client needs a
+bridge update; a logged-out or unpaired device needs phone linking; a temporary
+disconnection is retried automatically. It deduplicates repeated alerts, reminds
+you after six hours of persistent failure, and reports connection recovery.
+Notifications open `WHATSAPP_HUB_URL` when `terminal-notifier` is installed;
+the standard macOS fallback includes the same URL in its text.
 
 If `store/.bridge-token` lives inside a macOS TCC-protected location (for example
 `~/Documents` or `~/Desktop`), the sandboxed monitor can be denied read access to

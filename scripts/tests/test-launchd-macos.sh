@@ -279,11 +279,12 @@ test_monitor_alerts_once_and_clears_on_recovery() {
   run_monitor "$tmp" '{"status":"disconnected","connected":false}'
   run_monitor "$tmp" '{"status":"disconnected","connected":false}'
   assert_line_count "$tmp/notify.log" 1
-  assert_file "$state/relink.alerted"
+  assert_file "$state/connection.alerted"
 
   run_monitor "$tmp" '{"status":"ok","connected":true}'
-  assert_line_count "$tmp/notify.log" 1
-  assert_not_exists "$state/relink.alerted"
+  assert_line_count "$tmp/notify.log" 2
+  assert_contains "$tmp/notify.log" "Connected Again"
+  assert_not_exists "$state/connection.alerted"
 }
 
 test_install_persists_token_to_env() {
@@ -368,9 +369,66 @@ test_monitor_alerts_once_for_invalid_token_and_clears_on_recovery() {
   assert_not_exists "$state/token.alerted"
 }
 
+
+test_monitor_reports_cause_realerts_and_links_to_hub() {
+  local tmp support state
+  tmp="$(make_fixture)"
+  run_installer "$tmp"
+  support="$tmp/home/Library/Application Support/whatsapp-mcp"
+  state="$support/state"
+  # Installed terminal-notifier opens the status page when a notification is clicked.
+  cat > "$tmp/fakebin/terminal-notifier" <<'EOF'
+#!/bin/sh
+printf 'notify %s\n' "$*" >> "$FAKE_NOTIFY_LOG"
+EOF
+  chmod +x "$tmp/fakebin/terminal-notifier"
+  run_monitor "$tmp" '{"connected":false,"state":"outdated"}' 503
+  run_monitor "$tmp" '{"connected":false,"state":"outdated"}' 503
+  assert_line_count "$tmp/notify.log" 1
+  assert_contains "$tmp/notify.log" "WhatsApp Update Required"
+  assert_contains "$tmp/notify.log" "-open http://localhost:8767/ui/whatsapp"
+  touch -t 202001010000 "$state/connection.alerted"
+  run_monitor "$tmp" '{"connected":false,"state":"outdated"}' 503
+  assert_line_count "$tmp/notify.log" 2
+  run_monitor "$tmp" '{"connected":false,"state":"logged_out"}' 503
+  assert_line_count "$tmp/notify.log" 3
+  assert_contains "$tmp/notify.log" "WhatsApp Linking Needed"
+  run_monitor "$tmp" '{"connected":false,"state":"connecting"}' 503
+  run_monitor "$tmp" '{"connected":false,"state":"pairing"}' 503
+  assert_line_count "$tmp/notify.log" 3
+  run_monitor "$tmp" '{"connected":false,"state":"disconnected"}' 503
+  assert_line_count "$tmp/notify.log" 4
+  assert_contains "$tmp/notify.log" "WhatsApp Disconnected"
+}
+
+test_reinstall_preserves_runtime_and_settings() {
+  local tmp support runtime
+  tmp="$(make_fixture)"
+  run_installer "$tmp"
+  support="$tmp/home/Library/Application Support/whatsapp-mcp"
+  runtime="$tmp/home/Library/Application Support/custom runtime"
+  mkdir -p "$runtime/store"
+  print -r -- "session" > "$runtime/store/whatsapp.db"
+  print -r -- "export WHATSAPP_BRIDGE_DIR='$runtime'" >> "$support/launchd.env"
+  print -r -- "export WEBHOOK_ENABLED='false'" >> "$support/launchd.env"
+  print -r -- "export WHATSAPP_HUB_URL='https://hub.example/ui/whatsapp'" >> "$support/launchd.env"
+  run_installer "$tmp"
+  assert_contains "$support/launchd.env" "export WHATSAPP_BRIDGE_DIR='$runtime'"
+  assert_contains "$support/launchd.env" "export WEBHOOK_ENABLED='false'"
+  assert_contains "$support/launchd.env" "export WHATSAPP_HUB_URL='https://hub.example/ui/whatsapp'"
+  assert_file "$runtime/store/whatsapp.db"
+  WHATSAPP_BRIDGE_PORT=9090 run_installer "$tmp"
+  assert_contains "$support/launchd.env" "export WHATSAPP_API_URL='http://127.0.0.1:9090/api'"
+  print -r -- "export WHATSAPP_API_URL='https://custom.example/api'" >> "$support/launchd.env"
+  WHATSAPP_BRIDGE_PORT=10000 run_installer "$tmp"
+  assert_contains "$support/launchd.env" "export WHATSAPP_API_URL='https://custom.example/api'"
+}
+
 for test_name in \
   test_install_generates_launchd_files \
   test_install_preserves_optional_env_values \
+  test_reinstall_preserves_runtime_and_settings \
+  test_monitor_reports_cause_realerts_and_links_to_hub \
   test_install_persists_token_to_env \
   test_uninstall_removes_generated_files_only \
   test_monitor_alerts_once_and_clears_on_recovery \
