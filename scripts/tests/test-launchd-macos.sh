@@ -424,11 +424,42 @@ test_reinstall_preserves_runtime_and_settings() {
   assert_contains "$support/launchd.env" "export WHATSAPP_API_URL='https://custom.example/api'"
 }
 
+
+test_connecting_grace_is_bounded_and_preserves_reminders() {
+  local tmp support state
+  tmp="$(make_fixture)"
+  run_installer "$tmp"
+  support="$tmp/home/Library/Application Support/whatsapp-mcp"
+  state="$support/state"
+  run_monitor "$tmp" '{"connected":false,"state":"connecting"}' 503
+  run_monitor "$tmp" '{"connected":false,"state":"connecting"}' 503
+  assert_line_count "$tmp/notify.log" 0
+  assert_not_exists "$state/connection-state"
+  run_monitor "$tmp" '{"connected":true}'
+  assert_line_count "$tmp/notify.log" 0
+  assert_not_exists "$state/connection-started"
+  run_monitor "$tmp" '{"connected":false,"state":"connecting"}' 503
+  print -r -- "$(( $(date +%s) - 120 ))" > "$state/connection-started"
+  run_monitor "$tmp" '{"connected":false,"state":"connecting"}' 503
+  assert_line_count "$tmp/notify.log" 1
+  assert_contains "$tmp/notify.log" "WhatsApp Disconnected"
+  run_monitor "$tmp" '{"connected":false,"state":"outdated"}' 503
+  assert_line_count "$tmp/notify.log" 2
+  touch -t 202001010000 "$state/connection.alerted"
+  run_monitor "$tmp" '{"connected":false,"state":"connecting"}' 503
+  assert_line_count "$tmp/notify.log" 3
+  assert_contains "$state/connection-state" "outdated"
+  run_monitor "$tmp" '{"connected":true}'
+  assert_line_count "$tmp/notify.log" 4
+  assert_not_exists "$state/connection-started"
+}
+
 for test_name in \
   test_install_generates_launchd_files \
   test_install_preserves_optional_env_values \
   test_reinstall_preserves_runtime_and_settings \
   test_monitor_reports_cause_realerts_and_links_to_hub \
+  test_connecting_grace_is_bounded_and_preserves_reminders \
   test_install_persists_token_to_env \
   test_uninstall_removes_generated_files_only \
   test_monitor_alerts_once_and_clears_on_recovery \

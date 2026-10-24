@@ -248,6 +248,7 @@ if [[ "\$connected" == "true" ]]; then
     notify "WhatsApp Connected Again" "AutoJack can receive WhatsApp messages again."
     rm -f "\$STATE_DIR/connection-state"
   fi
+  rm -f "\$STATE_DIR/connection-started"
   clear_alert "relink"
   clear_alert "qr"
   clear_alert "connection"
@@ -258,10 +259,20 @@ fi
 # never infer a fresh logout from historical log lines.
 connection_state="\$(print -r -- "\$HEALTH" | sed -nE 's/.*"state"[[:space:]]*:[[:space:]]*"([^" ]+)".*/\\1/p')"
 connection_state="\${connection_state:-disconnected}"
-# Do not turn normal retry attempts into new outage/recovery notifications.
-[[ "\$connection_state" == "connecting" ]] && exit 0
 [[ "\$connection_state" == "pairing" ]] && connection_state="logged_out"
 previous_state="\$(cat "\$STATE_DIR/connection-state" 2>/dev/null || true)"
+if [[ "\$connection_state" == "connecting" ]]; then
+  # Track the outage across attempts: a 60s monitor can miss each 45s timeout.
+  if [[ ! -f "\$STATE_DIR/connection-started" ]]; then
+    date +%s > "\$STATE_DIR/connection-started"
+  fi
+  outage_started="\$(cat "\$STATE_DIR/connection-started")"
+  if [[ -z "\$previous_state" ]] && (( \$(date +%s) - outage_started < 90 )); then
+    exit 0
+  fi
+  # Existing outages retain their cause and six-hour reminder during retries.
+  connection_state="\${previous_state:-disconnected}"
+fi
 if [[ "\$connection_state" != "\$previous_state" ]]; then
   clear_alert "connection"
 fi
@@ -272,9 +283,6 @@ case "\$connection_state" in
     ;;
   logged_out|pairing)
     alert_once "connection" "WhatsApp Linking Needed" "Open AutoHub and scan the current QR code from WhatsApp > Linked Devices > Link a Device."
-    ;;
-  connecting)
-    # Brief reconnects are normal; the next monitor pass reports a persistent failure.
     ;;
   *)
     alert_once "connection" "WhatsApp Disconnected" "AutoJack cannot receive messages. The bridge will retry; open AutoHub for status or reconnect."
