@@ -151,6 +151,7 @@ exec "\$WHATSAPP_BRIDGE_BINARY"
 EOF
 chmod 755 "$RUNNER_SCRIPT"
 
+NOTIFIER_BINARY="$(command -v terminal-notifier 2>/dev/null || true)"
 cat > "$MONITOR_SCRIPT" <<EOF
 #!/bin/zsh
 set -euo pipefail
@@ -158,6 +159,7 @@ set -euo pipefail
 source $(shell_quote "$ENV_FILE")
 
 BRIDGE_LABEL="$BRIDGE_LABEL"
+NOTIFIER_BINARY=$(shell_quote "$NOTIFIER_BINARY")
 STATE_DIR="\${WHATSAPP_MCP_STATE_DIR:-\$HOME/Library/Application Support/whatsapp-mcp/state}"
 LOG_DIR="\${WHATSAPP_MCP_LOG_DIR:-\$HOME/Library/Logs/whatsapp-mcp}"
 TOKEN_FILE="\$WHATSAPP_BRIDGE_DIR/store/.bridge-token"
@@ -168,8 +170,12 @@ mkdir -p "\$STATE_DIR"
 notify() {
   local title="\$1"
   local msg="\$2"
-  if command -v terminal-notifier >/dev/null 2>&1; then
-    terminal-notifier -title "\$title" -message "\$msg" -open "\$HUB_URL" >/dev/null 2>&1 || true
+  local notifier="\$NOTIFIER_BINARY"
+  if [[ ! -x "\$notifier" ]]; then
+    notifier="\$(command -v terminal-notifier 2>/dev/null || true)"
+  fi
+  if [[ -x "\$notifier" ]]; then
+    "\$notifier" -title "\$title" -message "\$msg" -open "\$HUB_URL" >/dev/null 2>&1 || true
   else
     osascript \\
       -e 'on run argv' \\

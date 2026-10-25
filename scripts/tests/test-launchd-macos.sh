@@ -454,11 +454,33 @@ test_connecting_grace_is_bounded_and_preserves_reminders() {
   assert_not_exists "$state/connection-started"
 }
 
+
+test_monitor_uses_installed_notifier_outside_runtime_path() {
+  local tmp
+  tmp="$(make_fixture)"
+  mkdir -p "$tmp/notifierbin"
+  cat > "$tmp/notifierbin/terminal-notifier" <<'EOF'
+#!/bin/sh
+printf 'captured-notifier %s\n' "$*" >> "$FAKE_NOTIFY_LOG"
+EOF
+  chmod +x "$tmp/notifierbin/terminal-notifier"
+  (
+    cd "$tmp/repo"
+    HOME="$tmp/home" PATH="$tmp/notifierbin:$tmp/fakebin:/usr/bin:/bin" \
+      FAKE_CMD_LOG="$tmp/cmd.log" ./scripts/install-launchd-macos.sh
+  )
+  # run_monitor deliberately omits notifierbin, as launchd omits Homebrew.
+  run_monitor "$tmp" '{"connected":false,"state":"outdated"}' 503
+  assert_contains "$tmp/notify.log" "captured-notifier -title WhatsApp Update Required"
+  assert_contains "$tmp/notify.log" "-open http://localhost:8767/ui/whatsapp"
+}
+
 for test_name in \
   test_install_generates_launchd_files \
   test_install_preserves_optional_env_values \
   test_reinstall_preserves_runtime_and_settings \
   test_monitor_reports_cause_realerts_and_links_to_hub \
+  test_monitor_uses_installed_notifier_outside_runtime_path \
   test_connecting_grace_is_bounded_and_preserves_reminders \
   test_install_persists_token_to_env \
   test_uninstall_removes_generated_files_only \
