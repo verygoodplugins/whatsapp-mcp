@@ -174,15 +174,14 @@ notify() {
   if [[ ! -x "\$notifier" ]]; then
     notifier="\$(command -v terminal-notifier 2>/dev/null || true)"
   fi
-  if [[ -x "\$notifier" ]]; then
-    "\$notifier" -title "\$title" -message "\$msg" -open "\$HUB_URL" >/dev/null 2>&1 || true
-  else
+  if [[ -x "\$notifier" ]] && "\$notifier" -title "\$title" -message "\$msg" -open "\$HUB_URL" >/dev/null 2>&1; then
+    return 0
+  fi
     osascript \\
       -e 'on run argv' \\
       -e 'display notification (item 2 of argv) with title (item 1 of argv)' \\
       -e 'end run' \\
       "\$title" "\$msg" >/dev/null 2>&1 || true
-  fi
 }
 
 alert_once() {

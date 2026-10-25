@@ -475,12 +475,30 @@ EOF
   assert_contains "$tmp/notify.log" "-open http://localhost:8767/ui/whatsapp"
 }
 
+
+test_monitor_falls_back_when_notifier_is_denied() {
+  local tmp
+  tmp="$(make_fixture)"
+  cat > "$tmp/fakebin/terminal-notifier" <<'EOF'
+#!/bin/sh
+exit 3
+EOF
+  chmod +x "$tmp/fakebin/terminal-notifier"
+  run_installer "$tmp"
+  run_monitor "$tmp" '{"connected":false,"state":"outdated"}' 503
+  assert_line_count "$tmp/notify.log" 1
+  assert_contains "$tmp/notify.log" "osascript"
+  assert_contains "$tmp/notify.log" "WhatsApp Update Required"
+  assert_contains "$tmp/notify.log" "Update and rebuild the bridge."
+}
+
 for test_name in \
   test_install_generates_launchd_files \
   test_install_preserves_optional_env_values \
   test_reinstall_preserves_runtime_and_settings \
   test_monitor_reports_cause_realerts_and_links_to_hub \
   test_monitor_uses_installed_notifier_outside_runtime_path \
+  test_monitor_falls_back_when_notifier_is_denied \
   test_connecting_grace_is_bounded_and_preserves_reminders \
   test_install_persists_token_to_env \
   test_uninstall_removes_generated_files_only \
