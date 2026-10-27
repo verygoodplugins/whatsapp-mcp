@@ -596,7 +596,7 @@ when the machine or a backup is lost.
    ```
 
    On Windows, run `scripts\uninstall-task-windows.ps1` if you installed the
-   task; it also stops the bridge process the task started.
+   task; stopping the task also stops the bridge it runs.
 
    For a manually started bridge, stop it in its terminal. Confirm all bridge
    and MCP server processes have exited. Never copy live SQLite databases.
@@ -785,9 +785,18 @@ uses the existing binary. It registers one task, `whatsapp-mcp-bridge`, writes
 generated support files to `%LOCALAPPDATA%\whatsapp-mcp\`, and writes logs to
 `%LOCALAPPDATA%\whatsapp-mcp\logs\`. The task runs a generated PowerShell
 runner that starts the bridge in `whatsapp-bridge\` and starts it again 10
-seconds after it exits. Reinstalling stops only the bridge process this task
-started, and the installer refuses to continue while the bridge port is still
-in use.
+seconds after it exits. Reinstalling stops the task and the bridge it runs,
+and the installer refuses to continue while the bridge port is still in use.
+
+The task does not start `powershell.exe` directly, because Task Scheduler
+would give it a console window, and Windows Terminal, the default terminal on
+Windows 11, keeps that window minimized in the taskbar instead of hiding it.
+Instead, the installer compiles a small launcher,
+`%LOCALAPPDATA%\whatsapp-mcp\whatsapp-bridge-launcher.exe`, with the `csc.exe`
+that ships with Windows. The launcher opens no window, and it ends the runner
+and the bridge when the task stops. Its C# source is in
+`scripts\install-task-windows.ps1`. The launcher is unsigned, so antivirus
+software may flag it.
 
 To customize the task environment, set variables before running the installer.
 Re-run the installer after changing them. On Windows, `WHATSAPP_MEDIA_ROOTS`
@@ -815,13 +824,20 @@ Get-Content "$env:LOCALAPPDATA\whatsapp-mcp\logs\runner.log" -Tail 20
 Get-Content "$env:LOCALAPPDATA\whatsapp-mcp\logs\bridge.out.log" -Tail 100 -Encoding UTF8
 ```
 
+Stop the bridge until the next login, or start it again:
+
+```powershell
+Stop-ScheduledTask -TaskName whatsapp-mcp-bridge
+Start-ScheduledTask -TaskName whatsapp-mcp-bridge
+```
+
 Uninstall the task and the generated support files with:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\uninstall-task-windows.ps1
 ```
 
-Uninstall stops the bridge process the task started and preserves
+Uninstall stops the task and the bridge it runs, and preserves
 `whatsapp-bridge\store\`, including WhatsApp session DBs, message DBs, media,
 and `.bridge-token`. Logs are left in `%LOCALAPPDATA%\whatsapp-mcp\logs\` for
 manual cleanup.

@@ -98,16 +98,21 @@ foreach ($name in 'Get-ScheduledTask', 'Register-ScheduledTask', 'Unregister-Sch
 }
 
 function New-FakeBridgeExe([string]$Path) {
-    # A real console executable, so the runner and the stop logic see a real
-    # process path. csc.exe ships with the .NET Framework on every supported
-    # Windows version.
+    # A real console executable, so the runner starts a real process.
+    # csc.exe ships with the .NET Framework on every supported Windows version.
     $source = [System.IO.Path]::ChangeExtension($Path, '.cs')
     Set-Content -LiteralPath $source -Encoding ASCII -Value @'
 using System;
+using System.IO;
+using System.Text;
 using System.Threading;
 
 class FakeBridge {
     static int Main() {
+        // Writes UTF-8 like the Go bridge, not the console code page, so
+        // non-ASCII paths in the output match.
+        Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true });
+        Console.SetError(new StreamWriter(Console.OpenStandardError(), new UTF8Encoding(false)) { AutoFlush = true });
         Console.Out.WriteLine("fake bridge stdout");
         Console.Out.WriteLine("cwd=" + Environment.CurrentDirectory);
         Console.Out.WriteLine("port=" + Environment.GetEnvironmentVariable("WHATSAPP_BRIDGE_PORT"));
@@ -174,14 +179,25 @@ function Set-RestartDelay([string]$Root, [int]$Seconds = 1) {
     [System.IO.File]::WriteAllText("$Root\localappdata\whatsapp-mcp\bridge-task.json", ($config | ConvertTo-Json))
 }
 
-function Start-Runner([string]$Root, [hashtable]$Environment) {
+# Starts the launcher the way the task does; it starts the runner, which starts
+# the bridge.
+function Start-Launcher([string]$Root, [hashtable]$Environment) {
     foreach ($n in $Environment.Keys) { Set-ProcessEnv $n $Environment[$n] }
     try {
-        Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -WindowStyle Hidden -PassThru `
-            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$Root\localappdata\whatsapp-mcp\run-whatsapp-bridge.ps1`""
+        Start-Process -FilePath "$Root\localappdata\whatsapp-mcp\whatsapp-bridge-launcher.exe" -PassThru
     } finally {
         foreach ($n in $Environment.Keys) { Set-ProcessEnv $n $null }
     }
+}
+
+# Reads the Subsystem field of a PE file's optional header, which follows the
+# 4-byte signature and the 20-byte file header. The field is at the same
+# offset in 32-bit and 64-bit images.
+function Get-PeSubsystem([string]$Path) {
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+    if ([System.Text.Encoding]::ASCII.GetString($bytes, $peOffset, 4) -ne "PE`0`0") { throw "$Path is not a PE file" }
+    return [BitConverter]::ToUInt16($bytes, $peOffset + 24 + 68)
 }
 
 function Wait-Until([scriptblock]$Condition, [int]$TimeoutSeconds = 30) {
@@ -205,11 +221,17 @@ function Test-InstallRegistersLogonTask {
 
     $app = "$root\localappdata\whatsapp-mcp"
     $bridgeDir = "$root\repo\whatsapp-bridge"
-    $runner = "$app\run-whatsapp-bridge.ps1"
+    $launcher = "$app\whatsapp-bridge-launcher.exe"
     $userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    Assert-File $runner
+    Assert-File "$app\run-whatsapp-bridge.ps1"
+    Assert-File $launcher
+    Assert-NotExists "$app\whatsapp-bridge-launcher.new.exe"
+    Assert-NotExists "$app\whatsapp-bridge-launcher.cs"
     Assert-File "$bridgeDir\whatsapp-bridge.exe"
     Assert-NotExists "$bridgeDir\whatsapp-bridge.new.exe"
+    # IMAGE_SUBSYSTEM_WINDOWS_GUI: Windows never gives the launcher a console
+    # window.
+    Assert-Equal 2 (Get-PeSubsystem $launcher) 'launcher PE subsystem'
 
     $config = Read-TaskConfig $root
     Assert-Equal $bridgeDir $config.BridgeDir 'BridgeDir'
@@ -221,9 +243,8 @@ function Test-InstallRegistersLogonTask {
     $task = $global:FakeRegistered
     if (-not $task) { Fail 'expected the task to be registered'; return }
     Assert-Equal $TaskName $task.TaskName 'task name'
-    Assert-Equal "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" $task.Action.Execute 'action executable'
-    Assert-Contains $task.Action.Arguments '-WindowStyle Hidden' 'action arguments'
-    Assert-Contains $task.Action.Arguments "-File `"$runner`"" 'action arguments'
+    Assert-Equal $launcher $task.Action.Execute 'action executable'
+    Assert-Equal $bridgeDir $task.Action.WorkingDirectory 'action working directory'
     Assert-Equal 'MSFT_TaskLogonTrigger' $task.Trigger.CimClass.CimClassName 'trigger type'
     Assert-Equal $userId $task.Trigger.UserId 'trigger user'
     Assert-Equal $userId $task.Principal.UserId 'principal user'
@@ -308,11 +329,11 @@ function Test-RunnerRestartsBridgeAndAppendsLogs {
     Set-RestartDelay $root
 
     $logs = "$root\localappdata\whatsapp-mcp\logs"
-    $runner = Start-Runner $root @{ FAKE_BRIDGE_EXIT_CODE = '3' }
+    $launcher = Start-Launcher $root @{ FAKE_BRIDGE_EXIT_CODE = '3' }
     try {
         $restarted = Wait-Until { (Get-MatchCount "$logs\runner.log" 'Bridge exited with code 3') -ge 2 }
     } finally {
-        Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
+        Stop-Process -Id $launcher.Id -Force -ErrorAction SilentlyContinue
     }
     if (-not $restarted) { Fail 'expected the runner to start the bridge again after it exited'; return }
 
@@ -330,7 +351,7 @@ function Test-RunnerSurvivesLogFolderRemoval {
     Set-RestartDelay $root 3
 
     $logs = "$root\localappdata\whatsapp-mcp\logs"
-    $runner = Start-Runner $root @{ FAKE_BRIDGE_EXIT_CODE = '3' }
+    $launcher = Start-Launcher $root @{ FAKE_BRIDGE_EXIT_CODE = '3' }
     try {
         if (-not (Wait-Until { (Get-MatchCount "$logs\runner.log" 'Restarting in') -ge 1 })) {
             Fail 'expected the runner to wait before restarting the bridge'
@@ -340,7 +361,7 @@ function Test-RunnerSurvivesLogFolderRemoval {
         Remove-Item -LiteralPath $logs -Recurse -Force
         $recovered = Wait-Until { (Get-MatchCount "$logs\runner.log" 'Bridge exited with code 3') -ge 1 }
     } finally {
-        Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
+        Stop-Process -Id $launcher.Id -Force -ErrorAction SilentlyContinue
     }
     if (-not $recovered) { Fail 'expected the runner to keep restarting the bridge after the logs folder was removed' }
 }
@@ -359,6 +380,7 @@ function Test-UninstallRemovesGeneratedFilesOnly {
     Assert-Equal 0 $result.ExitCode "uninstaller exit code ($($result.Output))"
     if ($global:FakeRegistered) { Fail 'expected the task to be unregistered' }
     Assert-Contains ($global:FakeCalls -join "`n") "Unregister-ScheduledTask \$TaskName" 'commands'
+    Assert-NotExists "$app\whatsapp-bridge-launcher.exe"
     Assert-NotExists "$app\run-whatsapp-bridge.ps1"
     Assert-NotExists "$app\bridge-task.json"
     Assert-File "$root\repo\whatsapp-bridge\store\messages.db"
@@ -367,84 +389,32 @@ function Test-UninstallRemovesGeneratedFilesOnly {
     Assert-File "$app\logs\bridge.out.log"
 }
 
-# Starts the runner with a long-running fake bridge, then kills only the
-# runner, the way Task Scheduler may stop a task without its child process.
-function Start-OrphanedBridge([string]$Root) {
-    $pidFile = "$Root\localappdata\whatsapp-mcp\bridge.pid"
-    $runner = Start-Runner $Root @{ FAKE_BRIDGE_SLEEP_MS = '120000' }
-    try {
-        if (-not (Wait-Until { Test-Path -LiteralPath $pidFile })) { throw 'the runner did not record the bridge process' }
-    } finally {
-        Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
-        [void]$runner.WaitForExit(10000)
-    }
-    return Get-Process -Id ([int](Get-Content -LiteralPath $pidFile -TotalCount 1))
-}
-
-function Test-ScriptsStopOrphanedBridge {
-    foreach ($script in 'install-task-windows.ps1', 'uninstall-task-windows.ps1') {
-        $root = New-Fixture
-        $result = Invoke-TaskScript $root 'install-task-windows.ps1'
-        Assert-Equal 0 $result.ExitCode "installer exit code ($($result.Output))"
-        $bridge = Start-OrphanedBridge $root
-        try {
-            if ($bridge.HasExited) { Fail 'expected the fake bridge to outlive its runner'; continue }
-            $result = Invoke-TaskScript $root $script
-            Assert-Equal 0 $result.ExitCode "$script exit code ($($result.Output))"
-            if (-not $bridge.WaitForExit(10000)) { Fail "expected $script to stop the bridge process the task started" }
-        } finally {
-            Stop-Process -Id $bridge.Id -Force -ErrorAction SilentlyContinue
-        }
-    }
-}
-
-function Test-ScriptsLeaveProcessWithReusedPid {
-    foreach ($script in 'install-task-windows.ps1', 'uninstall-task-windows.ps1') {
-        $root = New-Fixture
-        $result = Invoke-TaskScript $root 'install-task-windows.ps1'
-        Assert-Equal 0 $result.ExitCode "installer exit code ($($result.Output))"
-        $bridge = Start-OrphanedBridge $root
-        Stop-Process -Id $bridge.Id -Force
-        [void]$bridge.WaitForExit(10000)
-
-        # Another executable now holds the recorded PID.
-        New-Item -ItemType Directory -Path "$root\other" | Out-Null
-        Copy-Item -LiteralPath $global:FakeBridgeExe -Destination "$root\other\whatsapp-bridge.exe"
-        Set-ProcessEnv 'FAKE_BRIDGE_SLEEP_MS' '120000'
-        try {
-            $other = Start-Process -FilePath "$root\other\whatsapp-bridge.exe" -WindowStyle Hidden -PassThru
-        } finally {
-            Set-ProcessEnv 'FAKE_BRIDGE_SLEEP_MS' $null
-        }
-        $pidFile = "$root\localappdata\whatsapp-mcp\bridge.pid"
-        $recorded = @(Get-Content -LiteralPath $pidFile -Encoding UTF8)
-        $recorded[0] = $other.Id
-        Set-Content -LiteralPath $pidFile -Value $recorded -Encoding UTF8
-        try {
-            $result = Invoke-TaskScript $root $script
-            Assert-Equal 0 $result.ExitCode "$script exit code ($($result.Output))"
-            if ($other.HasExited) { Fail "expected $script to leave a process running another executable" }
-        } finally {
-            Stop-Process -Id $other.Id -Force -ErrorAction SilentlyContinue
-        }
-    }
-}
-
-function Test-RunnerStopsOrphanedBridgeBeforeStarting {
+# Task Scheduler ends only the launcher when the task is stopped; its job
+# object must end the runner and the bridge with it.
+function Test-KillingLauncherStopsRunnerAndBridge {
     $root = New-Fixture
     $result = Invoke-TaskScript $root 'install-task-windows.ps1'
     Assert-Equal 0 $result.ExitCode "installer exit code ($($result.Output))"
-    $orphan = Start-OrphanedBridge $root
-    $runner = Start-Runner $root @{ FAKE_BRIDGE_SLEEP_MS = '120000' }
+
+    $logs = "$root\localappdata\whatsapp-mcp\logs"
+    $launcher = Start-Launcher $root @{ FAKE_BRIDGE_SLEEP_MS = '120000' }
+    $children = @()
     try {
-        if (-not $orphan.WaitForExit(10000)) { Fail 'expected a new runner to stop the bridge left by the previous one' }
-    } finally {
-        Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
-        Stop-Process -Id $orphan.Id -Force -ErrorAction SilentlyContinue
-        $pidFile = "$root\localappdata\whatsapp-mcp\bridge.pid"
-        if (Wait-Until { Test-Path -LiteralPath $pidFile } 5) {
-            Stop-Process -Id ([int](Get-Content -LiteralPath $pidFile -TotalCount 1)) -Force -ErrorAction SilentlyContinue
+        if (-not (Wait-Until { (Get-MatchCount "$logs\runner.log" 'Started bridge') -ge 1 })) {
+            Fail "expected the launcher to start the runner and the bridge ($([System.IO.File]::ReadAllText("$logs\runner.log")))"
+            return
         }
+        $runnerPid = (Get-CimInstance Win32_Process -Filter "ParentProcessId = $($launcher.Id) AND Name = 'powershell.exe'").ProcessId
+        $bridgePid = [regex]::Match([System.IO.File]::ReadAllText("$logs\runner.log"), 'Started bridge \(pid ([0-9]+)\)').Groups[1].Value
+        $children = @(Get-Process -Id $runnerPid, $bridgePid)
+        Assert-Equal "$root\repo\whatsapp-bridge\whatsapp-bridge.exe" $children[1].Path 'bridge process path'
+
+        Stop-Process -Id $launcher.Id -Force
+        foreach ($child in $children) {
+            if (-not $child.WaitForExit(10000)) { Fail "expected killing the launcher to stop $($child.Path) (pid $($child.Id))" }
+        }
+    } finally {
+        foreach ($process in @($launcher) + $children) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -461,9 +431,7 @@ foreach ($test in @(
     'Test-RunnerRestartsBridgeAndAppendsLogs',
     'Test-RunnerSurvivesLogFolderRemoval',
     'Test-UninstallRemovesGeneratedFilesOnly',
-    'Test-ScriptsStopOrphanedBridge',
-    'Test-ScriptsLeaveProcessWithReusedPid',
-    'Test-RunnerStopsOrphanedBridgeBeforeStarting'
+    'Test-KillingLauncherStopsRunnerAndBridge'
 )) {
     Write-Host "Running $test"
     try { & $test } catch { Fail "$test threw: $_" }

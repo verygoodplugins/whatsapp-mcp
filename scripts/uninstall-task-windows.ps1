@@ -9,6 +9,8 @@ function Fail([string]$Message) {
     exit 1
 }
 
+# Stopping the task ends the launcher, and its job object ends the runner and
+# the bridge with it.
 function Stop-InstalledTask {
     if (-not (Get-ScheduledTask @Task -ErrorAction SilentlyContinue)) { return }
     Stop-ScheduledTask @Task
@@ -22,32 +24,14 @@ if (-not $env:LOCALAPPDATA) { Fail 'LOCALAPPDATA is not set.' }
 
 $AppDir = Join-Path $env:LOCALAPPDATA 'whatsapp-mcp'
 $LogDir = Join-Path $AppDir 'logs'
-$PidFile = Join-Path $AppDir 'bridge.pid'
-
-# Stopping the task ends the runner but may leave its bridge running. The
-# runner records the bridge it starts; stop that process only while the PID
-# still runs the recorded executable, never by image name.
-function Stop-InstalledBridge {
-    if (-not (Test-Path -LiteralPath $PidFile)) { return }
-    $bridgePid, $bridgePath = @(Get-Content -LiteralPath $PidFile -Encoding UTF8)
-    if ($bridgePid -match '^[0-9]+$' -and $bridgePath) {
-        $process = Get-Process -Id $bridgePid -ErrorAction SilentlyContinue
-        if ($process -and $process.Path -eq $bridgePath) {
-            Stop-Process -InputObject $process -Force -ErrorAction SilentlyContinue
-            if (-not $process.WaitForExit(10000)) { Fail "Could not stop the bridge process $bridgePid." }
-        }
-    }
-    Remove-Item -LiteralPath $PidFile -Force
-}
 
 Write-Host 'Stopping the whatsapp-mcp task if present...'
 Stop-InstalledTask
-Stop-InstalledBridge
 if (Get-ScheduledTask @Task -ErrorAction SilentlyContinue) {
     Unregister-ScheduledTask @Task -Confirm:$false
 }
 
-foreach ($name in 'run-whatsapp-bridge.ps1', 'bridge-task.json') {
+foreach ($name in 'whatsapp-bridge-launcher.exe', 'run-whatsapp-bridge.ps1', 'bridge-task.json') {
     $path = Join-Path $AppDir $name
     if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
 }
