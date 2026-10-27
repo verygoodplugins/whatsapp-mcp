@@ -1,9 +1,10 @@
 import json
 import os
 import os.path
+import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,29 @@ def _connect_messages_db() -> sqlite3.Connection:
                 "Start the bridge once so it creates the store, or point WHATSAPP_DB_PATH at it."
             ) from exc
         raise
+
+
+# messages.timestamp and chats.last_message_time are written by the bridge as
+# go-sqlite3 renders time.Time: local wall clock plus UTC offset, with up to
+# nanosecond precision ("2024-01-15 10:30:00.1234+02:00"). Raw text order is
+# only chronological while that offset never changes, and SQLite's date
+# functions (julianday(), strftime('%f')) keep only milliseconds, so .1233 and
+# .1234 would compare equal. _instant_sql() renders such a column as a
+# fixed-width UTC key, "YYYY-MM-DD HH:MM:SS.nnnnnnnnn", whose text order is
+# chronological: the whole seconds come from strftime() on the value with its
+# fraction cut out, so millisecond rounding can't carry into them, and the
+# stored fraction digits are appended verbatim, padded to nine (an offset never
+# changes the sub-second part). NULL or unparseable values yield NULL.
+_INSTANT_SQL = """(CASE WHEN substr($ts, 20, 1) = '.'
+    THEN strftime('%Y-%m-%d %H:%M:%S', substr($ts, 1, 19) || ltrim(substr($ts, 21), '0123456789'))
+        || '.' || substr(substr($ts, 21, length($ts) - 20 - length(ltrim(substr($ts, 21), '0123456789'))) || '000000000', 1, 9)
+    ELSE strftime('%Y-%m-%d %H:%M:%S', $ts) || '.000000000'
+END)"""
+
+
+def _instant_sql(column: str) -> str:
+    """SQL expression for the chronologically sortable UTC key of a timestamp column."""
+    return _INSTANT_SQL.replace("$ts", column)
 
 
 def _read_bridge_token() -> str | None:
@@ -507,6 +531,26 @@ def format_messages_list(messages: list[Message], show_chat_info: bool = True) -
     return output
 
 
+def _utc_bound(value: str, field: str) -> str:
+    """Parse an ISO-8601 filter bound into the _instant_sql() key format.
+
+    Naive inputs are read as the MCP server's local time, the same clock the
+    bridge stamps messages with, so "2026-01-01T09:00" means 9am as the user
+    sees it in WhatsApp. datetime keeps microseconds; any further fraction
+    digits, up to nanoseconds, are taken from the input as written.
+    """
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"Invalid date format for '{field}': {value}. Please use ISO-8601 format.")
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    parsed = parsed.astimezone(UTC)
+    fraction = re.search(r"[.,](\d+)", value)
+    sub_microsecond = fraction.group(1)[6:9] if fraction else ""
+    return parsed.strftime("%Y-%m-%d %H:%M:%S.%f") + sub_microsecond.ljust(3, "0")
+
+
 def list_messages(
     after: str | None = None,
     before: str | None = None,
@@ -552,22 +596,12 @@ def list_messages(
 
         # Add filters
         if after:
-            try:
-                after = datetime.fromisoformat(after)
-            except ValueError:
-                raise ValueError(f"Invalid date format for 'after': {after}. Please use ISO-8601 format.")
-
-            where_clauses.append("messages.timestamp > ?")
-            params.append(after)
+            where_clauses.append(f"{_instant_sql('messages.timestamp')} > ?")
+            params.append(_utc_bound(after, "after"))
 
         if before:
-            try:
-                before = datetime.fromisoformat(before)
-            except ValueError:
-                raise ValueError(f"Invalid date format for 'before': {before}. Please use ISO-8601 format.")
-
-            where_clauses.append("messages.timestamp < ?")
-            params.append(before)
+            where_clauses.append(f"{_instant_sql('messages.timestamp')} < ?")
+            params.append(_utc_bound(before, "before"))
 
         if sender_phone_number:
             aliases = _sender_aliases(sender_phone_number)
