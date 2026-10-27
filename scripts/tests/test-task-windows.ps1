@@ -4,7 +4,7 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $TaskName = 'whatsapp-mcp-bridge'
 $PassThroughVars = @(
     'WHATSAPP_BRIDGE_PORT', 'WEBHOOK_URL', 'WEBHOOK_ENABLED', 'WHATSAPP_AUTO_DOWNLOAD_MEDIA',
-    'FORWARD_SELF', 'WHATSAPP_BRIDGE_TOKEN', 'WHATSAPP_MEDIA_ROOTS'
+    'FORWARD_SELF', 'WHATSAPP_BRIDGE_TOKEN', 'WHATSAPP_MEDIA_ROOTS', 'WHATSAPP_DEVICE_NAME'
 )
 
 $script:Failures = 0
@@ -270,6 +270,7 @@ function Test-InstallPreservesOptionalEnvValues {
         FORWARD_SELF                 = 'true'
         WHATSAPP_BRIDGE_TOKEN        = "test token with spaces, 'quotes' and `"double quotes`""
         WHATSAPP_MEDIA_ROOTS         = 'C:\outbox;C:\other outbox'
+        WHATSAPP_DEVICE_NAME         = 'Work laptop'
     }
     $result = Invoke-TaskScript $root 'install-task-windows.ps1' $values
     Assert-Equal 0 $result.ExitCode "installer exit code ($($result.Output))"
@@ -278,6 +279,34 @@ function Test-InstallPreservesOptionalEnvValues {
     foreach ($name in $values.Keys) {
         Assert-Equal $values[$name] $config.Environment.$name $name
     }
+}
+
+function Test-ReinstallKeepsSavedSettings {
+    $root = New-Fixture
+    $values = @{
+        WHATSAPP_BRIDGE_PORT  = '9090'
+        WEBHOOK_URL           = 'http://127.0.0.1:8769/whatsapp/webhook'
+        WHATSAPP_BRIDGE_TOKEN = 'saved-token'
+    }
+    $result = Invoke-TaskScript $root 'install-task-windows.ps1' $values
+    Assert-Equal 0 $result.ExitCode "installer exit code ($($result.Output))"
+
+    $global:FakeCalls.Clear()
+    $result = Invoke-TaskScript $root 'install-task-windows.ps1' @{ WEBHOOK_URL = 'http://127.0.0.1:9999/hook' }
+    Assert-Equal 0 $result.ExitCode "reinstall exit code ($($result.Output))"
+    $config = Read-TaskConfig $root
+    Assert-Equal '9090' $config.Environment.WHATSAPP_BRIDGE_PORT 'saved WHATSAPP_BRIDGE_PORT'
+    Assert-Equal 'saved-token' $config.Environment.WHATSAPP_BRIDGE_TOKEN 'saved WHATSAPP_BRIDGE_TOKEN'
+    Assert-Equal 'http://127.0.0.1:9999/hook' $config.Environment.WEBHOOK_URL 'overridden WEBHOOK_URL'
+    Assert-Contains ($global:FakeCalls -join "`n") 'Get-NetTCPConnection 9090' 'commands'
+
+    # Uninstalling forgets the saved settings.
+    Assert-Equal 0 (Invoke-TaskScript $root 'uninstall-task-windows.ps1').ExitCode 'uninstaller exit code'
+    $result = Invoke-TaskScript $root 'install-task-windows.ps1'
+    Assert-Equal 0 $result.ExitCode "install after uninstall exit code ($($result.Output))"
+    $config = Read-TaskConfig $root
+    Assert-Equal '8080' $config.Environment.WHATSAPP_BRIDGE_PORT 'WHATSAPP_BRIDGE_PORT after uninstall'
+    Assert-Equal $null $config.Environment.WEBHOOK_URL 'WEBHOOK_URL after uninstall'
 }
 
 function Test-InstallRestrictsConfigToCurrentUser {
@@ -424,6 +453,7 @@ New-FakeBridgeExe $global:FakeBridgeExe
 foreach ($test in @(
     'Test-InstallRegistersLogonTask',
     'Test-InstallPreservesOptionalEnvValues',
+    'Test-ReinstallKeepsSavedSettings',
     'Test-InstallRestrictsConfigToCurrentUser',
     'Test-InstallUsesExistingBinaryWithoutCgo',
     'Test-InstallFailsWithoutCgoOrBinary',

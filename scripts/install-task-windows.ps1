@@ -47,11 +47,6 @@ $NewBinary = Join-Path $BridgeDir 'whatsapp-bridge.new.exe'
 
 if (-not (Test-Path -LiteralPath $BridgeDir -PathType Container)) { Fail "Could not find bridge directory: $BridgeDir" }
 
-$Port = if ($env:WHATSAPP_BRIDGE_PORT) { $env:WHATSAPP_BRIDGE_PORT } else { '8080' }
-if ($Port -notmatch '^[0-9]{1,5}$' -or [int]$Port -lt 1 -or [int]$Port -gt 65535) {
-    Fail "WHATSAPP_BRIDGE_PORT must be a number between 1 and 65535, got: $Port"
-}
-
 $AppDir = Join-Path $env:LOCALAPPDATA 'whatsapp-mcp'
 $LogDir = Join-Path $AppDir 'logs'
 $ConfigFile = Join-Path $AppDir 'bridge-task.json'
@@ -59,6 +54,31 @@ $RunnerScript = Join-Path $AppDir 'run-whatsapp-bridge.ps1'
 $Launcher = Join-Path $AppDir 'whatsapp-bridge-launcher.exe'
 $NewLauncher = Join-Path $AppDir 'whatsapp-bridge-launcher.new.exe'
 $Identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+
+# Like the macOS installer, reinstalling keeps the saved settings, and a
+# variable set in this session overrides its saved value.
+$saved = $null
+if (Test-Path -LiteralPath $ConfigFile -PathType Leaf) {
+    try {
+        $saved = ([System.IO.File]::ReadAllText($ConfigFile) | ConvertFrom-Json).Environment
+    } catch {
+        Fail "Could not read the saved settings in ${ConfigFile}: $($_.Exception.Message)"
+    }
+}
+$environment = [ordered]@{ WHATSAPP_BRIDGE_PORT = '8080' }
+# The bridge treats an empty value as unset, and PowerShell 7 can leave a
+# cleared variable defined but empty, so only non-empty values are kept.
+foreach ($name in 'WHATSAPP_BRIDGE_PORT', 'WEBHOOK_URL', 'WEBHOOK_ENABLED', 'WHATSAPP_AUTO_DOWNLOAD_MEDIA', 'FORWARD_SELF',
+    'WHATSAPP_BRIDGE_TOKEN', 'WHATSAPP_MEDIA_ROOTS', 'WHATSAPP_DEVICE_NAME') {
+    $value = [Environment]::GetEnvironmentVariable($name)
+    if (-not $value -and $saved) { $value = $saved.$name }
+    if ($value) { $environment[$name] = [string]$value }
+}
+
+$Port = $environment.WHATSAPP_BRIDGE_PORT
+if ($Port -notmatch '^[0-9]{1,5}$' -or [int]$Port -lt 1 -or [int]$Port -gt 65535) {
+    Fail "WHATSAPP_BRIDGE_PORT must be a number between 1 and 65535, got: $Port"
+}
 
 New-Item -ItemType Directory -Force -Path $AppDir, $LogDir | Out-Null
 
@@ -243,13 +263,6 @@ try {
     Fail "Could not replace $Launcher; is the launcher still running? $($_.Exception.Message)"
 }
 
-$environment = [ordered]@{ WHATSAPP_BRIDGE_PORT = $Port }
-# The bridge treats an empty value as unset, and PowerShell 7 can leave a
-# cleared variable defined but empty, so only non-empty values are kept.
-foreach ($name in 'WEBHOOK_URL', 'WEBHOOK_ENABLED', 'WHATSAPP_AUTO_DOWNLOAD_MEDIA', 'FORWARD_SELF', 'WHATSAPP_BRIDGE_TOKEN', 'WHATSAPP_MEDIA_ROOTS') {
-    $value = [Environment]::GetEnvironmentVariable($name)
-    if ($value) { $environment[$name] = $value }
-}
 $config = [ordered]@{
     BridgeDir           = $BridgeDir
     BridgeBinary        = $BridgeBinary

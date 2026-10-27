@@ -786,14 +786,16 @@ message DBs, media, and `.bridge-token`. Logs are left in
 ### Run automatically on Windows
 
 Windows users can install an optional per-user Task Scheduler task that starts
-the Go bridge at login and starts it again whenever it exits, for example when
-it gives up connecting because the network is not up yet. The installer does
-not need administrator rights, stores no password, and does not install or
-start the MCP server.
+the Go bridge at login and starts it again whenever it exits, for example after
+a crash. The installer does not need administrator rights, stores no password,
+and does not install or start the MCP server.
 
 Pair the bridge before installing: run it once in a terminal and scan the QR
-code. The task runs without a window, so a QR code would only appear in its
-log. Stop any bridge you started by hand, then run from the repository root:
+code. The task runs the bridge without a terminal, so it never prints a QR
+code. To link the phone again later, use the
+[connection API](#connection-status-and-phone-linking), or stop the task and
+run the bridge in a terminal. Stop any bridge you started by hand, then run
+from the repository root:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-task-windows.ps1
@@ -819,8 +821,9 @@ and the bridge when the task stops. Its C# source is in
 software may flag it.
 
 To customize the task environment, set variables before running the installer.
-Re-run the installer after changing them. On Windows, `WHATSAPP_MEDIA_ROOTS`
-separates directories with `;`.
+Re-run the installer after changing them; saved values are otherwise preserved.
+To drop the saved values, uninstall and then install again. On Windows,
+`WHATSAPP_MEDIA_ROOTS` separates directories with `;`.
 
 ```powershell
 $env:WHATSAPP_BRIDGE_PORT = "8080"
@@ -831,7 +834,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-task-windows
 ```
 
 The installer also passes through `WEBHOOK_ENABLED`,
-`WHATSAPP_AUTO_DOWNLOAD_MEDIA`, and `WHATSAPP_BRIDGE_TOKEN`. It saves these
+`WHATSAPP_AUTO_DOWNLOAD_MEDIA`, `WHATSAPP_DEVICE_NAME`, and
+`WHATSAPP_BRIDGE_TOKEN`. It saves these
 values in `%LOCALAPPDATA%\whatsapp-mcp\bridge-task.json`, which only your user
 account can read. Without an explicit `WHATSAPP_BRIDGE_TOKEN`, the bridge keeps
 using `whatsapp-bridge\store\.bridge-token`.
