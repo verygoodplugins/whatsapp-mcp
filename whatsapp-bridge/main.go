@@ -2501,12 +2501,15 @@ func extractDirectPathFromURL(url string) string {
 // Outbound media: req.MediaPath in /api/send is validated against
 // allowedMediaRoots before sendWhatsAppMessage ever sees it. See
 // media_path.go.
-func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []string) *http.ServeMux {
+func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []string, connections ...*connectionManager) *http.ServeMux {
 	allowedHosts := buildAllowedHosts(port)
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return withAuth(token, allowedHosts, h)
 	}
 	mux := http.NewServeMux()
+	if len(connections) > 0 {
+		connections[0].register(mux, auth)
+	}
 
 	// On-demand history sync endpoint (see history_ondemand.go)
 	registerHistoryEndpoint(mux, auth, client, messageStore)
@@ -2519,7 +2522,15 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			"connected": client.IsConnected(),
 			"timestamp": time.Now().Unix(),
 		}
-		if !client.IsConnected() {
+		if len(connections) > 0 {
+			snapshot := connections[0].snapshot()
+			status["connected"] = snapshot.Connected
+			status["state"] = snapshot.State
+			status["paired"] = snapshot.Paired
+			status["message"] = snapshot.Message
+			status["lastError"] = snapshot.LastError
+		}
+		if !status["connected"].(bool) {
 			status["status"] = "disconnected"
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
@@ -2899,8 +2910,26 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 	return mux
 }
 
-func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []string) {
-	handler := newRESTMux(client, messageStore, port, token, allowedMediaRoots)
+// Requests use the current client after a revoked device is replaced. Existing
+// in-flight requests can finish against the already disconnected previous client.
+func newManagedRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []string, connection *connectionManager) http.Handler {
+	var cacheMu sync.Mutex
+	cachedClient := client
+	cachedMux := newRESTMux(client, messageStore, port, token, allowedMediaRoots, connection)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := connection.client.Load()
+		cacheMu.Lock()
+		if current != cachedClient {
+			cachedClient = current
+			cachedMux = newRESTMux(current, messageStore, port, token, allowedMediaRoots, connection)
+		}
+		handler := cachedMux
+		cacheMu.Unlock()
+		handler.ServeHTTP(w, r)
+	})
+}
+func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []string, connection *connectionManager) {
+	handler := newManagedRESTMux(client, messageStore, port, token, allowedMediaRoots, connection)
 
 	// Start the server with proper timeouts. Bind to loopback so the bridge is
 	// not reachable from the LAN; MCP clients talk to it over localhost.
@@ -3122,11 +3151,26 @@ func main() {
 		printTokenBanner(bridgeToken, port)
 	}
 
-	// Channel to signal reconnection needs
-	reconnectChan := make(chan bool, 1)
+	connection := newConnectionManager(client.Store.ID != nil)
+	client.EnableAutoReconnect = false // The controller handles retries, including sustained keepalive failures.
+	connection.client.Store(client)
+	connection.connect = func(ctx context.Context) error { return connection.client.Load().ConnectContext(ctx) }
+	connection.disconnect = func() { connection.client.Load().Disconnect() }
+	connection.qrChannel = func(ctx context.Context) (<-chan whatsmeow.QRChannelItem, error) {
+		return connection.client.Load().GetQRChannel(ctx)
+	}
+	var registerEvents func(*whatsmeow.Client)
+	connection.preparePairing = func() { connection.replaceDeletedClient(container.NewDevice, registerEvents) }
+	if info, err := os.Stdout.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
+		connection.renderQR = func(code string) { qrterminal.GenerateHalfBlock(code, qrterminal.L, os.Stdout) }
+	}
 
 	// Setup event handling for messages and history sync
-	client.AddEventHandler(func(evt interface{}) {
+	eventHandler := func(client *whatsmeow.Client, evt interface{}) {
+		if connection.client.Load() != client {
+			return
+		}
+		connection.handleEvent(evt)
 		switch v := evt.(type) {
 		case *events.Message:
 			// Process regular messages
@@ -3220,141 +3264,14 @@ func main() {
 		case *events.LoggedOut:
 			logger.Warnf("⚠️  Device logged out, please scan QR code to log in again")
 
-		case *events.Disconnected:
-			logger.Warnf("⚠️  Disconnected from WhatsApp servers, will attempt reconnection...")
-			// Signal reconnection needed
-			select {
-			case reconnectChan <- true:
-			default:
-				// Channel already has a reconnect signal
-			}
-
-		case *events.ConnectFailure:
-			logger.Errorf("❌ Connection failure: %v", v.Reason)
-			// Signal reconnection needed
-			select {
-			case reconnectChan <- true:
-			default:
-			}
-
-		case *events.StreamError:
-			logger.Errorf("❌ Stream error: %v", v.Code)
-			// Signal reconnection needed
-			select {
-			case reconnectChan <- true:
-			default:
-			}
-
-		case *events.StreamReplaced:
-			// Another WhatsApp Web session took our slot. whatsmeow treats this
-			// as a "permanent" disconnect and suppresses the Disconnected event,
-			// so we must handle it explicitly. Wait briefly to avoid ping-ponging
-			// with the other client, then reconnect.
-			logger.Warnf("⚠️  Stream replaced by another session — will reconnect after 30s")
-			go func() {
-				time.Sleep(30 * time.Second)
-				select {
-				case reconnectChan <- true:
-				default:
-				}
-			}()
-
 		case *events.ClientOutdated:
 			logger.Errorf("❌ Client outdated - please update whatsmeow library")
 		}
-	})
-
-	// Create channel to track connection success
-	connected := make(chan bool, 1)
-
-	// Add connection retry logic
-	maxRetries := 3
-	var connErr error
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		logger.Infof("Connection attempt %d/%d...", attempt, maxRetries)
-
-		// Connect to WhatsApp
-		if client.Store.ID == nil {
-			// No ID stored, this is a new client, need to pair with phone
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer cancel()
-
-			qrChan, connErr := client.GetQRChannel(ctx)
-			if connErr != nil {
-				logger.Errorf("Failed to get QR channel: %v", connErr)
-				if attempt == maxRetries {
-					os.Exit(1)
-				}
-				time.Sleep(5 * time.Second)
-				continue
-			}
-
-			connErr = client.Connect()
-			if connErr != nil {
-				logger.Errorf("Failed to connect (attempt %d): %v", attempt, connErr)
-				if attempt == maxRetries {
-					os.Exit(1)
-				}
-				time.Sleep(5 * time.Second)
-				continue
-			}
-
-			// Print QR codes for pairing with the phone.
-			switch renderPairingQRCodes(qrChan, os.Stdout, func(code string, w io.Writer) {
-				qrterminal.GenerateHalfBlock(code, qrterminal.L, w)
-			}) {
-			case pairingQRSucceeded:
-				connected <- true
-			case pairingQRTimedOut:
-				logger.Warnf("QR code timed out")
-			case pairingQRChannelClosed:
-			}
-
-			// Wait for connection with timeout
-			select {
-			case <-connected:
-				fmt.Println("\nSuccessfully connected and authenticated!")
-				goto connectionSuccess
-			case <-ctx.Done():
-				logger.Errorf("Timeout waiting for QR code scan (attempt %d)", attempt)
-				client.Disconnect()
-				if attempt == maxRetries {
-					os.Exit(1)
-				}
-				time.Sleep(10 * time.Second)
-				continue
-			}
-		} else {
-			// Already logged in, just connect
-			connErr = client.Connect()
-			if connErr != nil {
-				logger.Errorf("Failed to connect (attempt %d): %v", attempt, connErr)
-				if attempt == maxRetries {
-					os.Exit(1)
-				}
-				time.Sleep(5 * time.Second)
-				continue
-			}
-			connected <- true
-			break
-		}
 	}
-
-connectionSuccess:
-
-	// Wait a moment for connection to stabilize
-	time.Sleep(2 * time.Second)
-
-	if !client.IsConnected() {
-		logger.Errorf("Failed to establish stable connection")
-		os.Exit(1)
+	registerEvents = func(client *whatsmeow.Client) {
+		client.AddEventHandler(func(evt interface{}) { eventHandler(client, evt) })
 	}
-
-	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
-
-	// port and bridgeToken were already resolved above, before the connect/
-	// pairing loop, so the setup banner could print immediately.
+	registerEvents(client)
 
 	// Resolve the allow-listed roots that media_path values in /api/send must
 	// live under. See media_path.go for the rationale.
@@ -3365,7 +3282,9 @@ connectionSuccess:
 	}
 	logger.Infof("Allowed media roots: %v", allowedMediaRoots)
 
-	startRESTServer(client, messageStore, port, bridgeToken, allowedMediaRoots)
+	startRESTServer(client, messageStore, port, bridgeToken, allowedMediaRoots, connection)
+	connection.start()
+	defer connection.close()
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)
@@ -3373,56 +3292,11 @@ connectionSuccess:
 
 	fmt.Println("REST server is running. Press Ctrl+C to disconnect and exit.")
 
-	// Start reconnection handler goroutine
-	go func() {
-		reconnectBackoff := time.Second * 5
-		maxBackoff := time.Minute * 5
-
-		for {
-			select {
-			case <-reconnectChan:
-				logger.Infof("🔄 Attempting to reconnect...")
-
-				// Wait before reconnecting
-				time.Sleep(reconnectBackoff)
-
-				// Try to reconnect
-				if !client.IsConnected() {
-					err := client.Connect()
-					if err != nil {
-						logger.Errorf("❌ Reconnection failed: %v", err)
-						// Increase backoff for next attempt
-						reconnectBackoff = reconnectBackoff * 2
-						if reconnectBackoff > maxBackoff {
-							reconnectBackoff = maxBackoff
-						}
-						// Signal another reconnection attempt
-						select {
-						case reconnectChan <- true:
-						default:
-						}
-					} else {
-						logger.Infof("✓ Reconnected successfully")
-						// Reset backoff on successful connection
-						reconnectBackoff = time.Second * 5
-					}
-				} else {
-					logger.Infof("Already connected, skipping reconnection")
-					reconnectBackoff = time.Second * 5
-				}
-
-			case <-exitChan:
-				return
-			}
-		}
-	}()
-
 	// Wait for termination signal
 	<-exitChan
 
 	fmt.Println("Disconnecting...")
-	// Disconnect client
-	client.Disconnect()
+	// The deferred controller close cancels attempts and disconnects the client.
 }
 
 // isPlaceholderChatName reports whether name is one of the fallbacks GetChatName

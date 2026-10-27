@@ -47,8 +47,31 @@ require_macos_user
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-BRIDGE_DIR="$REPO_ROOT/whatsapp-bridge"
-BRIDGE_BINARY="$BRIDGE_DIR/whatsapp-bridge"
+# Keep installed runtime/session paths and settings unless explicitly overridden.
+# This matters when the store was relocated out of a TCC-protected directory.
+existing_env="$HOME/Library/Application Support/whatsapp-mcp/launchd.env"
+saved_default_api_url=""
+if [[ -v WHATSAPP_BRIDGE_PORT && -r "$existing_env" ]]; then
+  saved_port="$(source "$existing_env"; print -r -- "${WHATSAPP_BRIDGE_PORT:-8080}")"
+  saved_default_api_url="http://127.0.0.1:${saved_port}/api"
+fi
+if [[ -r "$existing_env" ]]; then
+  for preserved_var in WHATSAPP_BRIDGE_DIR WHATSAPP_BRIDGE_BINARY WHATSAPP_BRIDGE_PORT WHATSAPP_API_URL WHATSAPP_HUB_URL WEBHOOK_URL WEBHOOK_ENABLED WHATSAPP_AUTO_DOWNLOAD_MEDIA FORWARD_SELF WHATSAPP_BRIDGE_TOKEN WHATSAPP_MEDIA_ROOTS WHATSAPP_DEVICE_NAME; do
+    if [[ ! -v "$preserved_var" ]]; then
+      if preserved_value="$(source "$existing_env"; [[ -v "$preserved_var" ]] || exit 1; print -r -- "${(P)preserved_var}")"; then
+        # A port-only override moves the generated API URL with the listener.
+        # Preserve genuinely custom URLs and explicit API URL overrides.
+        if [[ "$preserved_var" == "WHATSAPP_API_URL" && "$preserved_value" == "$saved_default_api_url" ]]; then
+          continue
+        fi
+        export "$preserved_var=$preserved_value"
+      fi
+    fi
+  done
+fi
+SOURCE_BRIDGE_DIR="$REPO_ROOT/whatsapp-bridge"
+BRIDGE_DIR="${WHATSAPP_BRIDGE_DIR:-$SOURCE_BRIDGE_DIR}"
+BRIDGE_BINARY="${WHATSAPP_BRIDGE_BINARY:-$SOURCE_BRIDGE_DIR/whatsapp-bridge}"
 
 [[ -d "$BRIDGE_DIR" ]] || fail "Could not find bridge directory: $BRIDGE_DIR"
 
@@ -73,7 +96,7 @@ mkdir -p "$SUPPORT_DIR" "$STATE_DIR" "$LOG_DIR" "$LAUNCH_AGENTS_DIR"
 
 if command -v go >/dev/null 2>&1; then
   print -r -- "Building WhatsApp bridge..."
-  (cd "$BRIDGE_DIR" && go build -o "$BRIDGE_BINARY" .)
+  (cd "$SOURCE_BRIDGE_DIR" && go build -o "$BRIDGE_BINARY" .)
 elif [[ ! -x "$BRIDGE_BINARY" ]]; then
   fail "Go is not available and no executable bridge binary exists at $BRIDGE_BINARY."
 fi
@@ -84,9 +107,19 @@ print -r -- "Stopping existing whatsapp-mcp LaunchAgents if present..."
 bootout_label "$LAUNCHD_DOMAIN" "$MONITOR_LABEL"
 bootout_label "$LAUNCHD_DOMAIN" "$BRIDGE_LABEL"
 
-if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >&2 || true
-  fail "Port $PORT is already in use after stopping existing whatsapp-mcp LaunchAgents."
+if command -v lsof >/dev/null 2>&1; then
+  # bootout sends SIGTERM asynchronously. Allow the old process to release its
+  # listener before deciding another process owns the port.
+  for stop_attempt in {1..40}; do
+    if ! lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.25
+  done
+  if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >&2 || true
+    fail "Port $PORT is already in use after stopping existing whatsapp-mcp LaunchAgents."
+  fi
 fi
 
 old_umask="$(umask)"
@@ -101,7 +134,7 @@ write_export "WHATSAPP_API_URL" "$API_URL"
 write_export "WHATSAPP_MCP_LOG_DIR" "$LOG_DIR"
 write_export "WHATSAPP_MCP_STATE_DIR" "$STATE_DIR"
 
-for optional_var in WEBHOOK_URL WEBHOOK_ENABLED WHATSAPP_AUTO_DOWNLOAD_MEDIA FORWARD_SELF WHATSAPP_BRIDGE_TOKEN WHATSAPP_MEDIA_ROOTS; do
+for optional_var in WEBHOOK_URL WEBHOOK_ENABLED WHATSAPP_AUTO_DOWNLOAD_MEDIA FORWARD_SELF WHATSAPP_BRIDGE_TOKEN WHATSAPP_MEDIA_ROOTS WHATSAPP_DEVICE_NAME WHATSAPP_HUB_URL; do
   if [[ -v "$optional_var" ]]; then
     write_export "$optional_var" "${(P)optional_var}"
   fi
@@ -118,6 +151,7 @@ exec "\$WHATSAPP_BRIDGE_BINARY"
 EOF
 chmod 755 "$RUNNER_SCRIPT"
 
+NOTIFIER_BINARY="$(command -v terminal-notifier 2>/dev/null || true)"
 cat > "$MONITOR_SCRIPT" <<EOF
 #!/bin/zsh
 set -euo pipefail
@@ -125,25 +159,29 @@ set -euo pipefail
 source $(shell_quote "$ENV_FILE")
 
 BRIDGE_LABEL="$BRIDGE_LABEL"
+NOTIFIER_BINARY=$(shell_quote "$NOTIFIER_BINARY")
 STATE_DIR="\${WHATSAPP_MCP_STATE_DIR:-\$HOME/Library/Application Support/whatsapp-mcp/state}"
 LOG_DIR="\${WHATSAPP_MCP_LOG_DIR:-\$HOME/Library/Logs/whatsapp-mcp}"
 TOKEN_FILE="\$WHATSAPP_BRIDGE_DIR/store/.bridge-token"
-BRIDGE_LOG="\$LOG_DIR/bridge.out.log"
+HUB_URL="\${WHATSAPP_HUB_URL:-http://localhost:8767/ui/whatsapp}"
 
 mkdir -p "\$STATE_DIR"
 
 notify() {
   local title="\$1"
   local msg="\$2"
-  if command -v terminal-notifier >/dev/null 2>&1; then
-    terminal-notifier -title "\$title" -message "\$msg" >/dev/null 2>&1 || true
-  else
+  local notifier="\$NOTIFIER_BINARY"
+  if [[ ! -x "\$notifier" ]]; then
+    notifier="\$(command -v terminal-notifier 2>/dev/null || true)"
+  fi
+  if [[ -x "\$notifier" ]] && "\$notifier" -title "\$title" -message "\$msg" -open "\$HUB_URL" >/dev/null 2>&1; then
+    return 0
+  fi
     osascript \\
       -e 'on run argv' \\
       -e 'display notification (item 2 of argv) with title (item 1 of argv)' \\
       -e 'end run' \\
       "\$title" "\$msg" >/dev/null 2>&1 || true
-  fi
 }
 
 alert_once() {
@@ -151,8 +189,12 @@ alert_once() {
   local title="\$2"
   local msg="\$3"
   local marker="\$STATE_DIR/\$key.alerted"
-  if [[ ! -f "\$marker" ]]; then
-    notify "\$title" "\$msg"
+  local previous=0
+  if [[ -f "\$marker" ]]; then
+    previous="\$(stat -f %m "\$marker" 2>/dev/null || print 0)"
+  fi
+  if (( \$(date +%s) - previous >= 21600 )); then
+    notify "\$title" "\$msg Open \$HUB_URL"
     : > "\$marker"
   fi
 }
@@ -207,18 +249,51 @@ if print -r -- "\$HEALTH" | grep -Eq '"connected"[[:space:]]*:[[:space:]]*true';
 fi
 
 if [[ "\$connected" == "true" ]]; then
+  if [[ -f "\$STATE_DIR/connection-state" ]]; then
+    notify "WhatsApp Connected Again" "AutoJack can receive WhatsApp messages again."
+    rm -f "\$STATE_DIR/connection-state"
+  fi
+  rm -f "\$STATE_DIR/connection-started"
   clear_alert "relink"
   clear_alert "qr"
-else
-  alert_once "relink" "WhatsApp Relink Needed" "The bridge is running but WhatsApp is disconnected. Check logs and scan a QR code if prompted."
-  if [[ -f "\$BRIDGE_LOG" ]]; then
-    if tail -n 200 "\$BRIDGE_LOG" 2>/dev/null | grep -Eiq 'Scan this QR code|Device logged out|QR code timed out|Timeout waiting for QR code scan'; then
-      alert_once "qr" "WhatsApp QR Action Needed" "The bridge logs indicate that phone linking is required."
-    else
-      clear_alert "qr"
-    fi
-  fi
+  clear_alert "connection"
+  exit 0
 fi
+
+# Read the structured cause. A bridge upgrade is different from a phone logout;
+# never infer a fresh logout from historical log lines.
+connection_state="\$(print -r -- "\$HEALTH" | sed -nE 's/.*"state"[[:space:]]*:[[:space:]]*"([^" ]+)".*/\\1/p')"
+connection_state="\${connection_state:-disconnected}"
+[[ "\$connection_state" == "pairing" ]] && connection_state="logged_out"
+previous_state="\$(cat "\$STATE_DIR/connection-state" 2>/dev/null || true)"
+if [[ "\$connection_state" == "connecting" ]]; then
+  # Track the outage across attempts: a 60s monitor can miss each 45s timeout.
+  if [[ ! -f "\$STATE_DIR/connection-started" ]]; then
+    date +%s > "\$STATE_DIR/connection-started"
+  fi
+  outage_started="\$(cat "\$STATE_DIR/connection-started")"
+  if [[ -z "\$previous_state" ]] && (( \$(date +%s) - outage_started < 90 )); then
+    exit 0
+  fi
+  # Existing outages retain their cause and six-hour reminder during retries.
+  connection_state="\${previous_state:-disconnected}"
+fi
+if [[ "\$connection_state" != "\$previous_state" ]]; then
+  clear_alert "connection"
+fi
+print -r -- "\$connection_state" > "\$STATE_DIR/connection-state"
+case "\$connection_state" in
+  outdated)
+    alert_once "connection" "WhatsApp Update Required" "Update and rebuild the bridge. Scanning a QR code will not fix an outdated client."
+    ;;
+  logged_out|pairing)
+    alert_once "connection" "WhatsApp Linking Needed" "Open AutoHub and scan the current QR code from WhatsApp > Linked Devices > Link a Device."
+    ;;
+  *)
+    alert_once "connection" "WhatsApp Disconnected" "AutoJack cannot receive messages. The bridge will retry; open AutoHub for status or reconnect."
+    ;;
+esac
+
 EOF
 chmod 755 "$MONITOR_SCRIPT"
 

@@ -71,26 +71,9 @@ uv run ruff check .         # lint
 uv run ruff format .        # format
 ```
 
-## CI gates
+## PR review and CI
 
-Every PR runs (see `.github/workflows/`). Not every job is blocking today:
-
-**Blocking — must be green to merge:**
-
-- `Python Lint` (`ruff check` + `ruff format --check`)
-- `Python Tests` (`pytest`)
-- `Go Lint` (`golangci-lint`)
-- `Go Build`
-- `Version Consistency` (Python pkg version vs `.release-please-manifest.json`)
-- `CodeQL Analysis (Python | Go)`
-
-**Informational — runs on every PR but won't fail the build today (`continue-on-error: true`):**
-
-- `Bandit Security Scan`
-- `Python Dependency Audit` (`pip-audit`)
-- `Go Vulnerability Check` (`govulncheck`)
-
-A failing blocking job is a hard block — fix it or explain in the PR why it's unrelated. For informational scans, investigate findings and either fix them or note in the PR why they're acceptable.
+For PR creation, hosted review, CI, and merge readiness, use the installed `babysit` skill (`~/.autovault/skills/babysit/SKILL.md`) as the canonical procedure.
 
 ## Environment variables
 
@@ -101,6 +84,7 @@ A failing blocking job is a hard block — fix it or explain in the PR why it's 
 | `WHATSAPP_API_URL` | `http://localhost:8080/api` | Bridge REST endpoint |
 | `WHATSAPP_BRIDGE_PORT` | `8080` | Port the bridge binds to |
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token required for bridge REST calls |
+| `WHATSAPP_HUB_URL` | `http://localhost:8767/ui/whatsapp` | AutoHub status/pairing page opened by macOS bridge notifications |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox` | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default) | Linked-device label shown in WhatsApp > Linked Devices. Applied at pair time only (`store.DeviceProps.Os`); re-pair to change |
 | `WHATSAPP_MCP_TRANSPORT` | `stdio` | MCP transport to serve clients: `stdio`, `http`, or `sse` |
