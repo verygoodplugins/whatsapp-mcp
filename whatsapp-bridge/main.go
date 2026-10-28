@@ -14,9 +14,11 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +27,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
+	"rsc.io/qr"
 
 	"bytes"
 
@@ -3162,7 +3165,15 @@ func main() {
 	var registerEvents func(*whatsmeow.Client)
 	connection.preparePairing = func() { connection.replaceDeletedClient(container.NewDevice, registerEvents) }
 	if info, err := os.Stdout.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
-		connection.renderQR = func(code string) { qrterminal.GenerateHalfBlock(code, qrterminal.L, os.Stdout) }
+		// Each code is also written to a PNG: the half-block render is
+		// unreadable to a camera in terminals that add line spacing, and that
+		// failure is silent.
+		qrPNGAnnounced := false
+		connection.renderQR = func(code string) {
+			qrterminal.GenerateHalfBlock(code, qrterminal.L, os.Stdout)
+			writeQRPNG(code, !qrPNGAnnounced)
+			qrPNGAnnounced = true
+		}
 	}
 
 	// Setup event handling for messages and history sync
@@ -3915,4 +3926,38 @@ func placeholderWaveform(duration uint32) []byte {
 	}
 
 	return waveform
+}
+
+// writeQRPNG renders the pairing code to store/qr.png as a fallback for
+// terminals where the half-block rendering cannot be scanned. Several terminal
+// emulators (macOS Terminal.app among them) add line spacing between rows,
+// which separates the QR modules and makes the code unreadable to a phone
+// camera even though it still looks correct to a human.
+//
+// On the first code it also offers to open the file in the system viewer.
+// Every failure here is non-fatal: the terminal rendering stays the primary
+// path and the bridge keeps working exactly as before.
+func writeQRPNG(code string, announce bool) {
+	encoded, err := qr.Encode(code, qr.M)
+	if err != nil {
+		return
+	}
+	path := filepath.Join("store", "qr.png")
+	if err := os.WriteFile(path, encoded.PNG(), 0o600); err != nil {
+		return
+	}
+	if !announce {
+		return
+	}
+	fmt.Printf("If the code above will not scan, open: %s\n", path)
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", path)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", path)
+	default:
+		cmd = exec.Command("xdg-open", path)
+	}
+	_ = cmd.Start()
 }
