@@ -2907,6 +2907,9 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 		}
 	}))
 
+	// Group participants, name, description and photo (see group_admin.go)
+	registerGroupAdminEndpoints(mux, auth, client, allowedMediaRoots)
+
 	return mux
 }
 
