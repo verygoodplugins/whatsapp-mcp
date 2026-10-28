@@ -855,6 +855,42 @@ Caveats:
   message first.
 - Messages the phone has deleted are not recoverable, as above.
 
+### Creating groups and communities
+
+The bridge can create a group, a community, or a group inside a community.
+WhatsApp adds the paired account to every group it creates.
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/create-group \
+  -H "Authorization: Bearer $(cat whatsapp-bridge/store/.bridge-token)" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Launch team", "participants": ["1234567890"], "topic": "Launch planning"}'
+# {"ok": true, "jid": "120363000000000000@g.us", "invite_link": "https://chat.whatsapp.com/..."}
+```
+
+| Field | Required | Description |
+| -------------- | ---------------- | ------------------------------------------------------------- |
+| `name` | yes | Group name |
+| `participants` | for plain groups | Phone numbers with country code (digits only) or JIDs |
+| `topic` | no | Group description |
+| `community` | no | `true` creates a community; joining it requires admin approval |
+| `parent` | no | Community JID (`...@g.us`) to create the group inside |
+| `approval` | no | `true` requires admin approval to join the group |
+
+The response carries the new group's JID and invite link. If the group is
+created but the invite link or the description fails, the response still has
+`"ok": true` and adds `invite_error` or `topic_error`.
+
+List the groups linked to a community:
+
+```bash
+curl "http://127.0.0.1:8080/api/subgroups?jid=120363000000000001@g.us" \
+  -H "Authorization: Bearer $(cat whatsapp-bridge/store/.bridge-token)"
+# [{"JID": "120363000000000002@g.us", "Name": "Announcements", "IsDefaultSubGroup": false, ...}]
+```
+
+Both endpoints return `503` when the bridge is not connected to WhatsApp.
+
 ## Call History
 
 The bridge captures incoming WhatsApp voice and video calls live into a
@@ -944,6 +980,8 @@ flowchart LR
         REACT["/api/react"]
         TYPE["/api/typing"]
         HIST["/api/history"]
+        CREATE["/api/create-group"]
+        SUBG["/api/subgroups"]
         HEALTH["/api/health"]
     end
 
