@@ -209,6 +209,8 @@ Send a text message to a contact or group, optionally as a quoted reply.
 
 Inbound quoted replies are stored automatically. The `quoted_message_id` field in each message returned by `list_messages` indicates which message it is replying to (or `null` for non-replies).
 
+Edited messages are stored too: `content` is the current text, `edited_at` when the sender last edited it and `original_content` the text as first received (both `null` for messages never edited). Stores from an older bridge simply report every message as unedited.
+
 **Natural Language Examples:**
 
 - "Send 'Hello!' to +1234567890"
