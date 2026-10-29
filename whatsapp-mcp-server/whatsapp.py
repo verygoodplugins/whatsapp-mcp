@@ -1,3 +1,5 @@
+import base64
+import binascii
 import json
 import os
 import os.path
@@ -1164,11 +1166,14 @@ def send_message(
     quoted_sender_jid: str = "",
     quoted_content: str = "",
     mentions: list[str] | None = None,
+    link_preview: dict[str, str] | None = None,
 ) -> tuple[bool, str]:
     try:
         # Validate input
         if not recipient:
             return False, "Recipient must be provided"
+        if link_preview and link_preview.get("url", "") not in message:
+            return False, "link_preview.url must appear in the message text"
 
         url = f"{WHATSAPP_API_BASE_URL}/send"
         payload: dict[str, Any] = {
@@ -1181,6 +1186,17 @@ def send_message(
             payload["quoted_content"] = quoted_content
         if mentions:
             payload["mentions"] = mentions
+        if link_preview and link_preview.get("url"):
+            card = {k: link_preview[k] for k in ("url", "title", "description") if link_preview.get(k)}
+            # the bridge decodes the thumbnail as base64 JPEG bytes: anything else would fail the
+            # whole request, so an invalid one is dropped and the card goes without its image
+            thumb = link_preview.get("thumbnail") or ""
+            try:
+                if thumb and base64.b64decode(thumb, validate=True):
+                    card["thumbnail"] = thumb
+            except (binascii.Error, ValueError):
+                pass
+            payload["link_preview"] = card
 
         response = requests.post(url, json=payload, headers=_bridge_headers())
 

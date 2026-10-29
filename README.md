@@ -206,6 +206,7 @@ Send a text message to a contact or group, optionally as a quoted reply.
 - `quoted_sender_jid` (optional): Full JID of the author of the quoted message. Required for group replies so WhatsApp renders the correct attribution header.
 - `quoted_content` (optional): Text content of the quoted message, used for the reply preview. Only plain text is supported.
 - `mentions` (optional): List of users to @-mention, as phone numbers with country code (e.g. `["12025551234"]`) or JIDs. For each entry the message text must contain a matching `@<number>` token (e.g. `"thanks @12025551234!"`), which recipients' devices render as a highlighted, tappable mention that also notifies the user. Only meaningful in group chats.
+- `link_preview` (optional): The card under a link in the message, as `{"url", "title", "description", "thumbnail"}` (thumbnail: base64 JPEG, up to 100 KB). WhatsApp shows a sent link's preview only when the sender attaches one; the bridge doesn't fetch pages itself. `url` must appear in the message text.
 
 Inbound quoted replies are stored automatically. The `quoted_message_id` field in each message returned by `list_messages` indicates which message it is replying to (or `null` for non-replies).
 

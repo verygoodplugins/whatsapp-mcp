@@ -342,6 +342,7 @@ def send_message(
     quoted_sender_jid: str = "",
     quoted_content: str = "",
     mentions: list[str] | None = None,
+    link_preview: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Send a WhatsApp message to a person or group. For group chats use the JID.
 
@@ -359,6 +360,10 @@ def send_message(
                   ["420601234567"]) or JIDs. For each entry the message text must contain
                   a matching "@<number>" token (e.g. "hi @420601234567"), otherwise the
                   mention won't render on recipients' devices. Only meaningful in groups.
+        link_preview: The card shown under a link in the message (optional), as
+                  {"url", "title", "description", "thumbnail"}: WhatsApp shows a sent
+                  link's preview only when the sender attaches it. `url` must appear in
+                  the message; `thumbnail` is an optional base64 JPEG (up to 100 KB).
 
     Returns:
         A dictionary containing success status and a status message
@@ -369,7 +374,7 @@ def send_message(
 
     # Call the whatsapp_send_message function with the unified recipient parameter
     success, status_message = whatsapp_send_message(
-        recipient, message, quoted_message_id, quoted_sender_jid, quoted_content, mentions
+        recipient, message, quoted_message_id, quoted_sender_jid, quoted_content, mentions, link_preview
     )
     return {"success": success, "message": status_message}
 
