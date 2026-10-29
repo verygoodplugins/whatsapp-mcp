@@ -3009,11 +3009,28 @@ func renderPairingQRCodes(qrChan <-chan whatsmeow.QRChannelItem, w io.Writer, re
 	return pairingQRChannelClosed
 }
 
+// bridgeLogLevel reads WHATSAPP_LOG_LEVEL: DEBUG (default), INFO, WARN or ERROR,
+// any case. DEBUG logs every stanza, phone numbers and group IDs included. An
+// unknown value falls back to DEBUG and reports false so the caller can warn.
+func bridgeLogLevel(raw string) (string, bool) {
+	level := strings.ToUpper(strings.TrimSpace(raw))
+	switch level {
+	case "":
+		return "DEBUG", true
+	case "DEBUG", "INFO", "WARN", "ERROR":
+		return level, true
+	}
+	return "DEBUG", false
+}
+
 func main() {
 	flag.Parse()
 
-	// Set up logger with DEBUG level for more detailed logging
-	logger := waLog.Stdout("Client", "DEBUG", true)
+	logLevel, levelOK := bridgeLogLevel(os.Getenv("WHATSAPP_LOG_LEVEL"))
+	logger := waLog.Stdout("Client", logLevel, true)
+	if !levelOK {
+		logger.Warnf("Unknown WHATSAPP_LOG_LEVEL %q: using DEBUG (DEBUG, INFO, WARN or ERROR)", os.Getenv("WHATSAPP_LOG_LEVEL"))
+	}
 	logger.Infof("Starting WhatsApp client...")
 
 	logger.Infof("%s", webhookStartupMessage(forwardSelfMessages))
