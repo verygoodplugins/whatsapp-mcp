@@ -218,6 +218,16 @@ func NewMessageStore() (*MessageStore, error) {
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
 
+		-- who got / read / played the messages we sent: others' receipts, first time each
+		CREATE TABLE IF NOT EXISTS receipts (
+			message_id TEXT,
+			chat_jid TEXT,
+			reader TEXT,
+			type TEXT,
+			timestamp TIMESTAMP,
+			PRIMARY KEY (message_id, chat_jid, reader, type)
+		);
+
 		CREATE TABLE IF NOT EXISTS calls (
 			call_id TEXT,
 			chat_jid TEXT,
@@ -784,6 +794,20 @@ func (store *MessageStore) UpdateChatEphemeralSettings(jid string, expiration ui
 // move it backwards and un-read a chat. Like UpdateChatEphemeralSettings it
 // inserts only its own column, leaving name/last_message_time NULL so a receipt
 // arriving before any StoreChat call doesn't fabricate placeholder metadata.
+// StoreReceipt records a receipt someone else sent for messages we sent: delivered,
+// read or played, once per message, reader and type (the first time it came).
+// Times are stored in UTC so MIN()/ordering over the TEXT column is by instant.
+func (store *MessageStore) StoreReceipt(chatJID, reader, kind string, ids []string, at time.Time) error {
+	at = at.UTC()
+	for _, id := range ids {
+		if _, err := store.db.Exec(`INSERT OR IGNORE INTO receipts (message_id, chat_jid, reader, type, timestamp)
+			VALUES (?, ?, ?, ?, ?)`, id, chatJID, reader, kind, at); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (store *MessageStore) MarkChatRead(jid string, readAt time.Time) error {
 	_, err := store.db.Exec(
 		`INSERT INTO chats (jid, last_read_time)
@@ -3206,6 +3230,21 @@ func main() {
 				}
 				if err := messageStore.MarkChatRead(chatJID, readAt); err != nil {
 					logger.Warnf("Failed to mark chat %s read: %v", chatJID, err)
+				}
+			} else if !v.IsFromMe {
+				// someone else's receipt for messages we sent: delivered, read or played
+				kind := map[types.ReceiptType]string{types.ReceiptTypeDelivered: "delivered",
+					types.ReceiptTypeRead: "read", types.ReceiptTypePlayed: "played"}[v.Type]
+				if kind != "" {
+					chatJID := resolveLIDChat(client, v.Chat, v.SenderAlt, v.RecipientAlt, v.IsFromMe).String()
+					reader := resolveUserJID(client, v.Sender, v.SenderAlt).User
+					ids := make([]string, len(v.MessageIDs))
+					for i, id := range v.MessageIDs {
+						ids[i] = string(id)
+					}
+					if err := messageStore.StoreReceipt(chatJID, reader, kind, ids, v.Timestamp); err != nil {
+						logger.Warnf("Failed to store receipt for %s: %v", chatJID, err)
+					}
 				}
 			}
 

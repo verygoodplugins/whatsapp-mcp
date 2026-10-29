@@ -34,6 +34,9 @@ from whatsapp import (
     get_message_context as whatsapp_get_message_context,
 )
 from whatsapp import (
+    get_message_receipts as whatsapp_get_message_receipts,
+)
+from whatsapp import (
     get_sender_name as whatsapp_get_sender_name,
 )
 from whatsapp import (
@@ -332,6 +335,23 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> dic
         "before": [msg_to_dict(message) for message in context.before],
         "after": [msg_to_dict(message) for message in context.after],
     }
+
+
+@mcp.tool()
+def get_message_receipts(message_id: str, chat_jid: str) -> dict[str, Any]:
+    """Who received and who read one of your sent WhatsApp messages (blue ticks).
+
+    Args:
+        message_id: The ID of a message you sent
+        chat_jid: The JID of its chat (1:1 or group)
+
+    Returns:
+        {"receipts": [...]}: per reader their furthest status ("delivered", "read",
+        or "played" for voice notes) and when it came. Recorded only from the
+        bridge version that tracks receipts onward; people who disabled read
+        receipts only ever show as delivered.
+    """
+    return {"receipts": whatsapp_get_message_receipts(message_id, chat_jid)}
 
 
 @mcp.tool()

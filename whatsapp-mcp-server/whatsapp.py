@@ -645,6 +645,36 @@ def list_messages(
             conn.close()
 
 
+RECEIPT_RANK = {"delivered": 1, "read": 2, "played": 3}
+
+
+def get_message_receipts(message_id: str, chat_jid: str) -> list[dict[str, Any]]:
+    """Who received, read or played one of our sent messages: each reader's furthest
+    receipt with when it first came, from the bridge's `receipts` table (empty for a
+    store whose bridge predates receipt tracking, or when nobody sent one yet;
+    people who turned read receipts off only ever show as delivered)."""
+    conn = sqlite3.connect(MESSAGES_DB_PATH)
+    try:
+        cursor = conn.cursor()
+        tables = {row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        if "receipts" not in tables:
+            return []
+        rows = cursor.execute(
+            "SELECT reader, type, MIN(timestamp) FROM receipts WHERE message_id = ? AND chat_jid = ? GROUP BY reader, type",
+            (message_id, chat_jid),
+        ).fetchall()
+    finally:
+        conn.close()
+    best: dict[str, tuple[str, str]] = {}
+    for reader, kind, at in rows:
+        if reader not in best or RECEIPT_RANK.get(kind, 0) > RECEIPT_RANK.get(best[reader][0], 0):
+            best[reader] = (kind, at)
+    return [
+        {"reader_phone": reader, "reader_name": get_sender_name(reader), "status": kind, "at": at}
+        for reader, (kind, at) in sorted(best.items())
+    ]
+
+
 def get_message_context(message_id: str, before: int = 5, after: int = 5) -> MessageContext:
     """Get context around a specific message."""
     try:

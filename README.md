@@ -233,6 +233,27 @@ automatically.
 - "Mark those messages as read"
 - "Mark the last three messages from Alice in the team group as read"
 
+#### `get_message_receipts`
+
+Who received and who read a message you sent (WhatsApp's ticks). The bridge
+records the receipts other people send for your messages (delivered, read, played
+for voice notes) in the `receipts` table of `messages.db`; this tool returns each
+reader's furthest status and when it first arrived.
+
+**Parameters:**
+
+- `message_id` (required): ID of a message you sent
+- `chat_jid` (required): JID of its chat (1:1 or group)
+
+Receipts are recorded from the bridge version that tracks them onward (WhatsApp
+doesn't resend old ones). People who turned read receipts off only ever show as
+delivered.
+
+**Natural Language Examples:**
+
+- "Has Alice read my last message?"
+- "Who in the team group has read the meeting reminder?"
+
 #### `send_reaction`
 
 Send (or remove) an emoji reaction to a message.
