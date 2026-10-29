@@ -1199,12 +1199,13 @@ def send_message(
         return False, f"Unexpected error: {str(e)}"
 
 
-def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool, str]:
+def send_file(recipient: str, media_path: str, caption: str = "", as_document: bool = False) -> tuple[bool, str]:
     """Send a media file (image, video, document) with an optional caption.
 
     The bridge populates the WA media-message Caption field from `message`, so
     passing both in one /api/send call produces a single attachment-with-caption
-    message instead of two separate messages.
+    message instead of two separate messages. `as_document` sends a photo or
+    video as a file, uncompressed.
     """
     try:
         # Validate input
@@ -1221,6 +1222,8 @@ def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool,
         payload = {"recipient": recipient, "media_path": media_path}
         if caption:
             payload["message"] = caption
+        if as_document:
+            payload["as_document"] = True
 
         response = requests.post(url, json=payload, headers=_bridge_headers())
 

@@ -284,6 +284,7 @@ attachments sent by older bridge versions or prevent WhatsApp media expiry.
 - `recipient` (required): Phone number or group JID
 - `file_path` (required): Path to the file
 - `caption` (optional): Caption for the media
+- `as_document` (optional, default `false`): Send a photo or video as a file, in full quality without WhatsApp's compression
 
 The bridge only reads files inside configured media roots. By default this is
 `~/.local/share/whatsapp-mcp/outbox`; set `WHATSAPP_MEDIA_ROOTS` to allow
