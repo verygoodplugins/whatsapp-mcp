@@ -289,6 +289,23 @@ func TestResolveRecipientJIDResolvesPhoneToCachedLID(t *testing.T) {
 	}
 }
 
+func TestRegisteredLIDAcceptsCanonicalizedBrazilianNumber(t *testing.T) {
+	lid := types.JID{User: "123456789012345", Server: types.HiddenUserServer}
+	matches := []types.IsOnWhatsAppResponse{{
+		IsIn:        true,
+		JID:         lid,
+		PhoneNumber: types.JID{User: "5531973119406", Server: types.DefaultUserServer},
+	}}
+	// The query can contain an extra ninth digit, while WhatsApp returns the
+	// canonical number in PhoneNumber. The registered LID remains usable.
+	if got := registeredLID(matches); got != lid {
+		t.Fatalf("expected canonicalized number's LID %s, got %s", lid, got)
+	}
+	if got := registeredLID([]types.IsOnWhatsAppResponse{{JID: lid}}); !got.IsEmpty() {
+		t.Fatalf("unregistered response must not resolve: %s", got)
+	}
+}
+
 // TestUpdateChatEphemeralSettings_IgnoresZeroTimestamp pins down the sparse-chunk
 // guard: a write with settingTimestamp == 0 carries no information about when
 // the user toggled the chat's ephemeral state, so it must not clobber a
