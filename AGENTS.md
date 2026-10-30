@@ -90,6 +90,7 @@ For PR creation, hosted review, CI, and merge readiness, use the installed `baby
 | `WHATSAPP_MCP_TRANSPORT` | `stdio` | MCP transport to serve clients: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST` | `127.0.0.1` | Bind address for the `http`/`sse` transports |
 | `WHATSAPP_MCP_PORT` | `8000` | Port for the `http`/`sse` transports |
+| `WHATSAPP_MEDIA_BASE_URL` | unset | Public URL of this server; when set, `download_media` adds a signed, expiring `url` served at `<base>/media/…` (`http`/`sse` only) |
 | `WEBHOOK_URL` | `http://localhost:8769/whatsapp/webhook` | Outgoing webhook for incoming messages (empty falls back to this default) |
 | `WEBHOOK_ENABLED` | `true` | Set to `false` to disable outbound webhooks entirely |
 | `WHATSAPP_AUTO_DOWNLOAD_MEDIA` | `true` | Automatically download incoming media, including webhook image bytes. `false` keeps webhook metadata/text without `mediaBase64` and leaves downloads to `/api/download` (`download_media`); delayed downloads may fail after media expires. Status messages are stored but never auto-downloaded or forwarded |

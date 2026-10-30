@@ -309,6 +309,12 @@ Converted audio is sent through the same media-path confinement as
 Download media from a received message. Returns the **local file path**, which
 only helps a client that can read the filesystem — use `view_media` otherwise.
 
+When the server runs over `http`/`sse` and `WHATSAPP_MEDIA_BASE_URL` is set, the
+result also has a `url`: a signed link to the same file, served by this server
+at `/media/…`, so a client on another machine can fetch any media type (PDFs,
+spreadsheets, archives) with plain HTTP. Each link names one file and expires
+after an hour or when the server restarts.
+
 **Parameters:**
 
 - `message_id` (required): ID of the message with media
@@ -493,6 +499,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_MCP_TRANSPORT` | `stdio`                                | MCP transport to serve clients: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST`    | `127.0.0.1`                              | Bind address for the `http`/`sse` transports |
 | `WHATSAPP_MCP_PORT`    | `8000`                                   | Port for the `http`/`sse` transports |
+| `WHATSAPP_MEDIA_BASE_URL` | unset | Public URL clients use to reach this server (e.g. `https://wa.example.com`, behind your proxy). When set, `download_media` also returns a signed, expiring `url` served at `<base>/media/…`. `http`/`sse` transports only |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30`                              | Stdio parent-liveness poll interval (seconds); exits on parent reparent only |
 
 ### MCP transport (stdio vs http/sse)
