@@ -83,3 +83,17 @@ jobs:
         run: |
           cd whatsapp-mcp-server
           uv run pytest -v
+
+  windows-task-scripts:
+    name: Windows Task Scripts
+    runs-on: windows-latest
+    # The tests start real processes; a hang should not hold a runner for hours.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      # The installer must work in both shells, as the README invokes it with
+      # Windows PowerShell and users may run it from PowerShell 7.
+      - name: Test in Windows PowerShell 5.1
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test-task-windows.ps1
+      - name: Test in PowerShell 7
+        run: pwsh -NoProfile -File scripts/tests/test-task-windows.ps1
