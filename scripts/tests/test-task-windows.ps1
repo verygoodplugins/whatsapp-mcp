@@ -209,9 +209,23 @@ function Wait-Until([scriptblock]$Condition, [int]$TimeoutSeconds = 30) {
     return $false
 }
 
+# Reads a log while the runner may be appending to it. File.ReadAllText would
+# refuse to share the file with a writer, and could make the runner drop a line.
+function Read-Log([string]$Path) {
+    $stream = [System.IO.FileStream]::new($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]'ReadWrite, Delete')
+    try {
+        $reader = [System.IO.StreamReader]::new($stream)
+        return $reader.ReadToEnd()
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 function Get-MatchCount([string]$Path, [string]$Pattern) {
     if (-not (Test-Path -LiteralPath $Path)) { return 0 }
-    return [regex]::Matches([System.IO.File]::ReadAllText($Path), $Pattern).Count
+    try { $text = Read-Log $Path } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { return 0 }
+    return [regex]::Matches($text, $Pattern).Count
 }
 
 function Test-InstallRegistersLogonTask {
@@ -380,7 +394,7 @@ function Test-RunnerRestartsBridgeAndAppendsLogs {
 
     if ((Get-MatchCount "$logs\bridge.out.log" 'fake bridge stdout') -lt 2) { Fail 'expected bridge.out.log to keep the output of every run' }
     if ((Get-MatchCount "$logs\bridge.err.log" 'fake bridge stderr') -lt 2) { Fail 'expected bridge.err.log to keep the output of every run' }
-    $out = [System.IO.File]::ReadAllText("$logs\bridge.out.log")
+    $out = Read-Log "$logs\bridge.out.log"
     Assert-Contains $out "cwd=$root\repo\whatsapp-bridge" 'bridge.out.log'
     Assert-Contains $out 'port=8080' 'bridge.out.log'
 }
@@ -442,11 +456,12 @@ function Test-KillingLauncherStopsRunnerAndBridge {
     $children = @()
     try {
         if (-not (Wait-Until { (Get-MatchCount "$logs\runner.log" 'Started bridge') -ge 1 })) {
-            Fail "expected the launcher to start the runner and the bridge ($([System.IO.File]::ReadAllText("$logs\runner.log")))"
+            $runnerLog = try { Read-Log "$logs\runner.log" } catch { 'runner.log was not written' }
+            Fail "expected the launcher to start the runner and the bridge ($runnerLog)"
             return
         }
         $runnerPid = (Get-CimInstance Win32_Process -Filter "ParentProcessId = $($launcher.Id) AND Name = 'powershell.exe'").ProcessId
-        $bridgePid = [regex]::Match([System.IO.File]::ReadAllText("$logs\runner.log"), 'Started bridge \(pid ([0-9]+)\)').Groups[1].Value
+        $bridgePid = [regex]::Match((Read-Log "$logs\runner.log"),'Started bridge \(pid ([0-9]+)\)').Groups[1].Value
         $children = @(Get-Process -Id $runnerPid, $bridgePid)
         Assert-Equal "$root\repo\whatsapp-bridge\whatsapp-bridge.exe" $children[1].Path 'bridge process path'
 
