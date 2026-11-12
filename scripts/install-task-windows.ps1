@@ -272,10 +272,26 @@ $config = [ordered]@{
 }
 $utf8 = [System.Text.UTF8Encoding]::new($false)
 # The config can hold WHATSAPP_BRIDGE_TOKEN, so only the current user may read
-# it. Restrict the file before anything is written into it.
+# it. Restrict the file before anything is written into it, replacing its whole
+# access list: icacls /grant:r would keep other explicit entries, such as the
+# SYSTEM and Administrators entries a file can get when created elevated.
 [System.IO.File]::WriteAllText($ConfigFile, '', $utf8)
-icacls.exe $ConfigFile /inheritance:r /grant:r "*$($Identity.User.Value):(F)" | Out-Null
-if ($LASTEXITCODE -ne 0) { Fail "Could not restrict access to $ConfigFile." }
+$acl = [System.Security.AccessControl.FileSecurity]::new()
+$acl.SetAccessRuleProtection($true, $false)
+$acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($Identity.User, 'FullControl', 'Allow'))
+# Set-Acl would also write the audit list, which needs a privilege that
+# standard accounts lack. .NET Framework (Windows PowerShell) has an instance
+# method; .NET in PowerShell 7 has an extension class instead.
+$file = [System.IO.FileInfo]::new($ConfigFile)
+try {
+    if ('System.IO.FileSystemAclExtensions' -as [type]) {
+        [System.IO.FileSystemAclExtensions]::SetAccessControl($file, $acl)
+    } else {
+        $file.SetAccessControl($acl)
+    }
+} catch {
+    Fail "Could not restrict access to ${ConfigFile}: $($_.Exception.Message)"
+}
 [System.IO.File]::WriteAllText($ConfigFile, ($config | ConvertTo-Json), $utf8)
 
 $runner = @'

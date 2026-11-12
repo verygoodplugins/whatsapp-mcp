@@ -314,7 +314,19 @@ function Test-InstallRestrictsConfigToCurrentUser {
     $result = Invoke-TaskScript $root 'install-task-windows.ps1' @{ WHATSAPP_BRIDGE_TOKEN = 'secret-token' }
     Assert-Equal 0 $result.ExitCode "installer exit code ($($result.Output))"
 
-    $acl = Get-Acl -LiteralPath "$root\localappdata\whatsapp-mcp\bridge-task.json"
+    $config = "$root\localappdata\whatsapp-mcp\bridge-task.json"
+    Assert-OnlyCurrentUserCanAccess $config
+
+    # An explicit entry for another account, like the SYSTEM and Administrators
+    # entries of a file created elevated, must not survive a reinstall.
+    icacls.exe $config /grant '*S-1-1-0:(R)' | Out-Null
+    $result = Invoke-TaskScript $root 'install-task-windows.ps1'
+    Assert-Equal 0 $result.ExitCode "reinstaller exit code ($($result.Output))"
+    Assert-OnlyCurrentUserCanAccess $config
+}
+
+function Assert-OnlyCurrentUserCanAccess([string]$Path) {
+    $acl = Get-Acl -LiteralPath $Path
     $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
     $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
     Assert-Equal $true $acl.AreAccessRulesProtected 'inheritance disabled on bridge-task.json'
