@@ -594,9 +594,23 @@ def transcribe_audio(message_id: str, chat_jid: str, force: bool = False) -> dic
     }
 
 
+def _exit_now(code: int = 0) -> None:
+    """Exit without interpreter finalization.
+
+    Python 3.11 aborts (SIGABRT, macOS crash dialog) when finalization closes
+    stdin/stdout while an MCP stdio worker thread still holds the buffer lock.
+    Skipping finalization avoids that race.
+    """
+    try:
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(code)
+
+
 def shutdown_handler(signum, frame):
-    """Handle shutdown signals gracefully to prevent zombie processes."""
-    sys.exit(0)
+    """Handle shutdown signals without running interpreter finalization."""
+    _exit_now(0)
 
 
 if __name__ == "__main__":
@@ -625,3 +639,9 @@ if __name__ == "__main__":
     if transport == "stdio":
         install_stdio_parent_watchdog("WHATSAPP_PARENT_WATCHDOG_S", parent_pid=parent_pid)
     mcp.run(transport=transport)
+    if transport == "stdio":
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+        _exit_now(0)
