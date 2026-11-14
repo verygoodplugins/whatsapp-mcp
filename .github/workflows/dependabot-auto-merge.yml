@@ -1,13 +1,49 @@
-name: Dependabot auto-merge
+name: Dependabot Auto-Merge
 
 on:
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
 
 permissions:
   contents: write
+  issues: write
   pull-requests: write
+
 jobs:
   auto-merge:
-    if: github.actor == 'dependabot[bot]'
+    if: >-
+      ${{
+        (
+          github.event_name == 'pull_request_target' &&
+          github.event.pull_request.user.login == 'dependabot[bot]' &&
+          !github.event.pull_request.draft
+        ) ||
+        (
+          github.event_name == 'workflow_run' &&
+          (
+            github.event.workflow_run.event == 'pull_request' ||
+            github.event.workflow_run.event == 'pull_request_target'
+          ) &&
+          github.event.workflow_run.conclusion == 'success'
+        )
+      }}
     uses: verygoodplugins/.github/.github/workflows/dependabot-auto-merge.yml@main
+    # A called workflow only receives the secrets its caller forwards, and the reusable
+    # workflow mints a GitHub App token from AUTOMERGE_APP_CLIENT_ID /
+    # AUTOMERGE_APP_PRIVATE_KEY. All three have to be mapped: forwarding GH_TOKEN alone
+    # withholds the App secrets, and the job then runs degraded — auto-merge still
+    # works, but GitHub does not start push-triggered workflows (CI, Release Please,
+    # security scans) from a merge GITHUB_TOKEN performed.
+    #
+    # Mapped explicitly rather than with `secrets: inherit`, which would hand every
+    # caller-accessible secret — npm and registry tokens, deployment credentials — to a
+    # workflow this repo tracks at @main and which can therefore change without review
+    # here. A secret the repo has not set forwards as empty, which is the intended
+    # degrade path, not an error.
+    secrets:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      AUTOMERGE_APP_CLIENT_ID: ${{ secrets.AUTOMERGE_APP_CLIENT_ID }}
+      AUTOMERGE_APP_PRIVATE_KEY: ${{ secrets.AUTOMERGE_APP_PRIVATE_KEY }}
