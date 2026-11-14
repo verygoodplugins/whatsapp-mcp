@@ -49,6 +49,29 @@ def _connect_messages_db() -> sqlite3.Connection:
         raise
 
 
+# messages.timestamp and chats.last_message_time are written by the bridge as
+# go-sqlite3 renders time.Time: local wall clock plus UTC offset, with up to
+# nanosecond precision ("2024-01-15 10:30:00.1234+02:00"). Raw text order is
+# only chronological while that offset never changes, and SQLite's date
+# functions (julianday(), strftime('%f')) keep only milliseconds, so .1233 and
+# .1234 would compare equal. _instant_sql() renders such a column as a
+# fixed-width UTC key, "YYYY-MM-DD HH:MM:SS.nnnnnnnnn", whose text order is
+# chronological: the whole seconds come from strftime() on the value with its
+# fraction cut out, so millisecond rounding can't carry into them, and the
+# stored fraction digits are appended verbatim, padded to nine (an offset never
+# changes the sub-second part). NULL or unparseable values yield NULL.
+_INSTANT_SQL = """(CASE WHEN substr($ts, 20, 1) = '.'
+    THEN strftime('%Y-%m-%d %H:%M:%S', substr($ts, 1, 19) || ltrim(substr($ts, 21), '0123456789'))
+        || '.' || substr(substr($ts, 21, length($ts) - 20 - length(ltrim(substr($ts, 21), '0123456789'))) || '000000000', 1, 9)
+    ELSE strftime('%Y-%m-%d %H:%M:%S', $ts) || '.000000000'
+END)"""
+
+
+def _instant_sql(column: str) -> str:
+    """SQL expression for the chronologically sortable UTC key of a timestamp column."""
+    return _INSTANT_SQL.replace("$ts", column)
+
+
 def _read_bridge_token() -> str | None:
     env = os.getenv("WHATSAPP_BRIDGE_TOKEN", "").strip()
     if env:
@@ -591,7 +614,10 @@ def list_messages(
         # Add sorting and pagination
         offset = page * limit
         order = "DESC" if sort_by == "newest" else "ASC"
-        query_parts.append(f"ORDER BY messages.timestamp {order}")
+        # Timestamps carry the bridge host's UTC offset; ordering the raw text is
+        # only chronological while that offset never changes. _instant_sql()
+        # orders on the instant (see also get_message_context / list_chats).
+        query_parts.append(f"ORDER BY {_instant_sql('messages.timestamp')} {order}")
         query_parts.append("LIMIT ? OFFSET ?")
         params.extend([limit, offset])
 
@@ -681,13 +707,13 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> Mes
 
         # Get messages before
         cursor.execute(
-            """
+            f"""
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.chat_jid = ? AND messages.timestamp < ?
-            ORDER BY messages.timestamp DESC
-            LIMIT ?
+            WHERE messages.chat_jid = ?1 AND {_instant_sql("messages.timestamp")} < {_instant_sql("?2")}
+            ORDER BY {_instant_sql("messages.timestamp")} DESC
+            LIMIT ?3
         """,
             (msg_data[7], msg_data[0], before),
         )
@@ -711,13 +737,13 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> Mes
 
         # Get messages after
         cursor.execute(
-            """
+            f"""
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.chat_jid = ? AND messages.timestamp > ?
-            ORDER BY messages.timestamp ASC
-            LIMIT ?
+            WHERE messages.chat_jid = ?1 AND {_instant_sql("messages.timestamp")} > {_instant_sql("?2")}
+            ORDER BY {_instant_sql("messages.timestamp")} ASC
+            LIMIT ?3
         """,
             (msg_data[7], msg_data[0], after),
         )
@@ -822,7 +848,9 @@ def list_chats(
 
         # Add sorting
         order_by = (
-            "chats.last_message_time DESC" if sort_by == "last_active" else "resolved_chat_name(chats.jid, chats.name)"
+            f"{_instant_sql('chats.last_message_time')} DESC"
+            if sort_by == "last_active"
+            else "resolved_chat_name(chats.jid, chats.name)"
         )
         query_parts.append(f"ORDER BY {order_by}")
 
@@ -962,7 +990,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
                 WHERE contact_msg.chat_jid = c.jid
                     AND contact_msg.sender IN ({placeholders})
             ) OR c.jid = ?
-            ORDER BY c.last_message_time DESC
+            ORDER BY {_instant_sql("c.last_message_time")} DESC
             LIMIT ? OFFSET ?
         """,
             (*aliases, jid, limit, page * limit),
@@ -1022,7 +1050,7 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
             FROM messages m
             JOIN chats c ON m.chat_jid = c.jid
             WHERE m.sender IN ({placeholders}) OR c.jid = ?
-            ORDER BY m.timestamp DESC
+            ORDER BY {_instant_sql("m.timestamp")} DESC
             LIMIT 1
         """,
             (*aliases, jid),
