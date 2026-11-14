@@ -17,7 +17,7 @@ func TestStoreMessagePreservesAudioTranscriptOnReplay(t *testing.T) {
 			save := func(content, media string) {
 				t.Helper()
 				if err := ms.StoreMessage("voice", chat, "sender", content, time.Now(), false,
-					media, "", "", nil, nil, nil, 0, ""); err != nil {
+					media, "", "", nil, nil, nil, 0, "", 0); err != nil {
 					t.Fatal(err)
 				}
 			}

@@ -77,7 +77,7 @@ func seedChatWithMessage(t *testing.T, ms *MessageStore, chatJID, msgID string, 
 		t.Fatalf("seed chat: %v", err)
 	}
 	if err := ms.StoreMessage(msgID, chatJID, phonePN.User, "hello", ts, false,
-		"", "", "", nil, nil, nil, 0, ""); err != nil {
+		"", "", "", nil, nil, nil, 0, "", 0); err != nil {
 		t.Fatalf("seed message: %v", err)
 	}
 }

@@ -295,6 +295,9 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "quoted_message_id", "TEXT"); err != nil {
 		return fmt.Errorf("failed to ensure messages.quoted_message_id column: %w", err)
 	}
+	if err := ensureColumn(db, "messages", "forwarding_score", "INTEGER"); err != nil {
+		return fmt.Errorf("failed to ensure messages.forwarding_score column: %w", err)
+	}
 	return nil
 }
 
@@ -911,7 +914,7 @@ func (store *MessageStore) MaxMessageTimestamp(chatJID string, ids []string) (ti
 // Store a message in the database
 func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64,
-	quotedMessageId string) error {
+	quotedMessageId string, forwardingScore int) error {
 	// Only store if there's actual content or media
 	if content == "" && mediaType == "" {
 		return nil
@@ -926,11 +929,17 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 	if quotedMessageId != "" {
 		qmid = quotedMessageId
 	}
+	// forwarding_score is NULL for messages the sender wrote; like the quoted
+	// ID, a later store without it never clears a recorded forward.
+	var fwd interface{}
+	if forwardingScore > 0 {
+		fwd = forwardingScore
+	}
 
 	_, err := store.db.Exec(
 		`INSERT INTO messages
-		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id, forwarding_score)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id, chat_jid) DO UPDATE SET
 			sender = excluded.sender,
 			content = CASE
@@ -948,8 +957,9 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 			file_sha256 = excluded.file_sha256,
 			file_enc_sha256 = excluded.file_enc_sha256,
 			file_length = excluded.file_length,
-			quoted_message_id = COALESCE(excluded.quoted_message_id, messages.quoted_message_id)`,
-		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid,
+			quoted_message_id = COALESCE(excluded.quoted_message_id, messages.quoted_message_id),
+			forwarding_score = COALESCE(excluded.forwarding_score, messages.forwarding_score)`,
+		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, qmid, fwd,
 	)
 	return err
 }
@@ -1369,6 +1379,51 @@ func applyChatEphemeralSettings(msg *waProto.Message, settings ChatEphemeralSett
 	}
 }
 
+// messageContextInfo returns the ContextInfo of a message's content
+// sub-message (text, media, contact, location), or nil when it has none
+// (plain Conversation, ProtocolMessage).
+func messageContextInfo(msg *waProto.Message) *waProto.ContextInfo {
+	if msg == nil {
+		return nil
+	}
+	switch {
+	case msg.ExtendedTextMessage != nil:
+		return msg.ExtendedTextMessage.GetContextInfo()
+	case msg.ImageMessage != nil:
+		return msg.ImageMessage.GetContextInfo()
+	case msg.AudioMessage != nil:
+		return msg.AudioMessage.GetContextInfo()
+	case msg.VideoMessage != nil:
+		return msg.VideoMessage.GetContextInfo()
+	case msg.DocumentMessage != nil:
+		return msg.DocumentMessage.GetContextInfo()
+	case msg.StickerMessage != nil:
+		return msg.StickerMessage.GetContextInfo()
+	case msg.ContactMessage != nil:
+		return msg.ContactMessage.GetContextInfo()
+	case msg.ContactsArrayMessage != nil:
+		return msg.ContactsArrayMessage.GetContextInfo()
+	case msg.LocationMessage != nil:
+		return msg.LocationMessage.GetContextInfo()
+	}
+	return nil
+}
+
+// forwardingScore reads ContextInfo.IsForwarded / ForwardingScore: 0 when the
+// message was not forwarded, else the number of hops (at least 1: a forward
+// may carry the flag without a score). WhatsApp shows "Forwarded many times"
+// from 5. History-sync envelopes are unwrapped as for the text and media.
+func forwardingScore(msg *waProto.Message) int {
+	ctx := messageContextInfo(unwrapMessageContent(msg))
+	if !ctx.GetIsForwarded() {
+		return 0
+	}
+	if score := int(ctx.GetForwardingScore()); score > 0 {
+		return score
+	}
+	return 1
+}
+
 // extractChatEphemeralFromMessage reads the chat's ephemeral state off an
 // inbound message's ContextInfo. Every regular message in an ephemeral chat
 // stamps Expiration / EphemeralSettingTimestamp on the sub-message's
@@ -1377,28 +1432,7 @@ func applyChatEphemeralSettings(msg *waProto.Message, settings ChatEphemeralSett
 // fresh history sync. Returns the zero ChatEphemeralSettings when no
 // ContextInfo is present (e.g. plain Conversation, ProtocolMessage).
 func extractChatEphemeralFromMessage(msg *waProto.Message) ChatEphemeralSettings {
-	if msg == nil {
-		return ChatEphemeralSettings{}
-	}
-	var ctx *waProto.ContextInfo
-	switch {
-	case msg.ExtendedTextMessage != nil:
-		ctx = msg.ExtendedTextMessage.GetContextInfo()
-	case msg.ImageMessage != nil:
-		ctx = msg.ImageMessage.GetContextInfo()
-	case msg.AudioMessage != nil:
-		ctx = msg.AudioMessage.GetContextInfo()
-	case msg.VideoMessage != nil:
-		ctx = msg.VideoMessage.GetContextInfo()
-	case msg.DocumentMessage != nil:
-		ctx = msg.DocumentMessage.GetContextInfo()
-	case msg.StickerMessage != nil:
-		ctx = msg.StickerMessage.GetContextInfo()
-	case msg.ContactMessage != nil:
-		ctx = msg.ContactMessage.GetContextInfo()
-	case msg.ContactsArrayMessage != nil:
-		ctx = msg.ContactsArrayMessage.GetContextInfo()
-	}
+	ctx := messageContextInfo(msg)
 	if ctx == nil {
 		return ChatEphemeralSettings{}
 	}
@@ -1762,7 +1796,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		}
 		if storeErr := messageStore.StoreMessage(
 			resp.ID, chatJID, senderUser, message, timestamp, true,
-			mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMsgID,
+			mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMsgID, 0,
 		); storeErr != nil {
 			fmt.Printf("Warning: failed to persist outbound message: %v\n", storeErr)
 		}
@@ -2118,7 +2152,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			if err := messageStore.StoreMessage(
 				msg.Info.ID, chatJID, sender, emoji,
 				msgTimestamp, msg.Info.IsFromMe,
-				"reaction", reactedToID, "", nil, nil, nil, 0, "",
+				"reaction", reactedToID, "", nil, nil, nil, 0, "", 0,
 			); err != nil {
 				logger.Warnf("Failed to store reaction: %v", err)
 			}
@@ -2168,6 +2202,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		fileEncSHA256,
 		fileLength,
 		quotedMessageId,
+		forwardingScore(msg.Message),
 	)
 	stored := err == nil
 	if !stored {
@@ -3732,6 +3767,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					fileEncSHA256,
 					fileLength,
 					"", // quoted_message_id: history sync does not carry ContextInfo
+					forwardingScore(msg.Message.Message),
 				)
 				if err != nil {
 					logger.Warnf("Failed to store history message: %v", err)

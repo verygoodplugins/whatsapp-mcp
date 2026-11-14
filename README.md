@@ -209,6 +209,8 @@ Send a text message to a contact or group, optionally as a quoted reply.
 
 Inbound quoted replies are stored automatically. The `quoted_message_id` field in each message returned by `list_messages` indicates which message it is replying to (or `null` for non-replies).
 
+Forwarded messages are marked as WhatsApp marks them: `forwarded` is `true` and `forwarding_score` says how many times it was forwarded (WhatsApp shows "Forwarded many times" from 5); both are `false`/`null` for messages the sender wrote. Stores from an older bridge report every message as not forwarded.
+
 **Natural Language Examples:**
 
 - "Send 'Hello!' to +1234567890"
