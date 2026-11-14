@@ -22,9 +22,10 @@ class _Resp:
 def test_send_audio_removes_converted_temp_file(tmp_path, monkeypatch, status_code, expected_success):
     src = tmp_path / "voice.mp3"
     src.write_bytes(b"not really mp3")
+    monkeypatch.setenv("WHATSAPP_MEDIA_ROOTS", str(tmp_path))
     converted = tmp_path / "converted.ogg"
 
-    def fake_convert(path):
+    def fake_convert(path, output_dir=None):
         converted.write_bytes(b"ogg")
         return str(converted)
 
@@ -41,9 +42,10 @@ def test_send_audio_removes_converted_temp_file(tmp_path, monkeypatch, status_co
 def test_send_audio_removes_converted_temp_file_after_request_exception(tmp_path, monkeypatch):
     src = tmp_path / "voice.mp3"
     src.write_bytes(b"not really mp3")
+    monkeypatch.setenv("WHATSAPP_MEDIA_ROOTS", str(tmp_path))
     converted = tmp_path / "converted.ogg"
 
-    def fake_convert(path):
+    def fake_convert(path, output_dir=None):
         converted.write_bytes(b"ogg")
         return str(converted)
 
