@@ -301,8 +301,10 @@ Send a voice message (automatically converts to Opus .ogg format).
 - `recipient` (required): Phone number or group JID
 - `file_path` (required): Path to audio file
 
-Converted audio is sent through the same media-path confinement as
-`send_file`.
+Non-`.ogg` input is converted inside the first existing, writable media root
+(the default outbox when `WHATSAPP_MEDIA_ROOTS` is unset) and the converted file
+is removed after the send. The source file must also be inside a media root.
+Export the same `WHATSAPP_MEDIA_ROOTS` to the MCP server and the bridge.
 
 #### `download_media`
 
@@ -488,7 +490,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token for bridge REST calls; also signed onto outbound webhook POSTs |
 | `WHATSAPP_HUB_URL` | `http://localhost:8767/ui/whatsapp` | AutoHub status/pairing page opened by macOS bridge notifications |
-| `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files |
+| `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list (`:` on POSIX, `;` on Windows; commas do not work) of directories allowed for outbound media files. Set the same value for the bridge and the MCP server |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default)          | Label shown for this connection under WhatsApp > Linked Devices. Set to a recognisable name. Applies at pair time only (re-pair to change) |
 | `WHATSAPP_MCP_TRANSPORT` | `stdio`                                | MCP transport to serve clients: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST`    | `127.0.0.1`                              | Bind address for the `http`/`sse` transports |
@@ -555,7 +557,10 @@ to the matching value.
 Outbound `media_path` values are confined to `WHATSAPP_MEDIA_ROOTS`. The default
 outbox is `~/.local/share/whatsapp-mcp/outbox`, created on bridge startup. Move
 files there before calling `send_file` or `send_audio_message`, or set
-`WHATSAPP_MEDIA_ROOTS` to a colon-separated list of absolute directories.
+`WHATSAPP_MEDIA_ROOTS` to a colon-separated list of absolute directories (not
+commas, and give the bridge and the MCP server the same value). Don't list
+`/tmp` or `/var/folders`: `send_audio_message` converts inside the roots, so it
+no longer needs the system temp dir.
 
 ### Connection status and phone linking
 

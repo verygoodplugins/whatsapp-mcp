@@ -456,7 +456,8 @@ def send_audio_message(recipient: str, media_path: str) -> dict[str, Any]:
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
-        media_path: The absolute path to the audio file to send (will be converted to Opus .ogg if it's not a .ogg file)
+        media_path: The absolute path to the audio file to send (will be converted to Opus .ogg if it's not a .ogg file).
+                 Must be inside a bridge media root (WHATSAPP_MEDIA_ROOTS, default ~/.local/share/whatsapp-mcp/outbox)
 
     Returns:
         A dictionary containing success status and a status message

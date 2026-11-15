@@ -70,6 +70,52 @@ def _bridge_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+_DEFAULT_OUTBOX_SUBPATH = os.path.join(".local", "share", "whatsapp-mcp", "outbox")
+
+
+def _media_roots() -> list[str]:
+    """Directories the bridge accepts outbound media from.
+
+    Mirrors resolveMediaRoots in whatsapp-bridge/media_path.go: a
+    WHATSAPP_MEDIA_ROOTS list split on os.pathsep (":" on POSIX, so a comma
+    list does not work), else the default outbox. Entries are symlink-resolved
+    so prefix checks compare like with like. The MCP server and the bridge
+    each read their own environment, so both must be given the same value.
+    """
+    raw = os.getenv("WHATSAPP_MEDIA_ROOTS", "").strip()
+    if not raw:
+        return [os.path.realpath(os.path.join(os.path.expanduser("~"), _DEFAULT_OUTBOX_SUBPATH))]
+    entries = (entry.strip() for entry in raw.split(os.pathsep))
+    # The bridge refuses to start on a relative entry, so none can be valid here.
+    return [os.path.realpath(entry) for entry in entries if entry and os.path.isabs(entry)]
+
+
+def _within_media_roots(path: str, roots: list[str]) -> bool:
+    real = os.path.realpath(path)
+    return any(real == root or real.startswith(root.rstrip(os.sep) + os.sep) for root in roots)
+
+
+def _audio_staging_dir(roots: list[str]) -> str | None:
+    """First media root a converted audio file can be written into.
+
+    The bridge only reads files under these roots, so the transcoder's output
+    has to live in one; the system temp dir is rejected with a 403. The default
+    outbox is created on demand, as the bridge does at startup; roots from
+    WHATSAPP_MEDIA_ROOTS are used only if they already exist, because the
+    bridge never creates them.
+    """
+    create = not os.getenv("WHATSAPP_MEDIA_ROOTS", "").strip()
+    for root in roots:
+        if create:
+            try:
+                os.makedirs(root, mode=0o700, exist_ok=True)
+            except OSError:
+                continue
+        if os.path.isdir(root) and os.access(root, os.W_OK):
+            return root
+    return None
+
+
 @dataclass
 class Message:
     timestamp: datetime
@@ -1253,8 +1299,24 @@ def send_audio_message(recipient: str, media_path: str) -> tuple[bool, str]:
 
         converted_path: str | None = None
         if not media_path.endswith(".ogg"):
+            roots = _media_roots()
+            # The bridge confines media_path to the roots, but it only sees the
+            # converted file. Hold the transcoder's input to the same rule so
+            # converting doesn't turn it into a way to send any media file on disk.
+            if not _within_media_roots(media_path, roots):
+                return False, (
+                    f"Media file {media_path} is outside the configured media roots "
+                    f"({os.pathsep.join(roots) or 'none'}). Move it into one, or add its directory to "
+                    "WHATSAPP_MEDIA_ROOTS for both the MCP server and the bridge."
+                )
+            staging_dir = _audio_staging_dir(roots)
+            if staging_dir is None:
+                return False, (
+                    "No existing, writable directory in WHATSAPP_MEDIA_ROOTS to stage the converted "
+                    "audio in. Create one of the roots, or send an .ogg (Opus) file directly."
+                )
             try:
-                media_path = audio.convert_to_opus_ogg_temp(media_path)
+                media_path = audio.convert_to_opus_ogg_temp(media_path, output_dir=staging_dir)
                 converted_path = media_path
             except Exception as e:
                 return False, f"Error converting file to opus ogg. You likely need to install ffmpeg: {str(e)}"
