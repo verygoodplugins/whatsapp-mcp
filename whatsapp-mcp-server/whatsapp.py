@@ -85,6 +85,10 @@ class Message:
     filename: str | None = None
     # ID of the message this one is replying to (NULL for non-replies).
     quoted_message_id: str | None = None
+    # When the sender edited it (MESSAGE_EDIT), and its text as first received;
+    # `content` is the current text. None for messages never edited.
+    edited_at: datetime | None = None
+    original_content: str | None = None
 
 
 @dataclass
@@ -176,6 +180,8 @@ def msg_to_dict(message: Message, include_sender_name: bool = True) -> dict[str,
         "media_type": message.media_type,
         "reaction_to_message_id": (message.filename if message.media_type == "reaction" else None),
         "quoted_message_id": message.quoted_message_id,
+        "edited_at": message.edited_at.isoformat() if message.edited_at else None,
+        "original_content": message.original_content,
     }
 
 
@@ -197,6 +203,24 @@ def chat_to_dict(chat: "Chat") -> dict[str, Any]:
 def contact_to_dict(contact: "Contact") -> dict[str, Any]:
     """Convert a Contact dataclass to a dictionary for JSON serialization."""
     return {"phone_number": contact.phone_number, "name": contact.name, "jid": contact.jid}
+
+
+def _edit_select(cursor: sqlite3.Cursor) -> str:
+    """SELECT expressions for messages.edited_at and messages.original_content, or
+    NULL literals for a store written by a bridge that predates edit tracking."""
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(messages)").fetchall()}
+    if {"edited_at", "original_content"} <= columns:
+        return "messages.edited_at, messages.original_content"
+    return "NULL, NULL"
+
+
+def _edit_fields(row: tuple, at: int) -> dict[str, Any]:
+    """Message() keyword arguments for the two edit columns starting at row[at]."""
+    edited = row[at] if len(row) > at else None
+    return {
+        "edited_at": datetime.fromisoformat(edited) if edited else None,
+        "original_content": row[at + 1] if len(row) > at + 1 else None,
+    }
 
 
 def _last_read_time_select(cursor: sqlite3.Cursor, table_alias: str) -> str:
@@ -544,7 +568,8 @@ def list_messages(
 
         # Build base query
         query_parts = [
-            "SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename FROM messages"
+            "SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename, "
+            f"{_edit_select(cursor)} FROM messages"
         ]
         query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
         where_clauses = []
@@ -611,6 +636,7 @@ def list_messages(
                 media_type=msg[7],
                 quoted_message_id=msg[8] if len(msg) > 8 else None,
                 filename=msg[9] if len(msg) > 9 else None,
+                **_edit_fields(msg, 10),
             )
             result.append(message)
 
@@ -653,8 +679,8 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> Mes
 
         # Get the target message first
         cursor.execute(
-            """
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type, messages.quoted_message_id, messages.filename
+            f"""
+            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type, messages.quoted_message_id, messages.filename, {_edit_select(cursor)}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.id = ?
@@ -677,12 +703,13 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> Mes
             media_type=msg_data[8],
             quoted_message_id=msg_data[9] if len(msg_data) > 9 else None,
             filename=msg_data[10] if len(msg_data) > 10 else None,
+            **_edit_fields(msg_data, 11),
         )
 
         # Get messages before
         cursor.execute(
-            """
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename
+            f"""
+            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename, {_edit_select(cursor)}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.chat_jid = ? AND messages.timestamp < ?
@@ -706,13 +733,14 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> Mes
                     media_type=msg[7],
                     quoted_message_id=msg[8] if len(msg) > 8 else None,
                     filename=msg[9] if len(msg) > 9 else None,
+                    **_edit_fields(msg, 10),
                 )
             )
 
         # Get messages after
         cursor.execute(
-            """
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename
+            f"""
+            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, messages.quoted_message_id, messages.filename, {_edit_select(cursor)}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.chat_jid = ? AND messages.timestamp > ?
@@ -736,6 +764,7 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> Mes
                     media_type=msg[7],
                     quoted_message_id=msg[8] if len(msg) > 8 else None,
                     filename=msg[9] if len(msg) > 9 else None,
+                    **_edit_fields(msg, 10),
                 )
             )
 
