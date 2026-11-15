@@ -3599,3 +3599,20 @@ func TestIsSelfUser(t *testing.T) {
 		t.Fatal("isSelfUser(nil, ...) = true, want false")
 	}
 }
+
+// TestGetMessageContent returns the stored text used for a quoted preview,
+// and "" for a message the store has not seen.
+func TestGetMessageContent(t *testing.T) {
+	ms := newTestMessageStore(t)
+	chat := phonePN.String()
+	if err := ms.StoreMessage("3ACONTENT0000001", chat, "351000000000", "[Album: 2 images] price post",
+		time.Now(), true, "", "", "", nil, nil, nil, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := ms.GetMessageContent("3ACONTENT0000001", chat); got != "[Album: 2 images] price post" {
+		t.Errorf("content = %q", got)
+	}
+	if got := ms.GetMessageContent("3AUNKNOWN00000001", chat); got != "" {
+		t.Errorf("unknown message content = %q, want empty", got)
+	}
+}

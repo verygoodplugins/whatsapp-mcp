@@ -830,6 +830,18 @@ func (store *MessageStore) GetMessageIsFromMe(id, chatJID string) (*bool, error)
 	return &isFromMe, nil
 }
 
+// GetMessageContent returns the stored text of a message, or "" when it is
+// unknown, for the preview of a quoted reply.
+func (store *MessageStore) GetMessageContent(id, chatJID string) string {
+	var content sql.NullString
+	if err := store.db.QueryRow(
+		"SELECT content FROM messages WHERE id = ? AND chat_jid = ?", id, chatJID,
+	).Scan(&content); err != nil {
+		return ""
+	}
+	return content.String
+}
+
 // bareSenderUser normalizes a phone/LID or full JID to the bare user part
 // stored in messages.sender.
 func bareSenderUser(s string) string {
@@ -1704,15 +1716,35 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		msg.Conversation = proto.String(message)
 	}
 
-	// Mentions in media captions live on the media message's own ContextInfo.
-	if len(mentionedJIDs) > 0 {
+	// Mentions and a quoted reply on a media message live on its own
+	// ContextInfo. The quote shows the original's text (or the caller's
+	// quoted_content, or the stored text of that message when none is given).
+	if len(mentionedJIDs) > 0 || (mediaPath != "" && quotedMsgID != "") {
+		ctx := &waProto.ContextInfo{MentionedJID: mentionedJIDs}
+		if mediaPath != "" && quotedMsgID != "" {
+			if quotedContent == "" && messageStore != nil {
+				quotedContent = messageStore.GetMessageContent(quotedMsgID, storageJID.String())
+			}
+			if quotedSenderJID == "" && messageStore != nil && client.Store != nil && client.Store.ID != nil {
+				// The caller did not name the quoted sender: a message the
+				// store knows is ours is quoted as ours.
+				if own, _ := messageStore.GetMessageIsFromMe(quotedMsgID, storageJID.String()); own != nil && *own {
+					quotedSenderJID = client.Store.ID.ToNonAD().String()
+				}
+			}
+			ctx.StanzaID = proto.String(quotedMsgID)
+			ctx.Participant = proto.String(quotedSenderJID)
+			ctx.QuotedMessage = &waProto.Message{Conversation: proto.String(quotedContent)}
+		}
 		switch {
 		case msg.ImageMessage != nil:
-			msg.ImageMessage.ContextInfo = &waProto.ContextInfo{MentionedJID: mentionedJIDs}
+			msg.ImageMessage.ContextInfo = ctx
 		case msg.VideoMessage != nil:
-			msg.VideoMessage.ContextInfo = &waProto.ContextInfo{MentionedJID: mentionedJIDs}
+			msg.VideoMessage.ContextInfo = ctx
 		case msg.DocumentMessage != nil:
-			msg.DocumentMessage.ContextInfo = &waProto.ContextInfo{MentionedJID: mentionedJIDs}
+			msg.DocumentMessage.ContextInfo = ctx
+		case msg.AudioMessage != nil:
+			msg.AudioMessage.ContextInfo = ctx
 		}
 	}
 
