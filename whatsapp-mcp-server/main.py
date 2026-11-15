@@ -595,8 +595,14 @@ def transcribe_audio(message_id: str, chat_jid: str, force: bool = False) -> dic
 
 
 def shutdown_handler(signum, frame):
-    """Handle shutdown signals gracefully to prevent zombie processes."""
-    sys.exit(0)
+    """Exit immediately on SIGINT/SIGTERM.
+
+    Uses os._exit rather than sys.exit: the stdio transport reads stdin in a
+    worker thread that holds the stdin buffer lock, so a SystemExit that reaches
+    interpreter finalization aborts with "Fatal Python error: _enter_buffered_busy"
+    (SIGABRT). This matches the parent watchdog's exit path.
+    """
+    os._exit(0)
 
 
 if __name__ == "__main__":
