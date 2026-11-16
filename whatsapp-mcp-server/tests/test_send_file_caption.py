@@ -73,3 +73,17 @@ def test_send_file_missing_file_does_not_call_bridge(monkeypatch, tmp_path):
     assert success is False
     assert "not found" in message
     assert calls == []
+
+
+def test_send_file_as_document_flag(monkeypatch, tmp_path):
+    """as_document asks the bridge to send a photo as a file; off by default."""
+    calls = []
+    media = tmp_path / "photo.jpg"
+    media.write_bytes(b"\xff\xd8\xff")
+    _capture_post(monkeypatch, calls)
+
+    whatsapp.send_file("12025551234@s.whatsapp.net", str(media))
+    whatsapp.send_file("12025551234@s.whatsapp.net", str(media), as_document=True)
+
+    assert "as_document" not in calls[0]["json"]
+    assert calls[1]["json"]["as_document"] is True

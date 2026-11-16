@@ -426,7 +426,7 @@ def mark_messages_read(
 
 
 @mcp.tool()
-def send_file(recipient: str, media_path: str, caption: str = "") -> dict[str, Any]:
+def send_file(recipient: str, media_path: str, caption: str = "", as_document: bool = False) -> dict[str, Any]:
     """Send a file (image, video, document) via WhatsApp, optionally with a caption.
 
     When `caption` is provided, the file and text arrive as a single
@@ -439,13 +439,15 @@ def send_file(recipient: str, media_path: str, caption: str = "") -> dict[str, A
         media_path: Absolute path to the media file (image, video, document)
         caption: Optional text rendered with the file as a caption. Omit for a
                  bare attachment.
+        as_document: Send a photo or video as a file instead (full quality, no
+                 WhatsApp compression; the recipient gets it as a document).
 
     Returns:
         A dictionary containing success status and a status message
     """
 
     # Call the whatsapp_send_file function
-    success, status_message = whatsapp_send_file(recipient, media_path, caption)
+    success, status_message = whatsapp_send_file(recipient, media_path, caption, as_document)
     return {"success": success, "message": status_message}
 
 
