@@ -490,6 +490,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_HUB_URL` | `http://localhost:8767/ui/whatsapp` | AutoHub status/pairing page opened by macOS bridge notifications |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default)          | Label shown for this connection under WhatsApp > Linked Devices. Set to a recognisable name. Applies at pair time only (re-pair to change) |
+| `WHATSAPP_LOG_LEVEL`   | `DEBUG`                                  | Bridge log level: `DEBUG`, `INFO`, `WARN` or `ERROR` (DEBUG logs every stanza) |
 | `WHATSAPP_MCP_TRANSPORT` | `stdio`                                | MCP transport to serve clients: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST`    | `127.0.0.1`                              | Bind address for the `http`/`sse` transports |
 | `WHATSAPP_MCP_PORT`    | `8000`                                   | Port for the `http`/`sse` transports |
