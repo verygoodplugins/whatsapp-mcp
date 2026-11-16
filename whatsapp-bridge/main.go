@@ -1261,7 +1261,22 @@ type SendMessageRequest struct {
 	// text must contain a matching "@<number>" token for each entry, or the
 	// mention won't render on recipients' devices.
 	Mentions []string `json:"mentions,omitempty"`
+	// LinkPreview: the preview card of a link in Message (title, description, a small JPEG),
+	// fetched by the caller: WhatsApp shows a sent link's card only when the sender attaches
+	// it. Text messages only; ignored with media or when Message doesn't contain the URL.
+	LinkPreview *LinkPreview `json:"link_preview,omitempty"`
 }
+
+// LinkPreview is a sent text's link card (see SendMessageRequest.LinkPreview).
+type LinkPreview struct {
+	URL         string `json:"url"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	Thumbnail   []byte `json:"thumbnail,omitempty"` // JPEG, base64 in JSON; dropped when over maxPreviewThumb
+}
+
+// maxPreviewThumb caps the card's thumbnail: WhatsApp's own are a few KB.
+const maxPreviewThumb = 100 * 1024
 
 // MarkReadRequest is the request body for the /api/mark-read endpoint.
 type MarkReadRequest struct {
@@ -1536,7 +1551,7 @@ func resolveMentionJIDs(client *whatsmeow.Client, mentions []string) []string {
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string, preview *LinkPreview) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -1702,6 +1717,23 @@ func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, r
 		}
 	} else {
 		msg.Conversation = proto.String(message)
+	}
+
+	// A link preview on a text message: WhatsApp renders only what the sender attaches.
+	if preview != nil && mediaPath == "" && preview.URL != "" && strings.Contains(message, preview.URL) {
+		if msg.Conversation != nil {
+			msg.ExtendedTextMessage = &waProto.ExtendedTextMessage{Text: msg.Conversation}
+			msg.Conversation = nil
+		}
+		if ext := msg.ExtendedTextMessage; ext != nil {
+			ext.MatchedText = proto.String(preview.URL)
+			ext.Title = proto.String(preview.Title)
+			ext.Description = proto.String(preview.Description)
+			ext.PreviewType = waProto.ExtendedTextMessage_NONE.Enum()
+			if len(preview.Thumbnail) > 0 && len(preview.Thumbnail) <= maxPreviewThumb {
+				ext.JPEGThumbnail = preview.Thumbnail
+			}
+		}
 	}
 
 	// Mentions in media captions live on the media message's own ContextInfo.
@@ -2589,7 +2621,7 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			req.Recipient, len(req.Message), resolvedMediaPath != "")
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, resolvedMediaPath, req.QuotedMessageID, req.QuotedSenderJID, req.QuotedContent, req.Mentions)
+		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, resolvedMediaPath, req.QuotedMessageID, req.QuotedSenderJID, req.QuotedContent, req.Mentions, req.LinkPreview)
 		fmt.Printf("← /api/send success=%v status=%q\n", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
