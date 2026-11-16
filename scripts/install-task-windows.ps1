@@ -1,0 +1,374 @@
+# Installs a per-user Task Scheduler task that starts the WhatsApp bridge at
+# login and starts it again whenever it exits. Needs no administrator rights.
+$ErrorActionPreference = 'Stop'
+
+$Task = @{ TaskName = 'whatsapp-mcp-bridge'; TaskPath = '\' }
+$RestartDelaySeconds = 10
+
+function Fail([string]$Message) {
+    Write-Host "Error: $Message"
+    exit 1
+}
+
+function Test-CgoToolchain {
+    if (-not (Get-Command go -ErrorAction SilentlyContinue)) { return $false }
+    if ("$(go env CGO_ENABLED)".Trim() -ne '1') { return $false }
+    $cc = "$(go env CC)".Trim()
+    return [bool]($cc -and (Get-Command $cc -ErrorAction SilentlyContinue))
+}
+
+# Stopping the task ends the launcher, and its job object ends the runner and
+# the bridge with it.
+function Stop-InstalledTask {
+    if (-not (Get-ScheduledTask @Task -ErrorAction SilentlyContinue)) { return }
+    Stop-ScheduledTask @Task
+    for ($i = 0; $i -lt 20 -and (Get-ScheduledTask @Task).State -eq 'Running'; $i++) {
+        Start-Sleep -Milliseconds 500
+    }
+}
+
+# The csc.exe of .NET Framework 4, which ships with Windows. It is found by
+# path because PowerShell 7 runs on a .NET that has no csc.exe.
+function Get-CSharpCompiler {
+    foreach ($framework in 'Framework64', 'Framework') {
+        $csc = Join-Path $env:SystemRoot "Microsoft.NET\$framework\v4.0.30319\csc.exe"
+        if (Test-Path -LiteralPath $csc -PathType Leaf) { return $csc }
+    }
+    Fail 'Could not find csc.exe from .NET Framework 4, which is needed to build the task launcher.'
+}
+
+if ($env:OS -ne 'Windows_NT') { Fail 'Task Scheduler installation is only supported on Windows.' }
+if (-not $env:LOCALAPPDATA) { Fail 'LOCALAPPDATA is not set.' }
+
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+$BridgeDir = Join-Path $RepoRoot 'whatsapp-bridge'
+$BridgeBinary = Join-Path $BridgeDir 'whatsapp-bridge.exe'
+$NewBinary = Join-Path $BridgeDir 'whatsapp-bridge.new.exe'
+
+if (-not (Test-Path -LiteralPath $BridgeDir -PathType Container)) { Fail "Could not find bridge directory: $BridgeDir" }
+
+$AppDir = Join-Path $env:LOCALAPPDATA 'whatsapp-mcp'
+$LogDir = Join-Path $AppDir 'logs'
+$ConfigFile = Join-Path $AppDir 'bridge-task.json'
+$RunnerScript = Join-Path $AppDir 'run-whatsapp-bridge.ps1'
+$Launcher = Join-Path $AppDir 'whatsapp-bridge-launcher.exe'
+$NewLauncher = Join-Path $AppDir 'whatsapp-bridge-launcher.new.exe'
+$Identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+
+# Like the macOS installer, reinstalling keeps the saved settings, and a
+# variable set in this session overrides its saved value.
+$saved = $null
+if (Test-Path -LiteralPath $ConfigFile -PathType Leaf) {
+    try {
+        $saved = ([System.IO.File]::ReadAllText($ConfigFile) | ConvertFrom-Json).Environment
+    } catch {
+        Fail "Could not read the saved settings in ${ConfigFile}: $($_.Exception.Message)"
+    }
+}
+$environment = [ordered]@{ WHATSAPP_BRIDGE_PORT = '8080' }
+# The bridge treats an empty value as unset, and PowerShell 7 can leave a
+# cleared variable defined but empty, so only non-empty values are kept.
+foreach ($name in 'WHATSAPP_BRIDGE_PORT', 'WEBHOOK_URL', 'WEBHOOK_ENABLED', 'WHATSAPP_AUTO_DOWNLOAD_MEDIA', 'FORWARD_SELF',
+    'WHATSAPP_BRIDGE_TOKEN', 'WHATSAPP_MEDIA_ROOTS', 'WHATSAPP_DEVICE_NAME') {
+    $value = [Environment]::GetEnvironmentVariable($name)
+    if (-not $value -and $saved) { $value = $saved.$name }
+    if ($value) { $environment[$name] = [string]$value }
+}
+
+$Port = $environment.WHATSAPP_BRIDGE_PORT
+if ($Port -notmatch '^[0-9]{1,5}$' -or [int]$Port -lt 1 -or [int]$Port -gt 65535) {
+    Fail "WHATSAPP_BRIDGE_PORT must be a number between 1 and 65535, got: $Port"
+}
+
+New-Item -ItemType Directory -Force -Path $AppDir, $LogDir | Out-Null
+
+# Build next to the current binary: Windows cannot overwrite an executable
+# while the existing task is still running it.
+$built = $false
+if (Test-CgoToolchain) {
+    Write-Host 'Building WhatsApp bridge...'
+    Push-Location -LiteralPath $BridgeDir
+    try { go build -o $NewBinary . } finally { Pop-Location }
+    if ($LASTEXITCODE -ne 0) { Fail 'go build failed; see the output above.' }
+    $built = $true
+} elseif (Test-Path -LiteralPath $BridgeBinary -PathType Leaf) {
+    Write-Host "Go with cgo is not available; using the existing $BridgeBinary"
+} else {
+    Fail "Go with cgo is not available and no bridge binary exists at $BridgeBinary. See the README's Windows section for the C compiler the bridge needs."
+}
+
+# The task runs this launcher instead of powershell.exe. Task Scheduler gives
+# powershell.exe a console window, and Windows Terminal, the default terminal
+# on Windows 11, turns -WindowStyle Hidden into a minimized window that stays
+# in the taskbar and ends the runner when closed. A Windows-subsystem program
+# never gets a window. The launcher also puts itself in a job object, so
+# stopping the task ends the runner and the bridge with it; Task Scheduler
+# does not guarantee that for child processes.
+#
+# Trade-off: the installer holds C# source and compiles it with the csc.exe
+# that ships with Windows, and an unsigned program in %LOCALAPPDATA% may be
+# flagged by antivirus software. Rejected alternatives: a hidden PowerShell
+# relaunch still flashes and Task Scheduler stops tracking the runner;
+# conhost --headless is undocumented and commonly flagged by security tools;
+# VBScript is being deprecated; and "Run whether user is logged on or not"
+# needs a right that standard accounts lack.
+$launcherSource = @'
+// Generated by scripts/install-task-windows.ps1; re-run the installer instead
+// of editing this file.
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
+using System.Runtime.InteropServices;
+
+static class Launcher {
+    const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+    const int JobObjectExtendedLimitInformation = 9;
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct IO_COUNTERS {
+        public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount;
+        public ulong ReadTransferCount, WriteTransferCount, OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr CreateJobObject(IntPtr jobAttributes, string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION info, int length);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+
+    // The installer puts the runner and the logs folder next to the launcher.
+    static readonly string AppDir = AppDomain.CurrentDomain.BaseDirectory;
+
+    // Logging must never stop the launcher.
+    static void Log(string message) {
+        try {
+            string logDir = Path.Combine(AppDir, "logs");
+            Directory.CreateDirectory(logDir);
+            File.AppendAllText(Path.Combine(logDir, "runner.log"), DateTime.Now.ToString("s") + " " + message + Environment.NewLine);
+        } catch (Exception) {
+        }
+    }
+
+    // Without the job object, stopping the task could leave a bridge running,
+    // so nothing is started.
+    static int FailJobSetup(string what) {
+        int error = Marshal.GetLastWin32Error();
+        Log("Could not " + what + ", so the bridge was not started: " + new Win32Exception(error).Message);
+        return 1;
+    }
+
+    static int Main() {
+        // The handle stays open until the launcher exits. Its children inherit
+        // the job, and closing the last handle ends every process in it.
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) return FailJobSetup("create a job object");
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref limits, Marshal.SizeOf(limits))) {
+            return FailJobSetup("configure the job object");
+        }
+        if (!AssignProcessToJobObject(job, GetCurrentProcess())) return FailJobSetup("join the job object");
+
+        string powershell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe");
+        string runnerScript = Path.Combine(AppDir, "run-whatsapp-bridge.ps1");
+        ProcessStartInfo info = new ProcessStartInfo(powershell,
+            "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + runnerScript + "\"");
+        info.UseShellExecute = false;
+        info.CreateNoWindow = true;
+        Process runner;
+        try {
+            runner = Process.Start(info);
+        } catch (Exception e) {
+            Log("Could not start the runner: " + e.Message);
+            return 1;
+        }
+        runner.WaitForExit();
+        Log("Runner exited with code " + runner.ExitCode + ".");
+        return runner.ExitCode;
+    }
+}
+'@
+
+# Built before the existing task is stopped, so a failed build leaves it
+# running.
+Write-Host 'Building the task launcher...'
+$launcherSourceFile = Join-Path $AppDir 'whatsapp-bridge-launcher.cs'
+[System.IO.File]::WriteAllText($launcherSourceFile, $launcherSource, [System.Text.UTF8Encoding]::new($false))
+try {
+    $cscOutput = & (Get-CSharpCompiler) /nologo /target:winexe /optimize "/out:$NewLauncher" $launcherSourceFile
+    if ($LASTEXITCODE -ne 0) {
+        $cscOutput | Write-Host
+        Fail 'csc.exe could not build the task launcher; see the output above.'
+    }
+} finally {
+    Remove-Item -LiteralPath $launcherSourceFile -Force -ErrorAction SilentlyContinue
+}
+
+Write-Host 'Stopping the existing whatsapp-mcp task if present...'
+Stop-InstalledTask
+
+if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
+    # The stopped bridge can take a moment to release the port.
+    for ($i = 0; $i -lt 10; $i++) {
+        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort ([int]$Port) -ErrorAction SilentlyContinue)
+        if ($listeners.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    if ($listeners.Count -gt 0) {
+        foreach ($listener in $listeners) {
+            $owner = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
+            Write-Host ("  {0}:{1} pid {2} {3}" -f $listener.LocalAddress, $listener.LocalPort, $listener.OwningProcess, $owner.Path)
+        }
+        Fail "Port $Port is already in use after stopping the existing whatsapp-mcp task."
+    }
+}
+
+if ($built) {
+    try {
+        Move-Item -LiteralPath $NewBinary -Destination $BridgeBinary -Force
+    } catch {
+        Fail "Could not replace $BridgeBinary; is a bridge you started by hand still running it? $($_.Exception.Message)"
+    }
+}
+try {
+    Move-Item -LiteralPath $NewLauncher -Destination $Launcher -Force
+} catch {
+    Fail "Could not replace $Launcher; is the launcher still running? $($_.Exception.Message)"
+}
+
+$config = [ordered]@{
+    BridgeDir           = $BridgeDir
+    BridgeBinary        = $BridgeBinary
+    LogDir              = $LogDir
+    RestartDelaySeconds = $RestartDelaySeconds
+    Environment         = $environment
+}
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+# The config can hold WHATSAPP_BRIDGE_TOKEN, so only the current user may read
+# it. Restrict the file before anything is written into it, replacing its whole
+# access list: icacls /grant:r would keep other explicit entries, such as the
+# SYSTEM and Administrators entries a file can get when created elevated.
+[System.IO.File]::WriteAllText($ConfigFile, '', $utf8)
+$acl = [System.Security.AccessControl.FileSecurity]::new()
+$acl.SetAccessRuleProtection($true, $false)
+$acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($Identity.User, 'FullControl', 'Allow'))
+# Set-Acl would also write the audit list, which needs a privilege that
+# standard accounts lack. .NET Framework (Windows PowerShell) has an instance
+# method; .NET in PowerShell 7 has an extension class instead.
+$file = [System.IO.FileInfo]::new($ConfigFile)
+try {
+    if ('System.IO.FileSystemAclExtensions' -as [type]) {
+        [System.IO.FileSystemAclExtensions]::SetAccessControl($file, $acl)
+    } else {
+        $file.SetAccessControl($acl)
+    }
+} catch {
+    Fail "Could not restrict access to ${ConfigFile}: $($_.Exception.Message)"
+}
+[System.IO.File]::WriteAllText($ConfigFile, ($config | ConvertTo-Json), $utf8)
+
+$runner = @'
+# Generated by scripts/install-task-windows.ps1; re-run the installer instead
+# of editing this file. The task's launcher starts it at login without a
+# window.
+$ErrorActionPreference = 'Stop'
+
+$config = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'bridge-task.json')) | ConvertFrom-Json
+foreach ($entry in $config.Environment.PSObject.Properties) {
+    [Environment]::SetEnvironmentVariable($entry.Name, [string]$entry.Value, 'Process')
+}
+
+# Logging must never stop the runner, or the bridge stays down until the next
+# login.
+function Write-RunnerLog([string]$Message) {
+    $line = '{0} {1}' -f (Get-Date -Format s), $Message
+    Add-Content -LiteralPath (Join-Path $config.LogDir 'runner.log') -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
+}
+
+# Appends without buffering, and shares the file so it can be read while the
+# bridge runs.
+function Open-Log([string]$Name) {
+    [System.IO.FileStream]::new((Join-Path $config.LogDir $Name), [System.IO.FileMode]::Append,
+        [System.IO.FileAccess]::Write, [System.IO.FileShare]'ReadWrite, Delete', 1)
+}
+
+while ($true) {
+    $out = $null
+    $err = $null
+    try {
+        # Recreated on every run in case the logs were cleaned up by hand.
+        New-Item -ItemType Directory -Force -Path $config.LogDir | Out-Null
+        $out = Open-Log 'bridge.out.log'
+        $err = Open-Log 'bridge.err.log'
+        $info = [System.Diagnostics.ProcessStartInfo]::new($config.BridgeBinary)
+        $info.WorkingDirectory = $config.BridgeDir
+        $info.UseShellExecute = $false
+        $info.CreateNoWindow = $true
+        $info.RedirectStandardOutput = $true
+        $info.RedirectStandardError = $true
+        $bridge = [System.Diagnostics.Process]::Start($info)
+        Write-RunnerLog "Started bridge (pid $($bridge.Id))."
+        $copies = [System.Threading.Tasks.Task[]]@(
+            $bridge.StandardOutput.BaseStream.CopyToAsync($out),
+            $bridge.StandardError.BaseStream.CopyToAsync($err)
+        )
+        $bridge.WaitForExit()
+        [void][System.Threading.Tasks.Task]::WaitAll($copies, 5000)
+        Write-RunnerLog "Bridge exited with code $($bridge.ExitCode)."
+    } catch {
+        Write-RunnerLog "Could not run the bridge: $($_.Exception.Message)"
+    } finally {
+        if ($out) { $out.Dispose() }
+        if ($err) { $err.Dispose() }
+    }
+    Write-RunnerLog "Restarting in $($config.RestartDelaySeconds) seconds."
+    Start-Sleep -Seconds $config.RestartDelaySeconds
+}
+'@
+[System.IO.File]::WriteAllText($RunnerScript, $runner, $utf8)
+
+$action = New-ScheduledTaskAction -Execute $Launcher -WorkingDirectory $BridgeDir
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $Identity.Name
+$principal = New-ScheduledTaskPrincipal -UserId $Identity.Name -LogonType Interactive -RunLevel Limited
+# The runner restarts the bridge 10 seconds after it exits, like launchd's
+# KeepAlive and ThrottleInterval; Task Scheduler's own restart setting cannot
+# retry sooner than once a minute. The runner is meant to run for the whole
+# session, so the task must never hit the default 72-hour time limit or refuse
+# to start on battery power.
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+
+Write-Host 'Registering the whatsapp-mcp Task Scheduler task...'
+Register-ScheduledTask @Task -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force `
+    -Description 'Starts the WhatsApp MCP bridge at login and restarts it when it exits. Installed by scripts/install-task-windows.ps1.' | Out-Null
+Start-ScheduledTask @Task
+
+Write-Host "Installed Task Scheduler task: $($Task.TaskName)"
+Write-Host "Logs: $LogDir"
