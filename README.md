@@ -823,6 +823,49 @@ text or media. Protocol-only entries do not advance chat activity. Their read
 and disappearing-message settings are retained, while metadata-only rows are
 excluded from chat listings until a message or reaction is stored.
 
+### Managing group members, name, description and photo
+
+These endpoints change an existing group. The paired account must be an admin
+of the group. All three return `503` when the bridge is not connected.
+
+Add or remove participants (`action` is `add` or `remove`; participants are
+phone numbers with country code or JIDs):
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/group-participants \
+  -H "Authorization: Bearer $(cat whatsapp-bridge/store/.bridge-token)" \
+  -H "Content-Type: application/json" \
+  -d '{"group": "120363000000000000@g.us", "action": "add", "participants": ["1234567890"]}'
+# {"ok": true, "result": [{"JID": "...", "Error": 0, ...}]}
+```
+
+`result` has one entry per participant. A non-zero `Error` means WhatsApp
+refused that participant (for example, because of their privacy settings).
+
+Rename a group or change its description (send `name`, `topic` or both):
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/group-settings \
+  -H "Authorization: Bearer $(cat whatsapp-bridge/store/.bridge-token)" \
+  -H "Content-Type: application/json" \
+  -d '{"group": "120363000000000000@g.us", "name": "Launch team", "topic": "Weekly sync on Mondays"}'
+# {"ok": true}
+```
+
+If one of the two changes fails, the response is `500` with `"ok": false` and
+`name_error` or `topic_error`; the other change may already have been applied.
+
+Set the group photo from a JPEG file. The path goes through the same
+`WHATSAPP_MEDIA_ROOTS` allow-list as outbound media in `/api/send`:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/group-photo \
+  -H "Authorization: Bearer $(cat whatsapp-bridge/store/.bridge-token)" \
+  -H "Content-Type: application/json" \
+  -d '{"group": "120363000000000000@g.us", "path": "/home/me/.local/share/whatsapp-mcp/outbox/logo.jpg"}'
+# {"ok": true, "picture_id": "1700000000"}
+```
+
 ### Requesting history for a single chat (on-demand)
 
 `--full-history-pair` only applies to a fresh pair, so recovering a gap in one
@@ -939,6 +982,9 @@ flowchart LR
     subgraph GoAPI["Go Bridge REST API"]
         direction TB
         SEND["/api/send"]
+        GPART["/api/group-participants"]
+        GSET["/api/group-settings"]
+        GPHOTO["/api/group-photo"]
         READ["/api/mark-read"]
         DOWN["/api/download"]
         REACT["/api/react"]
