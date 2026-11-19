@@ -304,6 +304,24 @@ Send a voice message (automatically converts to Opus .ogg format).
 Converted audio is sent through the same media-path confinement as
 `send_file`.
 
+#### `stage_file`
+
+Copy a local file into the outbox and return its new path for `send_file` or
+`send_audio_message`. Meant for clients whose file tools cannot write to the
+outbox (for example sandboxed agents that keep files in their own working
+folder). Nothing is sent.
+
+Disabled unless `WHATSAPP_STAGE_ROOTS` lists the directories files may be
+copied from. Symlinks are resolved before that check, hidden files and
+directories (`.env`, `.ssh`, …) are refused, and files above
+`WHATSAPP_STAGE_MAX_MB` (default 100) are rejected. The copy goes to
+`<outbox>/staged/<random>/<original name>`, where `<outbox>` is the first
+`WHATSAPP_MEDIA_ROOTS` entry visible to the MCP server, else the default outbox.
+
+**Parameters:**
+
+- `source_path` (required): Absolute path of the file to stage
+
 #### `download_media`
 
 Download media from a received message. Returns the **local file path**, which
@@ -489,6 +507,8 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token for bridge REST calls; also signed onto outbound webhook POSTs |
 | `WHATSAPP_HUB_URL` | `http://localhost:8767/ui/whatsapp` | AutoHub status/pairing page opened by macOS bridge notifications |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files |
+| `WHATSAPP_STAGE_ROOTS` | unset (`stage_file` disabled) | MCP server: path-list of directories `stage_file` may copy from into the outbox. Hidden files/dirs are refused |
+| `WHATSAPP_STAGE_MAX_MB` | `100` | MCP server: size limit for `stage_file` |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default)          | Label shown for this connection under WhatsApp > Linked Devices. Set to a recognisable name. Applies at pair time only (re-pair to change) |
 | `WHATSAPP_MCP_TRANSPORT` | `stdio`                                | MCP transport to serve clients: `stdio`, `http`, or `sse` |
 | `WHATSAPP_MCP_HOST`    | `127.0.0.1`                              | Bind address for the `http`/`sse` transports |
@@ -556,6 +576,8 @@ Outbound `media_path` values are confined to `WHATSAPP_MEDIA_ROOTS`. The default
 outbox is `~/.local/share/whatsapp-mcp/outbox`, created on bridge startup. Move
 files there before calling `send_file` or `send_audio_message`, or set
 `WHATSAPP_MEDIA_ROOTS` to a colon-separated list of absolute directories.
+Alternatively let the MCP server copy files in with `stage_file`, limited to
+the directories in `WHATSAPP_STAGE_ROOTS`.
 
 ### Connection status and phone linking
 
