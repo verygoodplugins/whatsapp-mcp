@@ -1,7 +1,9 @@
 import json
 import os
 import os.path
+import shutil
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1197,6 +1199,89 @@ def send_message(
         return False, f"Error parsing response: {response.text}"
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
+
+
+DEFAULT_OUTBOX = os.path.join("~", ".local", "share", "whatsapp-mcp", "outbox")
+DEFAULT_STAGE_MAX_MB = 100
+
+
+def _split_abs_path_list(raw: str, var_name: str) -> list[str]:
+    paths = []
+    for part in raw.split(os.pathsep):
+        part = part.strip()
+        if not part:
+            continue
+        if not os.path.isabs(part):
+            raise ValueError(f"{var_name} entries must be absolute paths, got {part!r}")
+        paths.append(os.path.realpath(part))
+    return paths
+
+
+def _is_within(child: str, parent: str) -> bool:
+    return child == parent or child.startswith(parent.rstrip(os.sep) + os.sep)
+
+
+def stage_roots() -> list[str]:
+    """Directories `stage_file` may copy from (WHATSAPP_STAGE_ROOTS); empty = disabled."""
+    return _split_abs_path_list(os.getenv("WHATSAPP_STAGE_ROOTS", ""), "WHATSAPP_STAGE_ROOTS")
+
+
+def outbox_dir() -> str:
+    """Where staged files go: first WHATSAPP_MEDIA_ROOTS entry, else the bridge's default outbox.
+
+    Must match the bridge's media roots, otherwise send_file still rejects the staged copy.
+    """
+    roots = _split_abs_path_list(os.getenv("WHATSAPP_MEDIA_ROOTS", ""), "WHATSAPP_MEDIA_ROOTS")
+    return roots[0] if roots else os.path.realpath(os.path.expanduser(DEFAULT_OUTBOX))
+
+
+def stage_file(source_path: str) -> tuple[bool, str, str | None]:
+    """Copy a file from an allowed stage root into the outbox so it can be sent.
+
+    Returns (success, message, staged_path). Opt-in: does nothing unless
+    WHATSAPP_STAGE_ROOTS is set. Symlinks are resolved before the root check,
+    and hidden files/directories (dotfiles such as .env or .ssh) are refused.
+    """
+    try:
+        roots = stage_roots()
+    except ValueError as exc:
+        return False, str(exc), None
+    if not roots:
+        return (
+            False,
+            "stage_file is disabled. Set WHATSAPP_STAGE_ROOTS to a path list of directories files may be copied from.",
+            None,
+        )
+    if not source_path or not os.path.isabs(source_path):
+        return False, f"source_path must be an absolute path, got {source_path!r}", None
+
+    resolved = os.path.realpath(source_path)
+    if not os.path.isfile(resolved):
+        return False, f"File not found: {source_path}", None
+
+    root = next((r for r in roots if _is_within(resolved, r)), None)
+    if root is None:
+        return False, f"{source_path} is outside WHATSAPP_STAGE_ROOTS", None
+    if any(part.startswith(".") for part in os.path.relpath(resolved, root).split(os.sep)):
+        return False, f"Refusing to stage hidden file or directory: {source_path}", None
+
+    try:
+        max_mb = float(os.getenv("WHATSAPP_STAGE_MAX_MB", DEFAULT_STAGE_MAX_MB))
+    except ValueError:
+        max_mb = DEFAULT_STAGE_MAX_MB
+    size = os.path.getsize(resolved)
+    if size > max_mb * 1024 * 1024:
+        return False, f"File is {size / 1048576:.1f} MB, above the {max_mb:g} MB staging limit", None
+
+    try:
+        # A unique subfolder keeps the original filename, which recipients see for documents.
+        target_dir = os.path.join(outbox_dir(), "staged", uuid.uuid4().hex[:12])
+        os.makedirs(target_dir, mode=0o700, exist_ok=True)
+        target = os.path.join(target_dir, os.path.basename(resolved))
+        shutil.copyfile(resolved, target)
+    except OSError as exc:
+        return False, f"Could not copy file into the outbox: {exc}", None
+    return True, f"Staged {os.path.basename(resolved)} for sending", target
 
 
 def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool, str]:

@@ -60,6 +60,9 @@ from whatsapp import (
 from whatsapp import (
     send_reaction as whatsapp_send_reaction,
 )
+from whatsapp import (
+    stage_file as whatsapp_stage_file,
+)
 
 # Initialize FastMCP server. Env-var handling is deferred to the __main__ block
 # so importing this module never parses env vars or exits the process.
@@ -423,6 +426,25 @@ def mark_messages_read(
     """
     success, status_message = whatsapp_mark_messages_read(message_ids, chat_jid, sender_jid, timestamp)
     return {"success": success, "message": status_message}
+
+
+@mcp.tool()
+def stage_file(source_path: str) -> dict[str, Any]:
+    """Copy a local file into the WhatsApp outbox so send_file or send_audio_message can send it.
+
+    The bridge only sends files from its media roots (default
+    ~/.local/share/whatsapp-mcp/outbox). Use this when a file lives elsewhere,
+    e.g. in a client's working folder that cannot write to the outbox. Only
+    works for directories listed in WHATSAPP_STAGE_ROOTS; nothing is sent.
+
+    Args:
+        source_path: Absolute path of the file to stage
+
+    Returns:
+        A dictionary with success, message and staged_path (pass this to send_file)
+    """
+    success, message, staged_path = whatsapp_stage_file(source_path)
+    return {"success": success, "message": message, "staged_path": staged_path}
 
 
 @mcp.tool()
