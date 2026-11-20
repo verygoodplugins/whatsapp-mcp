@@ -7,6 +7,7 @@ from typing import Annotated, Any
 from mcp.server.fastmcp import FastMCP, Image
 from pydantic import Field
 
+import document_reader
 import media_preview
 import transcription
 from mcp_config import resolve_host, resolve_port, resolve_transport
@@ -72,6 +73,16 @@ PreviewDimension = Annotated[
         ge=media_preview.MIN_MAX_DIMENSION,
         le=media_preview.MAX_MAX_DIMENSION,
         description="Longest preview edge in pixels; must be an integer from 1 to 2048.",
+    ),
+]
+
+DocumentPages = Annotated[
+    int,
+    Field(
+        strict=True,
+        ge=1,
+        le=document_reader.MAX_MAX_PAGES,
+        description="Number of pages to return; must be an integer from 1 to 20.",
     ),
 ]
 
@@ -469,6 +480,10 @@ def send_audio_message(recipient: str, media_path: str) -> dict[str, Any]:
 def download_media(message_id: str, chat_jid: str) -> dict[str, Any]:
     """Download media from a WhatsApp message and get the local file path.
 
+    The path is on the server host. A client without access to that filesystem
+    should use view_media for images and videos, read_document for PDFs, and
+    transcribe_audio for voice notes.
+
     Args:
         message_id: The ID of the message containing the media
         chat_jid: The JID of the chat containing the message
@@ -495,7 +510,8 @@ def view_media(
     download_media only returns a local file path, which a client without
     filesystem access cannot open. This returns the picture itself instead.
     Videos return their first frame, which is enough to tell what was sent.
-    Both are downscaled so a single photo cannot flood the context. Voice notes
+    PDF documents return their first pages as images; use read_document for
+    their text and later pages. All are downscaled so a single photo cannot flood the context. Voice notes
     are not images — use transcribe_audio or read the transcript from the
     message content with list_messages.
 
@@ -517,12 +533,95 @@ def view_media(
         return {"success": False, "message": "Failed to download media"}
 
     with tempfile.TemporaryDirectory() as work_dir:
+        if document_reader.is_pdf(file_path):
+            try:
+                document = document_reader.read_pdf(
+                    file_path, work_dir, max_dimension=max_dimension, include_images=True
+                )
+            except document_reader.DocumentError as exc:
+                return {"success": False, "message": str(exc), "file_path": file_path}
+            return [Image(data=page, format="jpeg") for page in document["images"]]
         try:
             data, image_format = media_preview.render_preview(file_path, max_dimension=max_dimension, work_dir=work_dir)
         except media_preview.PreviewError as exc:
             return {"success": False, "message": str(exc), "file_path": file_path}
 
     return Image(data=data, format=image_format)
+
+
+@mcp.tool()
+def read_document(
+    message_id: str,
+    chat_jid: str,
+    first_page: Annotated[int, Field(strict=True, ge=1, description="First page to return (1-based).")] = 1,
+    max_pages: DocumentPages = document_reader.DEFAULT_MAX_PAGES,
+    max_dimension: PreviewDimension = media_preview.DEFAULT_MAX_DIMENSION,
+    include_images: bool = True,
+) -> Any:
+    """Read a WhatsApp document message (PDF): its text plus an image of each page.
+
+    download_media only returns a path on the server host, which a remote
+    client cannot open. This returns the content itself. Scanned documents such
+    as passport or ID copies usually have no text layer, so look at the page
+    images; text-based PDFs return their text as well. Pages are returned in
+    bounded batches — pass first_page to continue through a long document.
+    A document sent as an image file is returned as that image.
+
+    Args:
+        message_id: The ID of the document message
+        chat_jid: The JID of the chat containing the message
+        first_page: First page to return, starting at 1 (default 1)
+        max_pages: How many pages to return, 1 to 20 (default 5)
+        max_dimension: Longest edge of each page image in pixels (default 1024)
+        include_images: Set false to return only the text
+
+    Returns:
+        A text block describing the document and its extracted text, followed by
+        one image per page; otherwise a dictionary explaining why not
+    """
+    file_path = whatsapp_download_media(message_id, chat_jid)
+    if not file_path:
+        return {"success": False, "message": "Failed to download media"}
+
+    with tempfile.TemporaryDirectory() as work_dir:
+        if not document_reader.is_pdf(file_path):
+            # A photo sent "as document" keeps full resolution; show it as an image.
+            try:
+                data, image_format = media_preview.render_preview(
+                    file_path, max_dimension=max_dimension, work_dir=work_dir
+                )
+            except media_preview.PreviewError:
+                return {
+                    "success": False,
+                    "message": "This document is not a PDF or an image, so it cannot be read yet",
+                    "file_path": file_path,
+                }
+            return Image(data=data, format=image_format)
+
+        try:
+            document = document_reader.read_pdf(
+                file_path,
+                work_dir,
+                first_page=first_page,
+                max_pages=max_pages,
+                max_dimension=max_dimension,
+                include_images=include_images,
+            )
+        except document_reader.DocumentError as exc:
+            return {"success": False, "message": str(exc), "file_path": file_path}
+
+    summary = [
+        f"PDF document, {document['page_count']} page(s). "
+        f"Showing pages {document['first_page']}-{document['last_page']}."
+    ]
+    if document["last_page"] < document["page_count"]:
+        summary.append(f"Call again with first_page={document['last_page'] + 1} for the rest.")
+    if document["text"]:
+        note = " (truncated)" if document["text_truncated"] else ""
+        summary.append(f"\nExtracted text{note}:\n{document['text']}")
+    else:
+        summary.append("No text layer on these pages (likely a scan); read the page images.")
+    return ["\n".join(summary)] + [Image(data=page, format="jpeg") for page in document["images"]]
 
 
 @mcp.tool()

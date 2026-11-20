@@ -334,6 +334,30 @@ below 4 MB are returned unchanged and anything else reports what is missing.
 `max_dimension` must be an integer from `1` to `2048`. Invalid values are
 rejected before the server downloads or renders any media.
 
+A PDF document returns its first five pages as images instead; use
+`read_document` for its text and later pages.
+
+#### `read_document`
+
+Read a document message (PDF) for clients with no filesystem access: returns
+the extracted text followed by one downscaled JPEG per page. Scanned PDFs
+(passport or ID copies) usually have no text layer, so the page images carry
+the content. A photo sent as a document is returned as that image. PDFs are
+detected by their bytes, since the bridge saves documents without an
+extension.
+
+Requires poppler-utils (`pdfinfo`, `pdftotext`, `pdftoppm`); without it the
+tool reports what is missing.
+
+**Parameters:**
+
+- `message_id` (required): ID of the document message
+- `chat_jid` (required): JID of the chat containing the message
+- `first_page` (optional): first page to return, default `1`
+- `max_pages` (optional): pages per call, `1` to `20`, default `5`
+- `max_dimension` (optional): longest page edge in pixels, default `1024`
+- `include_images` (optional): set `false` for text only
+
 #### `transcribe_audio`
 
 Transcribe a voice note with whisper.cpp (the default) or an OpenAI-compatible
