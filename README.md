@@ -233,6 +233,52 @@ automatically.
 - "Mark those messages as read"
 - "Mark the last three messages from Alice in the team group as read"
 
+#### `delete_messages_for_me`
+
+Delete messages from this WhatsApp account only (WhatsApp's "Delete for me").
+They disappear from the phone and every linked device and are removed from
+`messages.db`; the other participants keep their copies. It works for messages of
+any sender and any age. This is not "delete for everyone" (revoking), which only
+applies to your own recent messages.
+
+The call is a **dry run unless `confirm` is `true`**: it lists what would be
+deleted (id, timestamp, sender, direction, media type; no message text) so the
+selection can be checked first. Deletion is irreversible. Up to 1000 messages per
+call are accepted and sent to the bridge in batches of 200. An unknown ID rejects
+the whole call before anything is sent; if a later batch fails, earlier batches
+stay deleted and the result says how many (`deleted`, `failed_batch`).
+
+**Parameters:**
+
+- `chat_jid` (required): JID of the chat containing the messages
+- `after` / `before` (together): ISO-8601 half-open range `[after, before)`, e.g. `2026-10-13T00:00:00-03:00` to `2026-10-14T00:00:00-03:00` for one day. Both are required so a forgotten bound can't widen the selection to the whole chat.
+- `message_ids` (instead of a range): IDs of the messages to delete
+- `confirm` (optional, default `false`): must be `true` to actually delete
+
+The tool is annotated as destructive so MCP clients can ask before running it.
+Failures carry a stable `error_code` (`invalid_selector`, `unknown_ids`,
+`no_match`, `too_many`, `bridge_error`) next to the human-readable `message`.
+
+**Limits:**
+
+- Only messages stored in `messages.db` can be selected. The bridge keeps a
+  sample of the history and skips some message types, so a message the phone
+  still shows may be missing (`no_match`).
+- Group messages from other participants are not supported yet (the mutation
+  needs the sender in the exact form the phone uses); your own group messages
+  and all direct-chat messages are.
+- Media files the bridge already downloaded to disk are not removed; only the
+  `messages.db` rows are.
+
+The bridge endpoint behind the tool is `POST /api/delete-for-me`
+(`{"chat_jid": "...", "message_ids": ["..."]}`, at most 200 IDs, bearer token
+like every other route), so other clients can reuse it directly.
+
+**Natural Language Examples:**
+
+- "Delete all my messages with Alice from October 13th (just for me)"
+- "Show me what would be deleted from that chat between 9am and noon yesterday"
+
 #### `send_reaction`
 
 Send (or remove) an emoji reaction to a message.

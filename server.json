@@ -71,6 +71,10 @@
     {
       "name": "download_media",
       "description": "Download media from a received message"
+    },
+    {
+      "name": "delete_messages_for_me",
+      "description": "Delete messages from this account only (dry run unless confirm=true)"
     }
   ]
 }

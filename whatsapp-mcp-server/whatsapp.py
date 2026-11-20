@@ -1385,6 +1385,148 @@ def mark_messages_read(
         return False, f"Unexpected error: {str(e)}"
 
 
+# Messages per bridge request. Keep in sync with maxDeleteForMeBatch in
+# whatsapp-bridge/delete_for_me.go.
+MAX_DELETE_BATCH = 200
+# Messages one tool call may delete; a larger selection is sent as several bridge batches.
+MAX_DELETE_PER_CALL = 1000
+# SQLite builds before 3.32 allow only 999 bound variables per statement.
+_SQL_IN_CHUNK = 500
+
+
+def select_messages_for_deletion(
+    chat_jid: str,
+    after: str | None = None,
+    before: str | None = None,
+    message_ids: list[str] | None = None,
+    limit: int = MAX_DELETE_PER_CALL + 1,
+) -> list[dict[str, Any]]:
+    """List the stored messages a delete-for-me call would remove, oldest first.
+
+    Select either by message_ids or by a half-open [after, before) ISO-8601
+    range. A range needs both bounds so a forgotten one can never widen the
+    selection to the whole chat. Reaction rows are skipped: they are not
+    messages the user sees in the chat.
+    """
+    if not chat_jid:
+        raise ValueError("chat_jid must be provided")
+    if message_ids:
+        if after or before:
+            raise ValueError("Use either message_ids or after/before, not both")
+        if len(message_ids) > MAX_DELETE_PER_CALL:
+            raise ValueError(f"At most {MAX_DELETE_PER_CALL} message_ids can be given per call")
+    elif not (after and before):
+        raise ValueError("Provide message_ids, or both after and before")
+
+    clauses = ["chat_jid = ?", "COALESCE(media_type, '') != 'reaction'"]
+    params: list[Any] = [chat_jid]
+    if not message_ids:
+        for name, value, op in (("after", after, ">="), ("before", before, "<")):
+            try:
+                bound = datetime.fromisoformat(value)
+            except ValueError:
+                raise ValueError(f"Invalid date format for '{name}': {value}. Please use ISO-8601 format.")
+            # The bridge stores "YYYY-MM-DD HH:MM:SS+HH:MM", so compare in that form.
+            clauses.append(f"timestamp {op} ?")
+            params.append(bound.isoformat(sep=" "))
+
+    select = "SELECT id, timestamp, sender, is_from_me, media_type FROM messages WHERE "
+    conn = _connect_messages_db()
+    try:
+        if message_ids:
+            rows = []
+            for start in range(0, len(message_ids), _SQL_IN_CHUNK):
+                chunk = message_ids[start : start + _SQL_IN_CHUNK]
+                in_clause = f"id IN ({','.join('?' * len(chunk))})"
+                rows.extend(conn.execute(select + " AND ".join([*clauses, in_clause]), (*params, *chunk)).fetchall())
+            rows = sorted(rows, key=lambda row: row[1])[:limit]
+        else:
+            rows = conn.execute(
+                select + " AND ".join(clauses) + " ORDER BY timestamp ASC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+    finally:
+        conn.close()
+
+    return [
+        {
+            "id": row[0],
+            "timestamp": row[1],
+            "sender": row[2],
+            "is_from_me": bool(row[3]),
+            "media_type": row[4],
+        }
+        for row in rows
+    ]
+
+
+def delete_messages_for_me(chat_jid: str, message_ids: list[str]) -> tuple[bool, str]:
+    """Delete messages from this WhatsApp account only ("Delete for me").
+
+    The messages disappear from the phone and every linked device and are
+    removed from the local store. The other participants keep their copies.
+    """
+    try:
+        normalized_ids = [message_id.strip() for message_id in message_ids]
+        if not chat_jid:
+            return False, "Chat JID must be provided"
+        if not normalized_ids or any(not message_id for message_id in normalized_ids):
+            return False, "At least one non-empty message ID must be provided"
+        if len(normalized_ids) > MAX_DELETE_BATCH:
+            return False, f"At most {MAX_DELETE_BATCH} messages can be deleted per call"
+
+        response = requests.post(
+            f"{WHATSAPP_API_BASE_URL}/delete-for-me",
+            json={"chat_jid": chat_jid, "message_ids": normalized_ids},
+            headers=_bridge_headers(),
+        )
+
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "Unknown response")
+        return False, f"Error: HTTP {response.status_code} - {response.text}"
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
+def delete_messages_for_me_batched(
+    chat_jid: str,
+    message_ids: list[str],
+    batch_size: int = MAX_DELETE_BATCH,
+) -> dict[str, Any]:
+    """Delete messages for this account in bridge-sized batches.
+
+    Stops at the first failing batch. Batches already sent stay deleted (the
+    bridge also drops their local rows), so `deleted` is always exact and a
+    retry with the same selection only covers what is left.
+
+    Returns:
+        {"success", "deleted", "batches", "message"}; on failure "failed_batch"
+        (1-based) tells which batch did not go through.
+    """
+    deleted = 0
+    batches = 0
+    for start in range(0, len(message_ids), batch_size):
+        batch = message_ids[start : start + batch_size]
+        success, message = delete_messages_for_me(chat_jid, batch)
+        if not success:
+            return {
+                "success": False,
+                "deleted": deleted,
+                "batches": batches,
+                "failed_batch": batches + 1,
+                "message": message,
+            }
+        deleted += len(batch)
+        batches += 1
+    return {"success": True, "deleted": deleted, "batches": batches, "message": f"{deleted} message(s) deleted for me"}
+
+
 def download_media(message_id: str, chat_jid: str) -> str | None:
     """Download media from a message and return the local file path.
 
