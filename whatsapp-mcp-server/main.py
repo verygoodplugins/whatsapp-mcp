@@ -2,11 +2,15 @@ import os
 import signal
 import sys
 import tempfile
+from pathlib import Path
 from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP, Image
 from pydantic import Field
+from starlette.requests import Request
+from starlette.responses import FileResponse, PlainTextResponse, Response
 
+import media_links
 import media_preview
 import transcription
 from mcp_config import resolve_host, resolve_port, resolve_transport
@@ -469,19 +473,41 @@ def send_audio_message(recipient: str, media_path: str) -> dict[str, Any]:
 def download_media(message_id: str, chat_jid: str) -> dict[str, Any]:
     """Download media from a WhatsApp message and get the local file path.
 
+    file_path is a path on the server's disk. When the server is configured with
+    WHATSAPP_MEDIA_BASE_URL, the result also has a url: an expiring HTTP link to
+    the same file, for a client on another machine (fetch it with curl or similar).
+
     Args:
         message_id: The ID of the message containing the media
         chat_jid: The JID of the chat containing the message
 
     Returns:
-        A dictionary containing success status, a status message, and the file path if successful
+        A dictionary containing success status, a status message, the file path if successful,
+        and a url when WHATSAPP_MEDIA_BASE_URL is set
     """
     file_path = whatsapp_download_media(message_id, chat_jid)
 
-    if file_path:
-        return {"success": True, "message": "Media downloaded successfully", "file_path": file_path}
-    else:
+    if not file_path:
         return {"success": False, "message": "Failed to download media"}
+    result = {"success": True, "message": "Media downloaded successfully", "file_path": file_path}
+    url = media_links.signed_url(file_path, Path(MESSAGES_DB_PATH).parent)
+    if url:
+        result["url"] = url
+    return result
+
+
+@mcp.custom_route(media_links.ROUTE_PREFIX + "{path:path}", methods=["GET"])
+async def media_file(request: Request) -> Response:
+    """Serve a file named by a signed URL from download_media (http/sse transports only)."""
+    target = media_links.resolve(
+        request.path_params["path"],
+        request.query_params.get("expires", ""),
+        request.query_params.get("sig", ""),
+        Path(MESSAGES_DB_PATH).parent,
+    )
+    if target is None:
+        return PlainTextResponse("Not found", status_code=404)
+    return FileResponse(target, filename=target.name)
 
 
 @mcp.tool()
