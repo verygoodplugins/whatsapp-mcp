@@ -855,6 +855,29 @@ Caveats:
   message first.
 - Messages the phone has deleted are not recoverable, as above.
 
+### Forwarding a stored message
+
+`POST /api/forward` resends a stored text message to another chat with
+WhatsApp's **Forwarded** label, the same result as the phone's Forward action:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/forward \
+  -H "Authorization: Bearer $(cat whatsapp-bridge/store/.bridge-token)" \
+  -H "Content-Type: application/json" \
+  -d '{"chat_jid": "123456789-987654321@g.us", "message_id": "3EB0...", "recipient": "1234567890"}'
+```
+
+| Field | Required | Description |
+| ------------ | -------- | ------------------------------------------------------- |
+| `chat_jid` | yes | Chat the original message is stored under |
+| `message_id` | yes | ID of the stored message |
+| `recipient` | yes | Phone number or JID to forward to |
+
+Returns `{"success": true, "id": "<new message id>"}`. Only text messages are
+supported (media returns `400`); the message must already be in `messages.db`
+(`404` otherwise). The recipient chat's disappearing-message setting is applied
+and the outbound copy is stored like any other sent message.
+
 ## Call History
 
 The bridge captures incoming WhatsApp voice and video calls live into a
@@ -944,6 +967,7 @@ flowchart LR
         REACT["/api/react"]
         TYPE["/api/typing"]
         HIST["/api/history"]
+        FWD["/api/forward"]
         HEALTH["/api/health"]
     end
 
