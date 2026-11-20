@@ -576,6 +576,21 @@ AutoHub displays this status and QR at `/ui/whatsapp`. From your phone, use
 WhatsApp **Linked Devices → Link a Device**. A healthy existing session reconnects
 without scanning a new QR.
 
+### Profile pictures
+
+Get the current profile picture of a contact or a group:
+
+```bash
+curl "http://127.0.0.1:8080/api/profile-picture?jid=1234567890@s.whatsapp.net" \
+  -H "Authorization: Bearer $(cat whatsapp-bridge/store/.bridge-token)"
+# {"url": "https://pps.whatsapp.net/...", "id": "1700000000"}
+```
+
+`jid` is a user (`...@s.whatsapp.net` or `...@lid`) or group (`...@g.us`) JID.
+The response is `404` when there is no picture, `403` when the contact's privacy
+settings hide it from you, and `503` when the bridge is not connected. The URL
+is a signed WhatsApp CDN link that expires, so fetch the image soon after.
+
 ### Where runtime data is stored
 
 The bridge keeps its runtime state in `store/`, resolved **relative to its
@@ -941,6 +956,7 @@ flowchart LR
         SEND["/api/send"]
         READ["/api/mark-read"]
         DOWN["/api/download"]
+        PPIC["/api/profile-picture"]
         REACT["/api/react"]
         TYPE["/api/typing"]
         HIST["/api/history"]

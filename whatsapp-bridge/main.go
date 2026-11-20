@@ -2511,6 +2511,9 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 		connections[0].register(mux, auth)
 	}
 
+	// Profile picture lookup (see profile_picture.go)
+	registerProfilePictureEndpoint(mux, auth, client)
+
 	// On-demand history sync endpoint (see history_ondemand.go)
 	registerHistoryEndpoint(mux, auth, client, messageStore)
 
