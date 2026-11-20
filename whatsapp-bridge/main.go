@@ -1462,6 +1462,15 @@ func handleMessageRevoke(messageStore *MessageStore, msg *waProto.Message, chatJ
 	}
 }
 
+func registeredLID(matches []types.IsOnWhatsAppResponse) types.JID {
+	for _, match := range matches {
+		if match.IsIn && match.JID.Server == types.HiddenUserServer {
+			return match.JID
+		}
+	}
+	return types.JID{}
+}
+
 // resolveRecipientJID parses a phone number or JID string and resolves PN -> LID
 // for personal chats before sending.
 func resolveRecipientJID(client *whatsmeow.Client, recipient string) (types.JID, error) {
@@ -1493,6 +1502,21 @@ func resolveRecipientJID(client *whatsmeow.Client, recipient string) (types.JID,
 			// Cache miss or cache error — ask the WhatsApp server.
 			if lidErr != nil {
 				fmt.Printf("Warning: LID cache lookup failed for %s: %v, falling back to server\n", recipientJID, lidErr)
+			}
+			// The interactive contact query discovers unknown phone numbers and
+			// persists their PN -> LID mapping. GetUserInfo alone may return no
+			// LID for a number that is not already in the local contact store.
+			matches, lookupErr := client.IsOnWhatsApp(ctx, []string{"+" + recipientJID.User})
+			if lookupErr == nil {
+				// WhatsApp may canonicalize Brazilian mobile numbers by dropping
+				// the ninth digit. This is a single-number query, so its registered
+				// LID is the authoritative match.
+				if resolved := registeredLID(matches); !resolved.IsEmpty() {
+					fmt.Printf("Resolved %s -> %s (interactive contact query)\n", recipientJID, resolved)
+					return resolved, nil
+				}
+			} else {
+				fmt.Printf("Warning: interactive contact lookup failed for %s: %v\n", recipientJID, lookupErr)
 			}
 			info, infoErr := client.GetUserInfo(ctx, []types.JID{recipientJID})
 			if infoErr != nil {
@@ -2513,6 +2537,9 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 
 	// On-demand history sync endpoint (see history_ondemand.go)
 	registerHistoryEndpoint(mux, auth, client, messageStore)
+
+	// Group management (local addition, see groups.go)
+	registerGroupEndpoints(mux, auth, client, allowedMediaRoots)
 
 	// Health check endpoint
 	mux.HandleFunc("/api/health", auth(func(w http.ResponseWriter, r *http.Request) {

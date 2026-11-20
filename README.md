@@ -1078,6 +1078,10 @@ are preserved.
 - **Bridge returns 403 Forbidden for media_path**: Move the file into
   `~/.local/share/whatsapp-mcp/outbox` or add its absolute parent directory to
   `WHATSAPP_MEDIA_ROOTS`.
+- **Sending to a new phone number fails with `no LID found`**: Update and
+  restart the bridge. It now checks the number with WhatsApp and uses the
+  returned LID when the local mapping is missing. Brazilian mobile numbers
+  may be returned in a canonical form without the ninth digit.
 
 ### App State / LTHash Conflicts
 
