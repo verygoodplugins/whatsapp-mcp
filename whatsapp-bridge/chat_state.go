@@ -101,15 +101,47 @@ func (store *MessageStore) SetChatMutedUntil(jid string, mutedUntilMillis int64,
 	return store.setChatFlag(jid, chatFlagMutedUntil, mutedUntilMillis, millis(at))
 }
 
-// muteEndMillis maps a MuteAction to the stored muted_until value.
+// muteEndMillis maps a MuteAction to the stored muted_until value, the way
+// whatsmeow's own store reads it: a negative end is "forever", any other end
+// is an instant (0 = the epoch, i.e. already expired).
 func muteEndMillis(muted bool, endTimestamp int64) int64 {
 	if !muted {
 		return 0
 	}
-	if endTimestamp == 0 {
-		return -1 // muted with no end: "always"
+	if endTimestamp < 0 {
+		return -1
 	}
 	return endTimestamp
+}
+
+// BackfillReadMarkerFromUnreadCount places the read marker of a chat that has
+// none so that exactly its newest unreadCount inbound messages are unread,
+// as history sync reports. Without it a chat that was unread at pairing has
+// no marker, and the MCP server's count falls back to every inbound message
+// stored. A chat that already has a marker is left alone, and with fewer than
+// unreadCount+1 inbound messages stored there is nothing to anchor on.
+// Counted like the MCP server: reactions and deleted messages are skipped.
+func (store *MessageStore) BackfillReadMarkerFromUnreadCount(chatJID string, unreadCount uint32) error {
+	_, err := store.db.Exec(
+		`UPDATE chats SET last_read_time = (
+			SELECT m.timestamp FROM messages m
+			WHERE m.chat_jid = chats.jid AND m.is_from_me = 0
+			  AND (m.media_type IS NULL OR m.media_type != 'reaction')
+			  AND m.deleted_at IS NULL
+			ORDER BY m.timestamp DESC
+			LIMIT 1 OFFSET ?
+		)
+		WHERE jid = ? AND last_read_time IS NULL AND EXISTS (
+			SELECT 1 FROM messages m
+			WHERE m.chat_jid = chats.jid AND m.is_from_me = 0
+			  AND (m.media_type IS NULL OR m.media_type != 'reaction')
+			  AND m.deleted_at IS NULL
+			ORDER BY m.timestamp DESC
+			LIMIT 1 OFFSET ?
+		)`,
+		unreadCount, chatJID, unreadCount,
+	)
+	return err
 }
 
 // appStateChatJID maps an app-state target to the chat JID messages are
@@ -183,6 +215,10 @@ var chatStatePatches = []appstate.WAPatchName{appstate.WAPatchRegularLow, appsta
 // this process, so reconnects don't repeat it.
 var chatStateSynced atomic.Bool
 
+// chatStateSyncing keeps back-to-back Connected events from running two
+// full snapshot downloads at once.
+var chatStateSyncing atomic.Bool
+
 // syncChatStateOnce re-downloads the chat app-state snapshots so the bridge
 // learns the current archive / mute / marked-unread state of every chat,
 // including what was set before this bridge version stored it. Incremental
@@ -191,9 +227,10 @@ var chatStateSynced atomic.Bool
 // EmitAppStateEventsOnFullSync set, or the snapshot emits no events.
 // Failures leave the flag unset so the next connect retries.
 func syncChatStateOnce(ctx context.Context, client *whatsmeow.Client, logger waLog.Logger) {
-	if chatStateSynced.Load() {
+	if chatStateSynced.Load() || !chatStateSyncing.CompareAndSwap(false, true) {
 		return
 	}
+	defer chatStateSyncing.Store(false)
 	for _, name := range chatStatePatches {
 		if err := client.FetchAppState(ctx, name, true, false); err != nil {
 			logger.Warnf("Chat app-state sync of %s failed (will retry on next connect): %v", name, err)

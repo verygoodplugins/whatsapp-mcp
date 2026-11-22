@@ -85,10 +85,16 @@ FIXTURE = {
             (14, 0, None, True),
         ],
     ),
-    # Marker behind our own reply: replying means we read what came before.
+    # Marker behind our own message: a send through the bridge doesn't read
+    # the chat on the phone, so with a marker our messages are ignored.
     "replied@s.whatsapp.net": (
         {"last_read_time": ts(1)},
         [(2, 0, None, False), (3, 1, None, False), (4, 0, None, False)],
+    ),
+    # No marker: our own reaction is not a reply and doesn't reset the count.
+    "reacted@s.whatsapp.net": (
+        {},
+        [(1, 0, None, False), (2, 1, "reaction", False), (3, 0, None, False)],
     ),
     # No marker: count falls back to inbound since our last message.
     "nomarker@s.whatsapp.net": (
@@ -168,7 +174,8 @@ def test_unread_count_excludes_reactions_deleted_and_read(state_db):
     chats = _chats()
     assert chats["counted@s.whatsapp.net"]["unread_count"] == 2
     assert chats["counted@s.whatsapp.net"]["unread"] is True
-    assert chats["replied@s.whatsapp.net"]["unread_count"] == 1
+    assert chats["replied@s.whatsapp.net"]["unread_count"] == 2
+    assert chats["reacted@s.whatsapp.net"]["unread_count"] == 2
     assert chats["nomarker@s.whatsapp.net"]["unread_count"] == 2
     assert chats["read@s.whatsapp.net"]["unread_count"] == 0
     assert chats["read@s.whatsapp.net"]["unread"] is False
@@ -199,6 +206,7 @@ def test_unread_only_leaves_out_archived_but_keeps_muted(state_db):
     assert unread == {
         "counted@s.whatsapp.net",
         "replied@s.whatsapp.net",
+        "reacted@s.whatsapp.net",
         "nomarker@s.whatsapp.net",
         "marked@s.whatsapp.net",
         "muted_forever@g.us",

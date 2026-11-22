@@ -411,10 +411,12 @@ All chat tools (`list_chats`, `get_chat`, `get_direct_chat_by_contact`,
 
 `last_read_time` is the bridge's read marker for the chat, fed by read
 receipts from your own devices, "mark as read" on the phone, and history-sync
-backfill. `unread_count` counts inbound messages newer than both the marker
-and your own latest message in the chat (replying implies you read what came
-before), leaving out reactions and deleted messages, as the phone's badge
-does. `unread` is true when `unread_count > 0` or the chat is marked unread.
+backfill. `unread_count` counts inbound messages newer than the marker, leaving out
+reactions and deleted messages. For a chat that was unread when the device was
+paired, the bridge places the marker from the unread count history sync
+reports. Message types the bridge doesn't store (polls, locations, missed
+calls) are not counted, so a group can show fewer than the phone's badge.
+`unread` is true when `unread_count > 0` or the chat is marked unread.
 
 `archived`, `muted`/`muted_until` and `marked_unread` mirror the phone. The
 bridge stores them from WhatsApp's app-state sync and re-downloads that state
@@ -430,7 +432,9 @@ Caveats:
 - **The marker only moves forward.** "Mark as unread" is tracked as its own
   flag (`marked_unread`), not by moving the marker back.
 - **No marker means no read was ever reported.** `unread_count` then counts
-  inbound messages since your own last message in the chat.
+  inbound messages since your own last message in the chat (reactions
+  aside). Messages sent through the bridge don't read the chat on the phone,
+  so they don't clear `unread_count` while a marker exists.
 - **Older stores.** A store from a bridge older than these columns reports
   `archived`/`muted`/`marked_unread` as false and counts unread messages
   as above.

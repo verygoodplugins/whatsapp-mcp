@@ -253,13 +253,17 @@ def _chat_state_select(cursor: sqlite3.Cursor, chat_alias: str) -> str:
     messages.db written by an older bridge may lack any of them. Reads must
     keep working against such a store; a missing column reads as NULL.
 
-    state_unread_count counts inbound messages newer than the point the chat
-    was last read: the later of the read marker and our own latest message
-    (replying means we saw what came before; it is also the only signal for
-    a chat with no marker). Reactions and deleted messages are not counted,
-    matching the phone's badge, and status@broadcast never counts.
-    Timestamps are compared as stored text, which the bridge writes in one
-    fixed format.
+    state_unread_count counts inbound messages newer than the read marker.
+    A chat with no marker falls back to our own latest message (not a
+    reaction): replying means we saw what came before. With a marker, our
+    messages are ignored. The phone sends read receipts when we reply there,
+    and a send through the bridge does not read the chat on the phone.
+    Reactions and deleted messages are not counted, and status@broadcast
+    never counts.
+
+    Timestamps are compared as stored text. That is correct while the bridge
+    runs in one timezone, UTC in practice: go-sqlite3 writes the host's
+    offset, and text order differs from time order across offsets.
     """
     chat_columns = _table_columns(cursor, "chats")
     message_columns = _table_columns(cursor, "messages")
@@ -278,10 +282,12 @@ def _chat_state_select(cursor: sqlite3.Cursor, chat_alias: str) -> str:
     unread_count = f"""CASE WHEN {chat_alias}.jid = 'status@broadcast' THEN 0 ELSE (
                 SELECT COUNT(*)
                 FROM (
-                    SELECT MAX(
-                        COALESCE({column("last_read_time")}, ''),
-                        COALESCE((SELECT MAX(o.timestamp) FROM messages o
-                                  WHERE o.chat_jid = {chat_alias}.jid AND o.is_from_me = 1), '')
+                    SELECT COALESCE(
+                        {column("last_read_time")},
+                        (SELECT MAX(o.timestamp) FROM messages o
+                         WHERE o.chat_jid = {chat_alias}.jid AND o.is_from_me = 1
+                           AND (o.media_type IS NULL OR o.media_type != 'reaction')),
+                        ''
                     ) AS read_through
                 ) rt
                 CROSS JOIN messages u ON u.chat_jid = {chat_alias}.jid

@@ -257,8 +257,9 @@ def list_chats(
         last_sender, last_is_from_me, last_read_time, unread, unread_count, marked_unread,
         archived, muted and muted_until.
         - `last_read_time`: how far the chat has been read on any device (null if never reported).
-        - `unread_count`: inbound messages newer than both that marker and our own latest
-          message, excluding reactions and deleted messages.
+        - `unread_count`: inbound messages newer than that marker (no marker: newer than our own
+          latest message), excluding reactions and deleted messages. Message types the bridge
+          doesn't store (polls, locations, missed calls) are not counted.
         - `unread`: true when unread_count > 0 or the chat was marked unread on the phone, so
           chats already read on the phone are not reported.
         - `archived`, `muted`, `marked_unread`: synced from the phone.

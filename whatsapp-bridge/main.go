@@ -2712,6 +2712,11 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 			// Receipt already sent; log but still report success to the caller.
 			fmt.Printf("Warning: failed to persist local read marker for %s: %v\n", req.ChatJID, err)
 		}
+		// Reading the chat here also clears a manual "mark as unread"; no
+		// self-receipt comes back to this device to do it.
+		if err := messageStore.SetChatMarkedUnread(req.ChatJID, false, time.Now()); err != nil {
+			fmt.Printf("Warning: failed to clear marked-unread for %s: %v\n", req.ChatJID, err)
+		}
 
 		_ = json.NewEncoder(w).Encode(SendMessageResponse{Success: true, Message: "Messages marked as read"})
 	}))
@@ -3757,6 +3762,14 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 						logger.Infof("Stored message: [%s] %s -> %s: %s",
 							msgTimestamp.Format("2006-01-02 15:04:05"), sender, chatJID, content)
 					}
+				}
+			}
+
+			// Messages are stored now, so the reported count can anchor the
+			// marker. Only an explicit non-zero count; zero is handled above.
+			if conversation.UnreadCount != nil && conversation.GetUnreadCount() > 0 {
+				if err := messageStore.BackfillReadMarkerFromUnreadCount(chatJID, conversation.GetUnreadCount()); err != nil {
+					logger.Warnf("Failed to backfill read marker from unread count for %s: %v", chatJID, err)
 				}
 			}
 		}
