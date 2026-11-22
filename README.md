@@ -398,28 +398,42 @@ All chat tools (`list_chats`, `get_chat`, `get_direct_chat_by_contact`,
   "last_sender": "1234567890",         // null when include_last_message=false
   "last_is_from_me": false,
   "last_read_time": "2024-01-15T09:00:00+00:00", // how far the chat is read
-  "unread": true                       // last message is inbound and unread
+  "unread": true,                      // unread messages, or marked unread
+  "unread_count": 2,                   // inbound messages not yet read
+  "marked_unread": false,              // "Mark as unread" on the phone
+  "archived": false,
+  "muted": true,
+  "muted_until": "always"              // ISO time, "always", or null
 }
 ```
 
-#### Read state (`last_read_time` / `unread`)
+#### Read state (`last_read_time` / `unread` / `unread_count`)
 
 `last_read_time` is the bridge's read marker for the chat, fed by read
-receipts from your own devices and backfilled from history sync. `unread` is
-derived from it: true when the chat's last message is inbound and newer than
-the marker. This distinguishes a genuinely unread chat from one whose last
-message merely happens to be inbound but was already read on the phone.
+receipts from your own devices, "mark as read" on the phone, and history-sync
+backfill. `unread_count` counts inbound messages newer than both the marker
+and your own latest message in the chat (replying implies you read what came
+before), leaving out reactions and deleted messages, as the phone's badge
+does. `unread` is true when `unread_count > 0` or the chat is marked unread.
+
+`archived`, `muted`/`muted_until` and `marked_unread` mirror the phone. The
+bridge stores them from WhatsApp's app-state sync and re-downloads that state
+once per bridge start, so chats archived or muted before upgrading are picked
+up without re-pairing.
+
+`list_chats(unread_only=True)` returns only unread chats. Archived chats are
+left out, as the phone's unread badge does, unless `include_archived=True`.
+Muted chats are kept and flagged.
 
 Caveats:
 
-- **The marker only moves forward.** Marking an already-read chat as *unread*
-  again on the phone is not reflected.
-- **No marker means no read was ever reported** — for a chat with an inbound
-  last message, `unread` then falls back to the old heuristic and reports
-  true. Stores written by a bridge older than the `chats.last_read_time`
-  column report `last_read_time: null` and behave the same way.
-- **`unread` is a chat-level flag, not an unread count.** WhatsApp's unread
-  counter is not persisted.
+- **The marker only moves forward.** "Mark as unread" is tracked as its own
+  flag (`marked_unread`), not by moving the marker back.
+- **No marker means no read was ever reported.** `unread_count` then counts
+  inbound messages since your own last message in the chat.
+- **Older stores.** A store from a bridge older than these columns reports
+  `archived`/`muted`/`marked_unread` as false and counts unread messages
+  as above.
 
 #### `list_chats`
 

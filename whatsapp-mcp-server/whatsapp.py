@@ -3,7 +3,7 @@ import os
 import os.path
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +99,16 @@ class Chat:
     # chat, from read receipts and history-sync backfill. NULL when the
     # bridge has never seen a read for the chat, or predates the column.
     last_read_time: datetime | None = None
+    # Inbound messages newer than the read marker (see _chat_state_select).
+    # None when not computed, e.g. a Chat built outside the chat queries.
+    unread_count: int | None = None
+    # App-state flags synced from the phone. None = the bridge never reported
+    # one (older bridge, or no app-state event seen for the chat yet).
+    archived: bool | None = None
+    marked_unread: bool | None = None
+    # Mute end in unix milliseconds as WhatsApp reports it: -1 = muted
+    # indefinitely, 0/None = not muted, otherwise muted until that instant.
+    muted_until_ms: int | None = None
 
     @property
     def is_group(self) -> bool:
@@ -117,7 +127,14 @@ class Chat:
         A missing last-message row (`last_is_from_me is None`) cannot establish
         direction — protocol/unsupported events can advance last_message_time
         without storing a message — so those chats are not reported as unread.
+
+        When the chat queries computed `unread_count`, that count decides, and
+        a chat manually marked unread on the phone is always unread.
         """
+        if self.marked_unread:
+            return True
+        if self.unread_count is not None:
+            return self.unread_count > 0
         if self.last_message_time is None or self.last_is_from_me is None:
             return False
         if self.last_is_from_me:
@@ -125,6 +142,23 @@ class Chat:
         if self.last_read_time is None:
             return True
         return self.last_message_time > self.last_read_time
+
+    @property
+    def muted(self) -> bool:
+        if not self.muted_until_ms:
+            return False
+        if self.muted_until_ms < 0:
+            return True
+        return self.muted_until_ms > datetime.now().timestamp() * 1000
+
+    @property
+    def muted_until(self) -> str | None:
+        """ISO end of the mute, "always" for an indefinite mute, None if not muted."""
+        if not self.muted:
+            return None
+        if self.muted_until_ms is not None and self.muted_until_ms < 0:
+            return "always"
+        return datetime.fromtimestamp(self.muted_until_ms / 1000, tz=UTC).isoformat()
 
 
 @dataclass
@@ -191,6 +225,11 @@ def chat_to_dict(chat: "Chat") -> dict[str, Any]:
         "last_is_from_me": chat.last_is_from_me,
         "last_read_time": chat.last_read_time.isoformat() if chat.last_read_time else None,
         "unread": chat.unread,
+        "unread_count": chat.unread_count,
+        "marked_unread": bool(chat.marked_unread),
+        "archived": bool(chat.archived),
+        "muted": chat.muted,
+        "muted_until": chat.muted_until,
     }
 
 
@@ -199,15 +238,72 @@ def contact_to_dict(contact: "Contact") -> dict[str, Any]:
     return {"phone_number": contact.phone_number, "name": contact.name, "jid": contact.jid}
 
 
-def _last_read_time_select(cursor: sqlite3.Cursor, table_alias: str) -> str:
-    """SELECT expression for chats.last_read_time, or a NULL literal.
+def _table_columns(cursor: sqlite3.Cursor, table: str) -> set[str]:
+    return {row[1] for row in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
 
-    The bridge adds the column through its own migration, so a messages.db
-    written by an older bridge doesn't have it yet. Reads must keep working
-    against such a store — those chats simply report last_read_time = None.
+
+def _chat_state_select(cursor: sqlite3.Cursor, chat_alias: str) -> str:
+    """SELECT expressions for a chat's read and app-state columns.
+
+    Yields five columns, in order: last_read_time, state_archived,
+    state_muted_until, state_marked_unread, state_unread_count. Read them
+    back with _chat_from_row.
+
+    The bridge adds these columns through its own migrations, so a
+    messages.db written by an older bridge may lack any of them. Reads must
+    keep working against such a store; a missing column reads as NULL.
+
+    state_unread_count counts inbound messages newer than the point the chat
+    was last read: the later of the read marker and our own latest message
+    (replying means we saw what came before; it is also the only signal for
+    a chat with no marker). Reactions and deleted messages are not counted,
+    matching the phone's badge, and status@broadcast never counts.
+    Timestamps are compared as stored text, which the bridge writes in one
+    fixed format.
     """
-    columns = {row[1] for row in cursor.execute("PRAGMA table_info(chats)").fetchall()}
-    return f"{table_alias}.last_read_time" if "last_read_time" in columns else "NULL"
+    chat_columns = _table_columns(cursor, "chats")
+    message_columns = _table_columns(cursor, "messages")
+
+    def column(name: str) -> str:
+        return f"{chat_alias}.{name}" if name in chat_columns else "NULL"
+
+    not_deleted = "AND u.deleted_at IS NULL" if "deleted_at" in message_columns else ""
+    read_through = f"""MAX(
+                COALESCE({column("last_read_time")}, ''),
+                COALESCE((SELECT MAX(o.timestamp) FROM messages o
+                          WHERE o.chat_jid = {chat_alias}.jid AND o.is_from_me = 1), '')
+            )"""
+    unread_count = f"""CASE WHEN {chat_alias}.jid = 'status@broadcast' THEN 0 ELSE (
+                SELECT COUNT(*) FROM messages u
+                WHERE u.chat_jid = {chat_alias}.jid
+                  AND u.is_from_me = 0
+                  AND (u.media_type IS NULL OR u.media_type != 'reaction')
+                  {not_deleted}
+                  AND u.timestamp > {read_through}
+            ) END"""
+    return f"""{column("last_read_time")} AS last_read_time,
+                {column("archived")} AS state_archived,
+                {column("muted_until")} AS state_muted_until,
+                {column("marked_unread")} AS state_marked_unread,
+                {unread_count} AS state_unread_count"""
+
+
+def _chat_from_row(row: tuple, name: str | None) -> "Chat":
+    """Build a Chat from jid, name, last_message_time, last_message,
+    last_sender, last_is_from_me, then the _chat_state_select columns."""
+    return Chat(
+        jid=row[0],
+        name=name,
+        last_message_time=datetime.fromisoformat(row[2]) if row[2] else None,
+        last_message=row[3],
+        last_sender=row[4],
+        last_is_from_me=row[5],
+        last_read_time=datetime.fromisoformat(row[6]) if row[6] else None,
+        archived=None if row[7] is None else bool(row[7]),
+        muted_until_ms=row[8],
+        marked_unread=None if row[9] is None else bool(row[9]),
+        unread_count=row[10],
+    )
 
 
 def _last_message_join(chat_alias: str, msg_alias: str) -> str:
@@ -755,8 +851,15 @@ def list_chats(
     page: int = 0,
     include_last_message: bool = True,
     sort_by: str = "last_active",
+    unread_only: bool = False,
+    include_archived: bool = False,
 ) -> list[dict[str, Any]]:
     """Get chats matching the specified criteria.
+
+    With unread_only, only unread chats are returned (unread messages, or
+    marked unread on the phone). Archived chats are then left out, as the
+    phone's unread badge does, unless include_archived is set. Muted chats
+    stay in; callers can rank them by the `muted` flag.
 
     Returns:
         List of chat dictionaries with jid, name, is_group, last_message, etc.
@@ -795,7 +898,7 @@ def list_chats(
                 chats.last_message_time,
                 {last_message_select},
                 messages.is_from_me as last_is_from_me,
-                {_last_read_time_select(cursor, "chats")}
+                {_chat_state_select(cursor, "chats")}
             FROM chats
             {_last_message_join("chats", "messages")}
         """
@@ -817,6 +920,12 @@ def list_chats(
             )
             params.extend([query, query, f"%{query}%"])
 
+        if unread_only:
+            # SQLite resolves these result-column aliases in WHERE.
+            where_clauses.append("(state_marked_unread = 1 OR state_unread_count > 0)")
+            if not include_archived:
+                where_clauses.append("COALESCE(state_archived, 0) = 0")
+
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
 
@@ -836,15 +945,7 @@ def list_chats(
 
         result = []
         for chat_data in chats:
-            chat = Chat(
-                jid=chat_data[0],
-                name=name_for_chat(chat_data[0], chat_data[1]),
-                last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-                last_message=chat_data[3],
-                last_sender=chat_data[4],
-                last_is_from_me=chat_data[5],
-                last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
-            )
+            chat = _chat_from_row(chat_data, name_for_chat(chat_data[0], chat_data[1]))
             result.append(chat_to_dict(chat))
 
         return result
@@ -953,7 +1054,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
                 last_msg.content as last_message,
                 last_msg.sender as last_sender,
                 last_msg.is_from_me as last_is_from_me,
-                {_last_read_time_select(cursor, "c")}
+                {_chat_state_select(cursor, "c")}
             FROM chats c
             {_last_message_join("c", "last_msg")}
             WHERE EXISTS (
@@ -972,15 +1073,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
 
         result = []
         for chat_data in chats:
-            chat = Chat(
-                jid=chat_data[0],
-                name=_display_chat_name(chat_data[0], chat_data[1]),
-                last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-                last_message=chat_data[3],
-                last_sender=chat_data[4],
-                last_is_from_me=chat_data[5],
-                last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
-            )
+            chat = _chat_from_row(chat_data, _display_chat_name(chat_data[0], chat_data[1]))
             result.append(chat_to_dict(chat))
 
         return result
@@ -1078,7 +1171,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
                 c.last_message_time,
                 {last_message_select},
                 m.is_from_me as last_is_from_me,
-                {_last_read_time_select(cursor, "c")}
+                {_chat_state_select(cursor, "c")}
             FROM chats c
             {_last_message_join("c", "m")}
             WHERE c.jid = ?
@@ -1090,15 +1183,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
         if not chat_data:
             return None
 
-        chat = Chat(
-            jid=chat_data[0],
-            name=_display_chat_name(chat_data[0], chat_data[1]),
-            last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-            last_message=chat_data[3],
-            last_sender=chat_data[4],
-            last_is_from_me=chat_data[5],
-            last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
-        )
+        chat = _chat_from_row(chat_data, _display_chat_name(chat_data[0], chat_data[1]))
         return chat_to_dict(chat)
 
     except sqlite3.Error as e:
@@ -1124,7 +1209,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
                 m.content as last_message,
                 m.sender as last_sender,
                 m.is_from_me as last_is_from_me,
-                {_last_read_time_select(cursor, "c")}
+                {_chat_state_select(cursor, "c")}
             FROM chats c
             {_last_message_join("c", "m")}
             WHERE c.jid LIKE ? ESCAPE '\\' AND c.jid NOT LIKE '%@g.us'
@@ -1138,15 +1223,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
         if not chat_data:
             return None
 
-        chat = Chat(
-            jid=chat_data[0],
-            name=_display_chat_name(chat_data[0], chat_data[1]),
-            last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-            last_message=chat_data[3],
-            last_sender=chat_data[4],
-            last_is_from_me=chat_data[5],
-            last_read_time=datetime.fromisoformat(chat_data[6]) if chat_data[6] else None,
-        )
+        chat = _chat_from_row(chat_data, _display_chat_name(chat_data[0], chat_data[1]))
         return chat_to_dict(chat)
 
     except sqlite3.Error as e:

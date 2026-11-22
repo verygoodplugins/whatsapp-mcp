@@ -235,6 +235,8 @@ def list_chats(
     page: int = 0,
     include_last_message: bool = True,
     sort_by: str = "last_active",
+    unread_only: bool = False,
+    include_archived: bool = False,
 ) -> list[dict[str, Any]]:
     """Get WhatsApp chats matching specified criteria.
 
@@ -244,20 +246,37 @@ def list_chats(
         page: Page number for pagination (default 0)
         include_last_message: Include the last message in each chat (default True)
         sort_by: "last_active" (default, most recent first) or "name" (alphabetical)
+        unread_only: Only return unread chats, like the phone's unread filter. Archived
+            chats are left out, as the phone's badge does, unless include_archived is set.
+            Muted chats are kept (check `muted`).
+        include_archived: With unread_only, also return unread archived chats (default False).
+            Without unread_only, archived chats are always listed.
 
     Returns:
         Chat dictionaries with jid, name, is_group, last_message_time, last_message,
-        last_sender, last_is_from_me, last_read_time and unread. `last_read_time` is
-        how far the chat has been read on any device (null if never reported); `unread`
-        is true when the last message is inbound and newer than that marker, so chats
-        already read on the phone are not reported as unread. Numeric fallback names
-        are resolved from local contacts when possible, even while the bridge is offline.
+        last_sender, last_is_from_me, last_read_time, unread, unread_count, marked_unread,
+        archived, muted and muted_until.
+        - `last_read_time`: how far the chat has been read on any device (null if never reported).
+        - `unread_count`: inbound messages newer than both that marker and our own latest
+          message, excluding reactions and deleted messages.
+        - `unread`: true when unread_count > 0 or the chat was marked unread on the phone, so
+          chats already read on the phone are not reported.
+        - `archived`, `muted`, `marked_unread`: synced from the phone.
+        - `muted_until`: ISO time, "always" for an indefinite mute, or null.
+        Numeric fallback names are resolved from local contacts when possible, even while the
+        bridge is offline.
     """
     # Cap limit at 200 to prevent excessive queries
     limit = max(1, min(limit, 200))
     page = max(0, page)
     chats = whatsapp_list_chats(
-        query=query, limit=limit, page=page, include_last_message=include_last_message, sort_by=sort_by
+        query=query,
+        limit=limit,
+        page=page,
+        include_last_message=include_last_message,
+        sort_by=sort_by,
+        unread_only=unread_only,
+        include_archived=include_archived,
     )
     return chats
 
@@ -271,7 +290,8 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
         include_last_message: Whether to include the last message (default True)
 
     Returns:
-        Chat dictionary — same shape as list_chats, including last_read_time and unread.
+        Chat dictionary — same shape as list_chats, including the read state
+        (last_read_time, unread, unread_count) and archived/muted/marked_unread.
     """
     chat = whatsapp_get_chat(chat_jid, include_last_message)
     return chat
