@@ -34,9 +34,16 @@ var (
 	chatFlagMarkedUnread = chatFlag{"marked_unread", "marked_unread_ts"}
 )
 
-// ensureChatStateColumns adds the app-state columns; part of
+// ensureChatStateColumns adds the app-state columns and the unread-count
+// index; part of
 // ensureMessageStoreSchema.
 func ensureChatStateColumns(db *sql.DB) error {
+	// Serves the MCP server's per-chat unread count: the latest outbound
+	// message and the inbound messages after a point, both per chat.
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_chat_from_me_ts
+		ON messages(chat_jid, is_from_me, timestamp)`); err != nil {
+		return fmt.Errorf("failed to create idx_messages_chat_from_me_ts: %w", err)
+	}
 	for _, flag := range []chatFlag{chatFlagArchived, chatFlagMutedUntil, chatFlagMarkedUnread} {
 		if err := ensureColumn(db, "chats", flag.value, "INTEGER"); err != nil {
 			return fmt.Errorf("failed to ensure chats.%s column: %w", flag.value, err)

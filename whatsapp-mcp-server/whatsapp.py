@@ -268,18 +268,27 @@ def _chat_state_select(cursor: sqlite3.Cursor, chat_alias: str) -> str:
         return f"{chat_alias}.{name}" if name in chat_columns else "NULL"
 
     not_deleted = "AND u.deleted_at IS NULL" if "deleted_at" in message_columns else ""
-    read_through = f"""MAX(
-                COALESCE({column("last_read_time")}, ''),
-                COALESCE((SELECT MAX(o.timestamp) FROM messages o
-                          WHERE o.chat_jid = {chat_alias}.jid AND o.is_from_me = 1), '')
-            )"""
+    # The read-through point is computed once per chat in a one-row derived
+    # table. Written inline in the WHERE, SQLite re-ran the correlated MAX for
+    # every message row: quadratic, minutes on a chat with ~60k messages.
+    # CROSS JOIN pins rt as the outer loop; with a plain JOIN the planner may
+    # put it inside and re-run it per message all the same.
+    # The bridge's idx_messages_chat_from_me_ts index turns both the MAX and
+    # the range count into index lookups.
     unread_count = f"""CASE WHEN {chat_alias}.jid = 'status@broadcast' THEN 0 ELSE (
-                SELECT COUNT(*) FROM messages u
-                WHERE u.chat_jid = {chat_alias}.jid
-                  AND u.is_from_me = 0
-                  AND (u.media_type IS NULL OR u.media_type != 'reaction')
+                SELECT COUNT(*)
+                FROM (
+                    SELECT MAX(
+                        COALESCE({column("last_read_time")}, ''),
+                        COALESCE((SELECT MAX(o.timestamp) FROM messages o
+                                  WHERE o.chat_jid = {chat_alias}.jid AND o.is_from_me = 1), '')
+                    ) AS read_through
+                ) rt
+                CROSS JOIN messages u ON u.chat_jid = {chat_alias}.jid
+                    AND u.is_from_me = 0
+                    AND u.timestamp > rt.read_through
+                WHERE (u.media_type IS NULL OR u.media_type != 'reaction')
                   {not_deleted}
-                  AND u.timestamp > {read_through}
             ) END"""
     return f"""{column("last_read_time")} AS last_read_time,
                 {column("archived")} AS state_archived,
