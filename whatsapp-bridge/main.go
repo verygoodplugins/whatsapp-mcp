@@ -295,7 +295,7 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "quoted_message_id", "TEXT"); err != nil {
 		return fmt.Errorf("failed to ensure messages.quoted_message_id column: %w", err)
 	}
-	return nil
+	return ensureChatStateColumns(db)
 }
 
 func ensureColumn(db *sql.DB, tableName, columnName, columnSpec string) error {
@@ -3171,6 +3171,9 @@ func main() {
 			return
 		}
 		connection.handleEvent(evt)
+		if handleChatStateEvent(client, messageStore, evt, logger) {
+			return
+		}
 		switch v := evt.(type) {
 		case *events.Message:
 			// Process regular messages
@@ -3206,6 +3209,10 @@ func main() {
 				}
 				if err := messageStore.MarkChatRead(chatJID, readAt); err != nil {
 					logger.Warnf("Failed to mark chat %s read: %v", chatJID, err)
+				}
+				// Opening a chat on the phone clears a manual "mark as unread".
+				if err := messageStore.SetChatMarkedUnread(chatJID, false, v.Timestamp); err != nil {
+					logger.Warnf("Failed to clear marked-unread for %s: %v", chatJID, err)
 				}
 			}
 
@@ -3260,6 +3267,7 @@ func main() {
 
 		case *events.Connected:
 			logger.Infof("✓ Successfully connected to WhatsApp servers")
+			go syncChatStateOnce(context.Background(), client, logger)
 
 		case *events.LoggedOut:
 			logger.Warnf("⚠️  Device logged out, please scan QR code to log in again")
@@ -3269,6 +3277,9 @@ func main() {
 		}
 	}
 	registerEvents = func(client *whatsmeow.Client) {
+		// Needed for syncChatStateOnce: without it a full app-state sync
+		// updates whatsmeow's store but emits no Archive/Mute events.
+		client.EmitAppStateEventsOnFullSync = true
 		client.AddEventHandler(func(evt interface{}) { eventHandler(client, evt) })
 	}
 	registerEvents(client)
@@ -3620,6 +3631,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					logger.Warnf("Failed to backfill read state for %s: %v", chatJID, err)
 				}
 			}
+			storeHistoryChatState(messageStore, chatJID, conversation, logger)
 			if err := messageStore.UpdateChatEphemeralSettings(
 				chatJID,
 				conversation.GetEphemeralExpiration(),
