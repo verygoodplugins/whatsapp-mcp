@@ -483,6 +483,8 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WEBHOOK_ENABLED`      | `true`                                   | Set to `false` to disable outbound webhooks  |
 | `WHATSAPP_AUTO_DOWNLOAD_MEDIA` | `true` | Automatically download incoming media, including webhook image bytes. `false` keeps webhook metadata/text without `mediaBase64` and leaves downloads to `/api/download` (`download_media`); delayed downloads may fail after media expires. Status messages are stored but never auto-downloaded or forwarded |
 | `FORWARD_SELF`         | `true`                                   | Forward messages sent by self                |
+| `INCOMING_WEBHOOK_URL` | unset | Optional secondary webhook (never logged). POSTs `{chat_jid, sender_name, sender_phone, timestamp, message_id, content, media_type}` for new inbound, non-history messages in `INCOMING_WEBHOOK_JIDS`. Async, 10s timeout, independent of `WEBHOOK_ENABLED` |
+| `INCOMING_WEBHOOK_JIDS` | empty | Comma-separated chat JIDs for `INCOMING_WEBHOOK_URL`; empty sends nothing |
 | `WHATSAPP_DB_PATH`     | `../whatsapp-bridge/store/messages.db`   | Path to SQLite database                      |
 | `WHATSMEOW_DB_PATH`    | `../whatsapp-bridge/store/whatsapp.db`   | whatsmeow DB used for LID ↔ phone resolution |
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |

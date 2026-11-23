@@ -2179,6 +2179,13 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			msg.Info.ID, chatJID, err)
 	}
 
+	// Optional per-chat incoming webhook (incoming_webhook.go). handleMessage
+	// only sees live events (history sync goes through handleHistorySync), so
+	// this fires for new inbound messages only. Delivery is asynchronous.
+	if !msg.Info.IsFromMe && incomingWebhookConfig.matches(chatJID, msg.Info.Chat.String()) {
+		incomingWebhookConfig.notifyAsync(buildIncomingWebhookPayload(chatJID, msg.Info.PushName, resolvedSender, msgTimestamp, msg.Info.ID, content, mediaType))
+	}
+
 	var quotedIsFromMe *bool
 	if quotedMessageId != "" {
 		var lookupErr error
