@@ -94,6 +94,8 @@ For PR creation, hosted review, CI, and merge readiness, use the installed `baby
 | `WEBHOOK_ENABLED` | `true` | Set to `false` to disable outbound webhooks entirely |
 | `WHATSAPP_AUTO_DOWNLOAD_MEDIA` | `true` | Automatically download incoming media, including webhook image bytes. `false` keeps webhook metadata/text without `mediaBase64` and leaves downloads to `/api/download` (`download_media`); delayed downloads may fail after media expires. Status messages are stored but never auto-downloaded or forwarded |
 | `FORWARD_SELF` | `true` | Whether self-sent messages are forwarded (`getEnvBool` default; set `FORWARD_SELF=false` to disable) |
+| `INCOMING_WEBHOOK_URL` | unset | Optional secondary webhook for new inbound messages from `INCOMING_WEBHOOK_JIDS` (`incoming_webhook.go`). Treated as a secret: never logged |
+| `INCOMING_WEBHOOK_JIDS` | empty | Comma-separated chat JIDs (`…@s.whatsapp.net`, `…@g.us`, or `…@lid`) for `INCOMING_WEBHOOK_URL`; empty sends nothing |
 | `WHATSAPP_PARENT_WATCHDOG_S` | `30` | Stdio parent-liveness poll interval (seconds). Exits when the original parent is gone (POSIX reparent). Soft stdin EOF alone does not exit. |
 | `WHISPER_MODEL` | unset | Required model-file path for default whisper.cpp transcription |
 | `WHISPER_LANGUAGE` | `auto` | Language for whisper.cpp transcription |
