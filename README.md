@@ -810,7 +810,12 @@ Caveats:
 
 History sync preserves the same supported message text as live reception,
 including WhatsApp Business templates, button messages, and image/video/document
-captions. Shared contact cards are searchable text containing the display name
+captions. Interactive messages (buttons, lists, native-flow buttons and template
+buttons) keep their options: the stored text ends with a line such as
+`[Options: 1) Consulta (id=btn-consulta) | 2) Site (link: https://…)]`, and the
+bridge saves each option's kind, ID and label in `messages.interactive_options`.
+WhatsApp Flow forms are listed as `(form, cannot be answered)`.
+Shared contact cards are searchable text containing the display name
 and phone numbers; they do not require a media download. Live contact cards
 retain reply context and disappearing-message settings. Raw history envelopes
 are unwrapped using the same parser as live events. This applies to both
