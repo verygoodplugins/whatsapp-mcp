@@ -2778,6 +2778,23 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	}))
 
+	mux.HandleFunc("/api/reply-option", auth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req ReplyOptionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ChatJID == "" || req.MessageID == "" || strings.TrimSpace(req.Option) == "" {
+			http.Error(w, "chat_jid, message_id, and option are required", http.StatusBadRequest)
+			return
+		}
+		status, message := replyWithOption(client, messageStore, req)
+		fmt.Printf("← /api/reply-option chat=%q message_id=%q status=%d\n", req.ChatJID, req.MessageID, status)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(SendMessageResponse{Success: status == http.StatusOK, Message: message})
+	}))
+
 	// Handler for downloading media
 	mux.HandleFunc("/api/download", auth(func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests

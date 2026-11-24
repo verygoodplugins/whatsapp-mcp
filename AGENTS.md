@@ -114,6 +114,7 @@ When adding a new env var: document it here, in `README.md`, and in `.env.exampl
 5. **`messages.db` is the source of truth for the MCP server.** Don't make the MCP server dependent on the bridge being up for *read* operations. The server opens it read-only via `_connect_messages_db()` and raises `FileNotFoundError` if it is missing rather than letting `sqlite3.connect` create an empty one; keep new read paths on that helper.
 6. **Outgoing calls are not visible to linked devices.** Don't promise features that depend on them.
 7. **Intel macOS dependency builds.** Patched `cryptography` is required even when Intel Mac wheels are unavailable. Source builds need Rust, OpenSSL, pkg-config, and Xcode Command Line Tools (see README prerequisites); do not restore the old `<49` pin to avoid installing build tools.
+8. **Interactive messages** (buttons, lists, native-flow and template buttons) store their options in `messages.interactive_options`, together with the original sub-message so a reply can quote it. `POST /api/reply-option` (see `whatsapp-bridge/interactive.go`) answers only buttons, list rows and quick replies; links, calls and WhatsApp Flow forms are rejected.
 
 ## Where to make changes
 

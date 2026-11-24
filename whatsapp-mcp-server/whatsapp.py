@@ -1341,6 +1341,26 @@ def send_reaction(
         return False, f"Unexpected error: {str(e)}"
 
 
+def reply_with_option(chat_jid: str, message_id: str, option: str) -> tuple[bool, str]:
+    if not chat_jid or not message_id or not option.strip():
+        return False, "chat_jid, message_id and option must be provided"
+    try:
+        response = requests.post(
+            f"{WHATSAPP_API_BASE_URL}/reply-option",
+            json={"chat_jid": chat_jid, "message_id": message_id, "option": option},
+            headers=_bridge_headers(),
+        )
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    try:
+        result = response.json()
+    except ValueError:
+        return False, f"Error: HTTP {response.status_code} - {response.text}"
+    if response.status_code == 200 and result.get("success"):
+        return True, result.get("message", "Option sent")
+    return False, f"Error: HTTP {response.status_code} - {result.get('message', response.text)}"
+
+
 def mark_messages_read(
     message_ids: list[str],
     chat_jid: str,
