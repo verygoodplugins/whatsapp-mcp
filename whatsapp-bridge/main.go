@@ -174,6 +174,11 @@ func mediaDownloadStorePaths(chatJID, mediaType, messageID string, timestamp tim
 	return chatDir, localPath, filename, nil
 }
 
+// sqliteWriteDSNParams enables WAL journaling and NORMAL sync for the bridge
+// and whatsmeow SQLite stores so history-sync bursts avoid per-message fsyncs
+// and do not block concurrent read-only queries from the MCP server.
+const sqliteWriteDSNParams = "_foreign_keys=on&_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000"
+
 // Initialize message store
 func NewMessageStore() (*MessageStore, error) {
 	// Create directory for database if it doesn't exist. Owner-only (0700):
@@ -184,7 +189,7 @@ func NewMessageStore() (*MessageStore, error) {
 	}
 
 	// Open SQLite database for messages
-	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on")
+	db, err := sql.Open("sqlite3", "file:store/messages.db?"+sqliteWriteDSNParams)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
@@ -268,7 +273,7 @@ func openWhatsmeowContactsDB(path string) (*sql.DB, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?mode=ro", path))
+	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?mode=ro&_busy_timeout=5000", path))
 	if err != nil {
 		return nil, err
 	}
@@ -3028,7 +3033,7 @@ func main() {
 		return
 	}
 
-	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
+	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?"+sqliteWriteDSNParams, dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return
