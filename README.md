@@ -269,6 +269,22 @@ When webhook forwarding is enabled, inbound reactions are also posted to `WEBHOO
 - "React to that message with a thumbs up"
 - "Remove my reaction from the last message in the group chat"
 
+#### `reply_to_interactive_message`
+
+Tap a button or pick a list row in a business bot's interactive message. Some bots ignore typed answers and only accept a tap.
+
+**Parameters:**
+
+- `chat_jid` (required): Chat JID of the interactive message
+- `message_id` (required): ID of the message that offered the options
+- `option` (required): Option ID, label (case-insensitive) or 1-based position, as shown in the `[Options: ...]` line that `list_messages` returns for the message
+
+The bridge sends the native response for the message type (`ButtonsResponseMessage`, `ListResponseMessage`, `InteractiveResponseMessage` for `quick_reply` buttons, or `TemplateButtonReplyMessage`), quotes the original message and stores the reply in `messages.db`. Links, call buttons and WhatsApp Flow forms are rejected with HTTP 422. The bridge endpoint is `POST /api/reply-option` with `{"chat_jid", "message_id", "option"}`.
+
+**Natural Language Examples:**
+
+- "Choose 'Consulta' in the hospital bot's last message"
+
 #### `send_file`
 
 Send a media file (image, video, document).
@@ -810,7 +826,12 @@ Caveats:
 
 History sync preserves the same supported message text as live reception,
 including WhatsApp Business templates, button messages, and image/video/document
-captions. Shared contact cards are searchable text containing the display name
+captions. Interactive messages (buttons, lists, native-flow buttons and template
+buttons) keep their options: the stored text ends with a line such as
+`[Options: 1) Consulta (id=btn-consulta) | 2) Site (link: https://…)]`, and the
+bridge saves each option's kind, ID and label in `messages.interactive_options`.
+WhatsApp Flow forms are listed as `(form, cannot be answered)`.
+Shared contact cards are searchable text containing the display name
 and phone numbers; they do not require a media download. Live contact cards
 retain reply context and disappearing-message settings. Raw history envelopes
 are unwrapped using the same parser as live events. This applies to both
@@ -942,12 +963,13 @@ flowchart LR
         READ["/api/mark-read"]
         DOWN["/api/download"]
         REACT["/api/react"]
+        OPTION["/api/reply-option"]
         TYPE["/api/typing"]
         HIST["/api/history"]
         HEALTH["/api/health"]
     end
 
-    subgraph MCPTools["MCP Tools (15 total)"]
+    subgraph MCPTools["MCP Tools (19 total)"]
         direction TB
         CONT["Contact Tools<br/>search_contacts, get_contact"]
         MSG["Message Tools<br/>list_messages, send_message, etc."]

@@ -46,6 +46,9 @@ from whatsapp import (
     mark_messages_read as whatsapp_mark_messages_read,
 )
 from whatsapp import (
+    reply_with_option as whatsapp_reply_with_option,
+)
+from whatsapp import (
     search_contacts as whatsapp_search_contacts,
 )
 from whatsapp import (
@@ -397,6 +400,28 @@ def send_reaction(
         A dictionary containing success status and a status message
     """
     success, status_message = whatsapp_send_reaction(recipient, message_id, emoji, from_me, sender_jid)
+    return {"success": success, "message": status_message}
+
+
+@mcp.tool()
+def reply_to_interactive_message(chat_jid: str, message_id: str, option: str) -> dict[str, Any]:
+    """Tap a button or pick a list row in a business bot's interactive message.
+
+    Use this when a bot shows buttons or a list and ignores typed answers. First call
+    list_messages for the chat: interactive messages end with a line like
+    "[Options: 1) Consulta (id=btn-consulta) | 2) Exame (id=btn-exame)]". Pass one of
+    those options. Links, call buttons and forms marked "cannot be answered" are not
+    supported.
+
+    Args:
+        chat_jid: The chat JID of the interactive message (e.g., "12025551234@s.whatsapp.net")
+        message_id: The ID of the message that offered the options
+        option: The option ID, its label (case-insensitive) or its number in the list
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    success, status_message = whatsapp_reply_with_option(chat_jid, message_id, option)
     return {"success": success, "message": status_message}
 
 
