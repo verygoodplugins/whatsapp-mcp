@@ -295,6 +295,9 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "quoted_message_id", "TEXT"); err != nil {
 		return fmt.Errorf("failed to ensure messages.quoted_message_id column: %w", err)
 	}
+	if err := ensureColumn(db, "messages", "interactive_options", "TEXT"); err != nil {
+		return fmt.Errorf("failed to ensure messages.interactive_options column: %w", err)
+	}
 	return nil
 }
 
@@ -1102,8 +1105,12 @@ func unwrapMessageContent(msg *waProto.Message) *waProto.Message {
 	return (&events.Message{RawMessage: msg}).UnwrapRaw().Message
 }
 
-// Extract text content from a message.
+// Extract text content from a message, followed by its interactive options.
 func extractTextContent(msg *waProto.Message) string {
+	return appendOptionsText(extractBodyText(msg), extractInteractiveOptions(msg))
+}
+
+func extractBodyText(msg *waProto.Message) string {
 	msg = unwrapMessageContent(msg)
 	if msg == nil {
 		return ""
@@ -2170,6 +2177,11 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		quotedMessageId,
 	)
 	stored := err == nil
+	if stored {
+		if optErr := messageStore.StoreInteractiveOptions(msg.Info.ID, chatJID, extractInteractiveOptions(msg.Message)); optErr != nil {
+			logger.Warnf("Failed to store interactive options for %s: %v", msg.Info.ID, optErr)
+		}
+	}
 	if !stored {
 		// The row is what /api/download, get_message_context and mark-read key
 		// on; without it the message exists only downstream. Still forward the
@@ -3736,6 +3748,9 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				if err != nil {
 					logger.Warnf("Failed to store history message: %v", err)
 				} else {
+					if optErr := messageStore.StoreInteractiveOptions(msgID, chatJID, extractInteractiveOptions(msg.Message.Message)); optErr != nil {
+						logger.Warnf("Failed to store interactive options for %s: %v", msgID, optErr)
+					}
 					syncedCount++
 					// Log successful message storage
 					if mediaType != "" {

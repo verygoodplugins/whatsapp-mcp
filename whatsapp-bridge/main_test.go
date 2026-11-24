@@ -108,6 +108,7 @@ func newTestMessageStore(t *testing.T) *MessageStore {
 			file_length INTEGER,
 			deleted_at TIMESTAMP,
 			quoted_message_id TEXT,
+			interactive_options TEXT,
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
@@ -1466,6 +1467,33 @@ func TestExtractTextContent_SurfacesMediaCaptions(t *testing.T) {
 				ListMessage: &waProto.ListMessage{Description: proto.String("choose an option")},
 			},
 			want: "choose an option",
+		},
+		{
+			name: "ButtonsMessage appends its buttons",
+			msg:  &waProto.Message{ButtonsMessage: sampleButtonsMessage()},
+			want: "Selecione o tipo de agendamento:\n[Options: 1) Consulta (id=btn-consulta) | 2) Exame (id=btn-exame)]",
+		},
+		{
+			name: "ListMessage appends rows from every section",
+			msg:  &waProto.Message{ListMessage: sampleListMessage()},
+			want: "Escolha a unidade\n[Options: 1) Centro (id=row-centro) | 2) Norte (id=row-norte)]",
+		},
+		{
+			name: "InteractiveMessage appends native flow buttons",
+			msg:  &waProto.Message{InteractiveMessage: sampleInteractiveMessage()},
+			want: "Como podemos ajudar?\n[Options: 1) Sim (id=qr-sim) | 2) Site (link: https://example.com) | 3) Ligar (call: +5511999990000) | 4) Agendar (form, cannot be answered)]",
+		},
+		{
+			name: "TemplateMessage appends hydrated buttons",
+			msg:  &waProto.Message{TemplateMessage: sampleTemplateMessage()},
+			want: "Confirma a consulta?\n[Options: 1) Confirmar (id=tpl-yes) | 2) Detalhes (link: https://example.com/c)]",
+		},
+		{
+			name: "ButtonsMessage without body still surfaces its buttons",
+			msg: &waProto.Message{ButtonsMessage: &waProto.ButtonsMessage{Buttons: []*waProto.ButtonsMessage_Button{
+				{ButtonID: proto.String("b1"), ButtonText: &waProto.ButtonsMessage_Button_ButtonText{DisplayText: proto.String("Ok")}},
+			}}},
+			want: "[Options: 1) Ok (id=b1)]",
 		},
 		{
 			name: "ButtonsResponseMessage with selected display text",
