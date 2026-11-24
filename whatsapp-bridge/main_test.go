@@ -19,6 +19,7 @@ import (
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/store"
+	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -3086,6 +3087,92 @@ func TestNewMessageStoreCreatesMessagesChatJIDIndex(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected idx_messages_chat_jid to exist, found %d", count)
+	}
+}
+
+func TestNewMessageStoreConfiguresSQLiteWALAndTimeouts(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	ms, err := NewMessageStore()
+	if err != nil {
+		t.Fatalf("NewMessageStore() failed: %v", err)
+	}
+	defer func() { _ = ms.Close() }()
+
+	var journalMode string
+	if err := ms.db.QueryRow("PRAGMA journal_mode;").Scan(&journalMode); err != nil {
+		t.Fatalf("query journal_mode: %v", err)
+	}
+	if !strings.EqualFold(journalMode, "wal") {
+		t.Fatalf("expected journal_mode=wal, got %q", journalMode)
+	}
+
+	var synchronous int
+	if err := ms.db.QueryRow("PRAGMA synchronous;").Scan(&synchronous); err != nil {
+		t.Fatalf("query synchronous: %v", err)
+	}
+	if synchronous != 1 {
+		t.Fatalf("expected synchronous=1 (NORMAL), got %d", synchronous)
+	}
+
+	var busyTimeout int
+	if err := ms.db.QueryRow("PRAGMA busy_timeout;").Scan(&busyTimeout); err != nil {
+		t.Fatalf("query busy_timeout: %v", err)
+	}
+	if busyTimeout != 5000 {
+		t.Fatalf("expected busy_timeout=5000, got %d", busyTimeout)
+	}
+
+	var foreignKeys int
+	if err := ms.db.QueryRow("PRAGMA foreign_keys;").Scan(&foreignKeys); err != nil {
+		t.Fatalf("query foreign_keys: %v", err)
+	}
+	if foreignKeys != 1 {
+		t.Fatalf("expected foreign_keys=1, got %d", foreignKeys)
+	}
+}
+
+func TestWhatsmeowStoreWALConcurrentReadOnly(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "whatsapp.db")
+
+	container, err := sqlstore.New(
+		context.Background(),
+		"sqlite3",
+		"file:"+dbPath+"?"+sqliteWriteDSNParams,
+		waLog.Noop,
+	)
+	if err != nil {
+		t.Fatalf("sqlstore.New() failed: %v", err)
+	}
+	defer func() { _ = container.Close() }()
+
+	roDB, err := openWhatsmeowContactsDB(dbPath)
+	if err != nil {
+		t.Fatalf("openWhatsmeowContactsDB() failed on WAL store: %v", err)
+	}
+	if roDB == nil {
+		t.Fatalf("expected non-nil read-only DB handle")
+	}
+	defer func() { _ = roDB.Close() }()
+
+	var journalMode string
+	if err := roDB.QueryRow("PRAGMA journal_mode;").Scan(&journalMode); err != nil {
+		t.Fatalf("query journal_mode on whatsapp.db: %v", err)
+	}
+	if !strings.EqualFold(journalMode, "wal") {
+		t.Fatalf("expected whatsapp.db journal_mode=wal, got %q", journalMode)
+	}
+
+	var busyTimeout int
+	if err := roDB.QueryRow("PRAGMA busy_timeout;").Scan(&busyTimeout); err != nil {
+		t.Fatalf("query busy_timeout on read-only whatsapp.db: %v", err)
+	}
+	if busyTimeout != 5000 {
+		t.Fatalf("expected read-only busy_timeout=5000, got %d", busyTimeout)
+	}
+
+	if _, err := roDB.Exec("CREATE TABLE should_fail (id INTEGER)"); err == nil {
+		t.Fatalf("expected write via openWhatsmeowContactsDB() to fail on read-only connection")
 	}
 }
 

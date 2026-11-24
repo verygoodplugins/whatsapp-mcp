@@ -94,3 +94,37 @@ def test_messages_db_path_with_uri_special_characters(tmp_path, monkeypatch):
 
     assert whatsapp.list_chats() == []
     assert whatsapp.list_messages(include_context=False) == []
+
+
+def test_messages_db_reads_wal_mode_database_read_only(tmp_path, monkeypatch):
+    db = _make_db(tmp_path / "messages.db")
+    writer = sqlite3.connect(db)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA synchronous=NORMAL")
+        writer.execute(
+            "INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)",
+            ("15551234567@s.whatsapp.net", "Alice", "2026-11-02T12:00:00Z"),
+        )
+        writer.execute(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me) VALUES (?, ?, ?, ?, ?, ?)",
+            ("msg-wal-1", "15551234567@s.whatsapp.net", "15551234567", "hello wal", "2026-11-02T12:00:00Z", 0),
+        )
+        writer.commit()
+
+        monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(db))
+        chats = whatsapp.list_chats()
+        assert len(chats) == 1
+        assert chats[0]["jid"] == "15551234567@s.whatsapp.net"
+
+        conn = whatsapp._connect_messages_db()
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                conn.execute("INSERT INTO chats (jid) VALUES ('blocked@s.whatsapp.net')")
+        finally:
+            conn.close()
+    finally:
+        writer.close()
+
+    # Still readable after the bridge/writer closes cleanly.
+    assert len(whatsapp.list_chats()) == 1
