@@ -85,6 +85,8 @@ class Message:
     filename: str | None = None
     # ID of the message this one is replying to (NULL for non-replies).
     quoted_message_id: str | None = None
+    # Starred on the phone or via star_message (bridge's starred_messages table).
+    starred: bool = False
 
 
 @dataclass
@@ -210,6 +212,7 @@ def msg_to_dict(message: Message, include_sender_name: bool = True) -> dict[str,
         "media_type": message.media_type,
         "reaction_to_message_id": (message.filename if message.media_type == "reaction" else None),
         "quoted_message_id": message.quoted_message_id,
+        "starred": message.starred,
     }
 
 
@@ -240,6 +243,38 @@ def contact_to_dict(contact: "Contact") -> dict[str, Any]:
 
 def _table_columns(cursor: sqlite3.Cursor, table: str) -> set[str]:
     return {row[1] for row in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _has_starred_table(cursor: sqlite3.Cursor) -> bool:
+    """Whether the bridge has created starred_messages (older bridges haven't)."""
+    row = cursor.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'starred_messages'").fetchone()
+    return row is not None
+
+
+# Starred filter for a query over `messages`; needs _has_starred_table.
+_STARRED_CLAUSE = (
+    "EXISTS (SELECT 1 FROM starred_messages s"
+    " WHERE s.chat_jid = messages.chat_jid AND s.message_id = messages.id AND s.starred = 1)"
+)
+
+
+def _annotate_starred(cursor: sqlite3.Cursor, messages: list[Message]) -> None:
+    """Set `starred` on each message from the bridge's starred_messages table."""
+    if not messages or not _has_starred_table(cursor):
+        return
+    keys = {(m.chat_jid, m.id) for m in messages}
+    ids = sorted({message_id for _, message_id in keys})
+    starred: set[tuple[str, str]] = set()
+    for start in range(0, len(ids), 500):  # stay under SQLite's variable limit
+        chunk = ids[start : start + 500]
+        rows = cursor.execute(
+            "SELECT chat_jid, message_id FROM starred_messages"
+            f" WHERE starred = 1 AND message_id IN ({', '.join('?' * len(chunk))})",
+            chunk,
+        ).fetchall()
+        starred.update(key for key in ((row[0], row[1]) for row in rows) if key in keys)
+    for message in messages:
+        message.starred = (message.chat_jid, message.id) in starred
 
 
 def _chat_state_select(cursor: sqlite3.Cursor, chat_alias: str) -> str:
@@ -630,6 +665,7 @@ def list_messages(
     context_before: int = 1,
     context_after: int = 1,
     sort_by: str = "newest",
+    starred_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Get messages matching the specified criteria with optional context.
 
@@ -645,9 +681,10 @@ def list_messages(
         context_before: Number of messages to include before each match (default 1)
         context_after: Number of messages to include after each match (default 1)
         sort_by: Sort order - "newest" (default) or "oldest" for chronological ordering
+        starred_only: Only return starred messages (context messages may still be unstarred)
 
     Returns:
-        List of message dictionaries with id, timestamp, sender, content, etc.
+        List of message dictionaries with id, timestamp, sender, content, starred, etc.
     """
     try:
         conn = _connect_messages_db()
@@ -696,6 +733,11 @@ def list_messages(
             where_clauses.append("(instr(LOWER(messages.content), LOWER(?)) > 0 OR instr(messages.content, ?) > 0)")
             params.extend([query, query])
 
+        if starred_only:
+            if not _has_starred_table(cursor):
+                return []
+            where_clauses.append(_STARRED_CLAUSE)
+
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
 
@@ -743,9 +785,10 @@ def list_messages(
                         seen_ids.add(ctx_msg.id)
                         messages_with_context.append(ctx_msg)
 
+            _annotate_starred(cursor, messages_with_context)
             return [msg_to_dict(msg) for msg in messages_with_context]
 
-        # Return messages without context
+        _annotate_starred(cursor, result)
         return [msg_to_dict(msg) for msg in result]
 
     except sqlite3.Error as e:
@@ -850,6 +893,7 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> Mes
                 )
             )
 
+        _annotate_starred(cursor, [target_message, *before_messages, *after_messages])
         return MessageContext(message=target_message, before=before_messages, after=after_messages)
 
     except sqlite3.Error as e:
@@ -1151,6 +1195,7 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
             id=msg_data[6],
             media_type=msg_data[7],
         )
+        _annotate_starred(cursor, [message])
 
         return msg_to_dict(message)
 
@@ -1467,6 +1512,33 @@ def mark_messages_read(
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "Unknown response")
+        return False, f"Error: HTTP {response.status_code} - {response.text}"
+
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+    except json.JSONDecodeError:
+        return False, f"Error parsing response: {response.text}"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+
+def star_message(chat_jid: str, message_id: str, starred: bool = True) -> tuple[bool, str]:
+    """Star or unstar a stored message through the WhatsApp bridge."""
+    try:
+        message_id = message_id.strip()
+        if not chat_jid or not message_id:
+            return False, "Chat JID and message ID must be provided"
+
+        response = requests.post(
+            f"{WHATSAPP_API_BASE_URL}/star",
+            json={"chat_jid": chat_jid, "message_id": message_id, "starred": starred},
+            headers=_bridge_headers(),
+        )
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "Unknown response")
+        if response.status_code == 404:
+            return False, f"Message {message_id} not found in chat {chat_jid}"
         return False, f"Error: HTTP {response.status_code} - {response.text}"
 
     except requests.RequestException as e:

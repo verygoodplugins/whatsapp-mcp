@@ -60,6 +60,9 @@ from whatsapp import (
 from whatsapp import (
     send_reaction as whatsapp_send_reaction,
 )
+from whatsapp import (
+    star_message as whatsapp_star_message,
+)
 
 # Initialize FastMCP server. Env-var handling is deferred to the __main__ block
 # so importing this module never parses env vars or exits the process.
@@ -191,6 +194,7 @@ def list_messages(
     context_before: int = 1,
     context_after: int = 1,
     sort_by: str = "newest",
+    starred_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Get WhatsApp messages matching specified criteria with optional context.
 
@@ -208,6 +212,8 @@ def list_messages(
         context_before: Messages to include before each match (default 1)
         context_after: Messages to include after each match (default 1)
         sort_by: "newest" (default, most recent first) or "oldest" (chronological)
+        starred_only: Only return messages starred on the phone (or via star_message).
+            Each message carries `starred`; context messages around a match may be unstarred.
     """
     # Cap limit at 500 to prevent excessive queries
     limit = max(1, min(limit, 500))
@@ -224,6 +230,7 @@ def list_messages(
         context_before=context_before,
         context_after=context_after,
         sort_by=sort_by,
+        starred_only=starred_only,
     )
     return messages
 
@@ -443,6 +450,26 @@ def mark_messages_read(
         A dictionary containing success status and a status message
     """
     success, status_message = whatsapp_mark_messages_read(message_ids, chat_jid, sender_jid, timestamp)
+    return {"success": success, "message": status_message}
+
+
+@mcp.tool()
+def star_message(chat_jid: str, message_id: str, starred: bool = True) -> dict[str, Any]:
+    """Star or unstar a WhatsApp message, as on the phone.
+
+    This is an explicit external side effect: the star syncs to the phone and every
+    linked device. The message must be one the bridge has stored (e.g. found via
+    list_messages), so it knows the sender.
+
+    Args:
+        chat_jid: JID of the chat containing the message
+        message_id: ID of the message
+        starred: True to star (default), False to unstar
+
+    Returns:
+        A dictionary containing success status and a status message
+    """
+    success, status_message = whatsapp_star_message(chat_jid, message_id, starred)
     return {"success": success, "message": status_message}
 
 

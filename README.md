@@ -187,12 +187,20 @@ Get messages with filters, date ranges, and sorting.
 - `before_date` (optional): Messages before this date (YYYY-MM-DD)
 - `after_date` (optional): Messages after this date (YYYY-MM-DD)
 - `sort_by` (optional): "newest" or "oldest" (default "newest")
+- `starred_only` (optional): Only messages starred on the phone (or with `star_message`)
+
+Each message carries `starred`. Stars mirror the phone: the bridge stores them
+from WhatsApp's app-state sync and re-downloads that state once per bridge
+start, so messages starred before upgrading are picked up without re-pairing.
+A starred message older than the bridge's stored history isn't listed until
+its message is stored.
 
 **Natural Language Examples:**
 
 - "Show me the last 100 messages from today"
 - "Get messages from the family group chat"
 - "Find messages from last week"
+- "Show my starred messages"
 
 #### `send_message`
 
@@ -232,6 +240,22 @@ automatically.
 
 - "Mark those messages as read"
 - "Mark the last three messages from Alice in the team group as read"
+
+#### `star_message`
+
+Star or unstar a message. The star syncs to the phone and every linked device.
+The message must be one the bridge has stored (e.g. found with `list_messages`).
+
+**Parameters:**
+
+- `chat_jid` (required): JID of the chat containing the message
+- `message_id` (required): ID of the message
+- `starred` (optional, default `true`): `false` unstars
+
+**Natural Language Examples:**
+
+- "Star that message"
+- "Show my starred messages from the family group"
 
 #### `send_reaction`
 

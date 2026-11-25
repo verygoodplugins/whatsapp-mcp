@@ -151,8 +151,8 @@ func appStateChatJID(client *whatsmeow.Client, jid types.JID) string {
 	return resolveLIDChat(client, jid, types.EmptyJID, types.EmptyJID, false).String()
 }
 
-// handleChatStateEvent stores archive / mute / mark-as-unread app-state
-// events. It reports whether evt was one of them.
+// handleChatStateEvent stores archive / mute / mark-as-unread / star
+// app-state events. It reports whether evt was one of them.
 func handleChatStateEvent(client *whatsmeow.Client, store *MessageStore, evt interface{}, logger waLog.Logger) bool {
 	switch v := evt.(type) {
 	case *events.Archive:
@@ -184,6 +184,8 @@ func handleChatStateEvent(client *whatsmeow.Client, store *MessageStore, evt int
 				logger.Warnf("Failed to mark chat %s read: %v", jid, err)
 			}
 		}
+	case *events.Star:
+		handleStarEvent(client, store, v, logger)
 	default:
 		return false
 	}
@@ -208,7 +210,7 @@ func storeHistoryChatState(store *MessageStore, chatJID string, conversation *wa
 }
 
 // chatStatePatches hold the archive / markChatAsRead (regular_low) and mute
-// (regular_high) mutations.
+// and star (regular_high) mutations.
 var chatStatePatches = []appstate.WAPatchName{appstate.WAPatchRegularLow, appstate.WAPatchRegularHigh}
 
 // chatStateSynced is set once a full chat app-state sync has succeeded in
@@ -220,7 +222,8 @@ var chatStateSynced atomic.Bool
 var chatStateSyncing atomic.Bool
 
 // syncChatStateOnce re-downloads the chat app-state snapshots so the bridge
-// learns the current archive / mute / marked-unread state of every chat,
+// learns the current archive / mute / marked-unread state of every chat
+// and every starred message,
 // including what was set before this bridge version stored it. Incremental
 // patches only carry changes; without this a long-linked device never sees
 // state set before the upgrade. The client must have
@@ -238,5 +241,5 @@ func syncChatStateOnce(ctx context.Context, client *whatsmeow.Client, logger waL
 		}
 	}
 	chatStateSynced.Store(true)
-	logger.Infof("Chat app-state (archive/mute/marked-unread) synced")
+	logger.Infof("Chat app-state (archive/mute/marked-unread/starred) synced")
 }

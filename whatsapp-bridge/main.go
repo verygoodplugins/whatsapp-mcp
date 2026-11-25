@@ -295,6 +295,9 @@ func ensureMessageStoreSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "messages", "quoted_message_id", "TEXT"); err != nil {
 		return fmt.Errorf("failed to ensure messages.quoted_message_id column: %w", err)
 	}
+	if err := ensureStarredMessagesTable(db); err != nil {
+		return err
+	}
 	return ensureChatStateColumns(db)
 }
 
@@ -1269,6 +1272,13 @@ type MarkReadRequest struct {
 	ChatJID    string   `json:"chat_jid"`
 	SenderJID  string   `json:"sender_jid,omitempty"`
 	Timestamp  string   `json:"timestamp,omitempty"`
+}
+
+// StarRequest is the request body for the /api/star endpoint.
+type StarRequest struct {
+	ChatJID   string `json:"chat_jid"`
+	MessageID string `json:"message_id"`
+	Starred   *bool  `json:"starred"`
 }
 
 // ReactRequest is the request body for the /api/react endpoint.
@@ -2719,6 +2729,45 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 		}
 
 		_ = json.NewEncoder(w).Encode(SendMessageResponse{Success: true, Message: "Messages marked as read"})
+	}))
+
+	// Handler for starring / unstarring a stored message. Takes effect on the
+	// phone and every linked device.
+	mux.HandleFunc("/api/star", auth(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req StarRequest
+		err := json.NewDecoder(r.Body).Decode(&req)
+		req.ChatJID, req.MessageID = strings.TrimSpace(req.ChatJID), strings.TrimSpace(req.MessageID)
+		if err != nil || req.ChatJID == "" || req.MessageID == "" || req.Starred == nil {
+			http.Error(w, "chat_jid, message_id and starred are required", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if !client.IsConnected() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(SendMessageResponse{
+				Success: false,
+				Message: "WhatsApp client is not connected. Please wait for reconnection.",
+			})
+			return
+		}
+		if err := sendStar(r.Context(), client, messageStore, req); err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, errStarMessageNotStored) {
+				status = http.StatusNotFound
+			}
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(SendMessageResponse{Success: false, Message: err.Error()})
+			return
+		}
+		message := "Message starred"
+		if !*req.Starred {
+			message = "Message unstarred"
+		}
+		_ = json.NewEncoder(w).Encode(SendMessageResponse{Success: true, Message: message})
 	}))
 
 	// Handler for sending (or removing) emoji reactions
