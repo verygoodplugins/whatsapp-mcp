@@ -107,7 +107,7 @@ func sendStar(ctx context.Context, client *whatsmeow.Client, store *MessageStore
 		}
 	}
 	patch := appstate.BuildStar(chat, sender, req.MessageID, isFromMe, *req.Starred)
-	if err := client.SendAppState(ctx, patch); err != nil {
+	if err := sendAppStateWithResync(ctx, whatsmeowAppState{client}, patch, client.Log.Warnf); err != nil {
 		return fmt.Errorf("send star: %w", err)
 	}
 	if err := store.SetMessageStarred(req.ChatJID, req.MessageID, *req.Starred, time.Now()); err != nil {
