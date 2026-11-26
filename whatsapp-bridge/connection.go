@@ -44,6 +44,7 @@ type connectionManager struct {
 	wg             sync.WaitGroup
 	connect        func(context.Context) error
 	disconnect     func()
+	socketAlive    func() bool
 	qrChannel      func(context.Context) (<-chan whatsmeow.QRChannelItem, error)
 	preparePairing func()
 	renderQR       func(string)
@@ -246,6 +247,31 @@ func (c *connectionManager) waitForAuthentication() {
 	}
 }
 
+// checkSocket catches a "connected" state with no live socket. whatsmeow
+// dispatches Connected after its post-connect IQ even when that IQ failed
+// because the socket had already closed, so a late Connected can overwrite the
+// Disconnected for the same socket. With auto-reconnect disabled, and the
+// keepalive loop gone with the socket, nothing else would ever retry.
+func (c *connectionManager) checkSocket() {
+	if c.socketAlive == nil {
+		return
+	}
+	c.mu.Lock()
+	seen := c.status.UpdatedAt
+	connected := c.status.State == "connected"
+	c.mu.Unlock()
+	// Ask the client outside the lock; only act if the state did not change
+	// meanwhile, so a connection that completes concurrently is left alone.
+	if !connected || c.socketAlive() {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.status.State == "connected" && c.status.UpdatedAt.Equal(seen) {
+		c.setLocked("disconnected", "Lost the connection to WhatsApp. Retrying shortly.", "socket_lost")
+	}
+}
+
 func (c *connectionManager) start() {
 	c.reconnect()
 	c.wg.Add(1)
@@ -258,6 +284,7 @@ func (c *connectionManager) start() {
 			case <-c.ctx.Done():
 				return
 			case <-ticker.C:
+				c.checkSocket()
 				c.mu.Lock()
 				retry := c.status.Paired && (c.status.State == "disconnected" || c.status.State == "error") && !time.Now().Before(c.nextRetry)
 				c.mu.Unlock()

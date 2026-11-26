@@ -179,6 +179,40 @@ func TestKeepaliveFailureRestoresReconnectReadiness(t *testing.T) {
 		t.Fatal("keepalive recovery did not restore readiness")
 	}
 }
+func TestLateConnectedWithoutSocketStillRetries(t *testing.T) {
+	c := newConnectionManager(true)
+	defer c.cancel()
+	alive := &atomic.Bool{}
+	c.socketAlive = alive.Load
+	// The socket drops during the post-connect IQ; whatsmeow then still
+	// dispatches Connected about five seconds after Disconnected.
+	c.handleEvent(&events.Disconnected{})
+	c.handleEvent(&events.Connected{})
+	c.checkSocket()
+	s := c.snapshot()
+	if s.Connected || s.State != "disconnected" || s.LastError == nil || s.LastError.Code != "socket_lost" {
+		t.Fatalf("dead socket still reported healthy: %+v", s)
+	}
+	alive.Store(true)
+	c.handleEvent(&events.Connected{})
+	c.checkSocket()
+	if !c.snapshot().Connected {
+		t.Fatal("live socket marked lost")
+	}
+}
+func TestSocketCheckIgnoresStatesOtherThanConnected(t *testing.T) {
+	c := newConnectionManager(true)
+	defer c.cancel()
+	c.socketAlive = func() bool { return false }
+	for _, evt := range []interface{}{&events.LoggedOut{}, &events.ClientOutdated{}, &events.Disconnected{}} {
+		c.handleEvent(evt)
+		before := c.snapshot()
+		c.checkSocket()
+		if after := c.snapshot(); after.State != before.State || !after.UpdatedAt.Equal(before.UpdatedAt) {
+			t.Fatalf("socket check rewrote %q to %q", before.State, after.State)
+		}
+	}
+}
 func TestPairSuccessStillTimesOutAndCanRetryAuthentication(t *testing.T) {
 	c, codes, attempts := pairingFixture(t)
 	c.authTimeout = 10 * time.Millisecond
