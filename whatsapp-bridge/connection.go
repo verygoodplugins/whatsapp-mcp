@@ -39,6 +39,7 @@ type connectionManager struct {
 	active         bool
 	stopped        bool
 	nextRetry      time.Time
+	gen            uint64 // bumped by every setLocked, so checkSocket can tell the state moved
 	ctx            context.Context
 	cancel         context.CancelFunc
 	wg             sync.WaitGroup
@@ -87,6 +88,7 @@ func (c *connectionManager) setLocked(state, message, code string) {
 	c.status.QRCode = nil
 	c.status.QRExpiresAt = nil
 	c.status.UpdatedAt = time.Now().UTC()
+	c.gen++
 	c.status.LastError = nil
 	if code != "" {
 		c.status.LastError = &connectionError{Code: code, Message: message}
@@ -257,8 +259,10 @@ func (c *connectionManager) checkSocket() {
 		return
 	}
 	c.mu.Lock()
-	seen := c.status.UpdatedAt
-	connected := c.status.State == "connected"
+	seen, since := c.gen, c.status.UpdatedAt
+	// An attempt in progress owns the socket: a stale Connected landing while it
+	// reconnects must not cut the new connection short.
+	connected := c.status.State == "connected" && !c.active
 	c.mu.Unlock()
 	// Ask the client outside the lock; only act if the state did not change
 	// meanwhile, so a connection that completes concurrently is left alone.
@@ -267,7 +271,8 @@ func (c *connectionManager) checkSocket() {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.status.State == "connected" && c.status.UpdatedAt.Equal(seen) {
+	if c.status.State == "connected" && !c.active && c.gen == seen {
+		fmt.Printf("Connection: no live socket after %s marked connected (socket_lost); retrying shortly\n", time.Since(since).Round(time.Second))
 		c.setLocked("disconnected", "Lost the connection to WhatsApp. Retrying shortly.", "socket_lost")
 	}
 }

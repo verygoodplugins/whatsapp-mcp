@@ -179,7 +179,7 @@ func TestKeepaliveFailureRestoresReconnectReadiness(t *testing.T) {
 		t.Fatal("keepalive recovery did not restore readiness")
 	}
 }
-func TestLateConnectedWithoutSocketStillRetries(t *testing.T) {
+func TestLateConnectedWithoutSocketIsMarkedLost(t *testing.T) {
 	c := newConnectionManager(true)
 	defer c.cancel()
 	alive := &atomic.Bool{}
@@ -193,6 +193,17 @@ func TestLateConnectedWithoutSocketStillRetries(t *testing.T) {
 	if s.Connected || s.State != "disconnected" || s.LastError == nil || s.LastError.Code != "socket_lost" {
 		t.Fatalf("dead socket still reported healthy: %+v", s)
 	}
+	if wait := time.Until(c.nextRetry); wait > 5*time.Second {
+		t.Fatalf("socket_lost retry pushed out by %s", wait)
+	}
+	// While an attempt is reconnecting, a stale Connected is left to it.
+	c.handleEvent(&events.Connected{})
+	c.active = true
+	c.checkSocket()
+	if !c.snapshot().Connected {
+		t.Fatal("socket check interfered with an attempt in progress")
+	}
+	c.active = false
 	alive.Store(true)
 	c.handleEvent(&events.Connected{})
 	c.checkSocket()

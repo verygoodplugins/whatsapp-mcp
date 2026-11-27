@@ -266,8 +266,9 @@ connection_state="\$(print -r -- "\$HEALTH" | sed -nE 's/.*"state"[[:space:]]*:[
 connection_state="\${connection_state:-disconnected}"
 [[ "\$connection_state" == "pairing" ]] && connection_state="logged_out"
 previous_state="\$(cat "\$STATE_DIR/connection-state" 2>/dev/null || true)"
-if [[ "\$connection_state" == "connecting" ]]; then
-  # Track the outage across attempts: a 60s monitor can miss each 45s timeout.
+if [[ "\$connection_state" == "connecting" || "\$connection_state" == "disconnected" ]]; then
+  # Track the outage across attempts: a 60s monitor can miss each 45s timeout,
+  # and a dropped socket (socket_lost) sits "disconnected" for the 5s before its retry.
   if [[ ! -f "\$STATE_DIR/connection-started" ]]; then
     date +%s > "\$STATE_DIR/connection-started"
   fi
