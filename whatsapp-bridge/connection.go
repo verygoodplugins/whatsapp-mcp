@@ -39,11 +39,13 @@ type connectionManager struct {
 	active         bool
 	stopped        bool
 	nextRetry      time.Time
+	gen            uint64 // bumped by every setLocked, so checkSocket can tell the state moved
 	ctx            context.Context
 	cancel         context.CancelFunc
 	wg             sync.WaitGroup
 	connect        func(context.Context) error
 	disconnect     func()
+	socketAlive    func() bool
 	qrChannel      func(context.Context) (<-chan whatsmeow.QRChannelItem, error)
 	preparePairing func()
 	renderQR       func(string)
@@ -86,6 +88,7 @@ func (c *connectionManager) setLocked(state, message, code string) {
 	c.status.QRCode = nil
 	c.status.QRExpiresAt = nil
 	c.status.UpdatedAt = time.Now().UTC()
+	c.gen++
 	c.status.LastError = nil
 	if code != "" {
 		c.status.LastError = &connectionError{Code: code, Message: message}
@@ -246,6 +249,34 @@ func (c *connectionManager) waitForAuthentication() {
 	}
 }
 
+// checkSocket catches a "connected" state with no live socket. whatsmeow
+// dispatches Connected after its post-connect IQ even when that IQ failed
+// because the socket had already closed, so a late Connected can overwrite the
+// Disconnected for the same socket. With auto-reconnect disabled, and the
+// keepalive loop gone with the socket, nothing else would ever retry.
+func (c *connectionManager) checkSocket() {
+	if c.socketAlive == nil {
+		return
+	}
+	c.mu.Lock()
+	seen, since := c.gen, c.status.UpdatedAt
+	// An attempt in progress owns the socket: a stale Connected landing while it
+	// reconnects must not cut the new connection short.
+	connected := c.status.State == "connected" && !c.active
+	c.mu.Unlock()
+	// Ask the client outside the lock; only act if the state did not change
+	// meanwhile, so a connection that completes concurrently is left alone.
+	if !connected || c.socketAlive() {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.status.State == "connected" && !c.active && c.gen == seen {
+		fmt.Printf("Connection: no live socket after %s marked connected (socket_lost); retrying shortly\n", time.Since(since).Round(time.Second))
+		c.setLocked("disconnected", "Lost the connection to WhatsApp. Retrying shortly.", "socket_lost")
+	}
+}
+
 func (c *connectionManager) start() {
 	c.reconnect()
 	c.wg.Add(1)
@@ -258,6 +289,7 @@ func (c *connectionManager) start() {
 			case <-c.ctx.Done():
 				return
 			case <-ticker.C:
+				c.checkSocket()
 				c.mu.Lock()
 				retry := c.status.Paired && (c.status.State == "disconnected" || c.status.State == "error") && !time.Now().Before(c.nextRetry)
 				c.mu.Unlock()

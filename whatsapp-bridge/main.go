@@ -3156,6 +3156,7 @@ func main() {
 	connection.client.Store(client)
 	connection.connect = func(ctx context.Context) error { return connection.client.Load().ConnectContext(ctx) }
 	connection.disconnect = func() { connection.client.Load().Disconnect() }
+	connection.socketAlive = func() bool { return connection.client.Load().IsConnected() }
 	connection.qrChannel = func(ctx context.Context) (<-chan whatsmeow.QRChannelItem, error) {
 		return connection.client.Load().GetQRChannel(ctx)
 	}
